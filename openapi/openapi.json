@@ -1,0 +1,1137 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "RepoVista API",
+    "version": "0.1.0",
+    "description": "Evidence-first repository indexing, architecture maps, source retrieval, grounded answers, and immutable share reports."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:4000",
+      "description": "Local development"
+    }
+  ],
+  "tags": [
+    { "name": "Health" },
+    { "name": "Repositories" },
+    { "name": "Snapshots" },
+    { "name": "Jobs" },
+    { "name": "Answers" },
+    { "name": "Shares" }
+  ],
+  "paths": {
+    "/v1/health/live": {
+      "get": {
+        "operationId": "getLiveness",
+        "summary": "Check whether the API process is alive",
+        "tags": ["Health"],
+        "responses": {
+          "200": {
+            "description": "API process is alive",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Health" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/health/ready": {
+      "get": {
+        "operationId": "getReadiness",
+        "summary": "Check API and database readiness",
+        "tags": ["Health"],
+        "responses": {
+          "200": {
+            "description": "API and database are ready",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Health" }
+              }
+            }
+          },
+          "503": {
+            "description": "Database is unavailable",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthUnavailable" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/repositories": {
+      "post": {
+        "operationId": "createRepositoryImport",
+        "summary": "Queue a public GitHub repository for indexing",
+        "tags": ["Repositories"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateRepositoryRequest" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Import accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/CreateRepositoryResult" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      },
+      "get": {
+        "operationId": "listRepositories",
+        "summary": "List repositories in the public workspace",
+        "tags": ["Repositories"],
+        "responses": {
+          "200": {
+            "description": "Repository list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/RepositorySummary" }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/repositories/{repositoryId}": {
+      "parameters": [{ "$ref": "#/components/parameters/RepositoryId" }],
+      "get": {
+        "operationId": "getRepository",
+        "summary": "Get one repository",
+        "tags": ["Repositories"],
+        "responses": {
+          "200": {
+            "description": "Repository details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": { "data": { "$ref": "#/components/schemas/RepositorySummary" } }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/repositories/{repositoryId}/snapshots": {
+      "parameters": [{ "$ref": "#/components/parameters/RepositoryId" }],
+      "get": {
+        "operationId": "listRepositorySnapshots",
+        "summary": "List immutable snapshots for a repository",
+        "tags": ["Repositories", "Snapshots"],
+        "responses": {
+          "200": {
+            "description": "Snapshot list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/Snapshot" }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}": {
+      "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
+      "get": {
+        "operationId": "getSnapshot",
+        "summary": "Get snapshot status and statistics",
+        "tags": ["Snapshots"],
+        "responses": {
+          "200": {
+            "description": "Snapshot details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    { "properties": { "data": { "$ref": "#/components/schemas/Snapshot" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/cancel": {
+      "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
+      "post": {
+        "operationId": "cancelSnapshot",
+        "summary": "Request cancellation of an active snapshot",
+        "tags": ["Snapshots"],
+        "responses": {
+          "202": {
+            "description": "Cancellation state accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/CancellationResult" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/jobs/{jobId}": {
+      "parameters": [{ "$ref": "#/components/parameters/JobId" }],
+      "get": {
+        "operationId": "getJob",
+        "summary": "Get indexing job progress",
+        "tags": ["Jobs"],
+        "responses": {
+          "200": {
+            "description": "Job state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    { "properties": { "data": { "$ref": "#/components/schemas/Job" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/jobs/{jobId}/events": {
+      "parameters": [{ "$ref": "#/components/parameters/JobId" }],
+      "get": {
+        "operationId": "streamJobEvents",
+        "summary": "Stream indexing events with Server-Sent Events",
+        "tags": ["Jobs"],
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 0, "default": 0 }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "schema": { "type": "integer", "minimum": 0 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream; event types include started, progress, completed, failed, and cancelled",
+            "content": {
+              "text/event-stream": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/map": {
+      "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
+      "get": {
+        "operationId": "getSnapshotMap",
+        "summary": "Get a filtered package, file, or symbol graph",
+        "tags": ["Snapshots"],
+        "parameters": [
+          {
+            "name": "level",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/GraphLevel" }
+          },
+          {
+            "name": "rootId",
+            "in": "query",
+            "schema": { "type": "string", "maxLength": 1000 }
+          },
+          {
+            "name": "depth",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 0, "maximum": 4, "default": 1 }
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "schema": { "type": "string", "maxLength": 500 }
+          },
+          {
+            "name": "relationTypes",
+            "in": "query",
+            "description": "Comma-separated relation types or repeated query parameters.",
+            "schema": {
+              "oneOf": [
+                { "type": "string" },
+                { "type": "array", "items": { "$ref": "#/components/schemas/RelationType" } }
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Architecture graph",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    { "properties": { "data": { "$ref": "#/components/schemas/GraphResponse" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/files": {
+      "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
+      "get": {
+        "operationId": "listSnapshotFiles",
+        "summary": "List indexed files with cursor pagination",
+        "tags": ["Snapshots"],
+        "parameters": [
+          { "name": "cursor", "in": "query", "schema": { "type": "string", "maxLength": 1000 } },
+          { "name": "language", "in": "query", "schema": { "type": "string", "maxLength": 100 } },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+          },
+          { "name": "path", "in": "query", "schema": { "type": "string", "maxLength": 1000 } },
+          { "name": "query", "in": "query", "schema": { "type": "string", "maxLength": 500 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "File page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": { "data": { "$ref": "#/components/schemas/SnapshotFilePage" } }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/source": {
+      "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
+      "get": {
+        "operationId": "getSnapshotSource",
+        "summary": "Read source pinned to a snapshot commit",
+        "tags": ["Snapshots"],
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 1000 }
+          },
+          { "name": "startLine", "in": "query", "schema": { "type": "integer", "minimum": 1 } },
+          { "name": "endLine", "in": "query", "schema": { "type": "integer", "minimum": 1 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Source file or requested line slice",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    { "properties": { "data": { "$ref": "#/components/schemas/SourceFile" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/search": {
+      "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
+      "get": {
+        "operationId": "searchSnapshot",
+        "summary": "Search snapshot evidence",
+        "tags": ["Snapshots"],
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 2, "maxLength": 4000 }
+          },
+          {
+            "name": "mode",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": ["text", "symbol", "hybrid"],
+              "default": "hybrid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ranked evidence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    { "properties": { "data": { "$ref": "#/components/schemas/SearchResult" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/repositories/{repositoryId}/ask": {
+      "parameters": [{ "$ref": "#/components/parameters/RepositoryId" }],
+      "post": {
+        "operationId": "askRepository",
+        "summary": "Generate an evidence-backed repository answer",
+        "tags": ["Answers"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AskRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Verified answer and retrieved evidence",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    { "properties": { "data": { "$ref": "#/components/schemas/AskResult" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": { "$ref": "#/components/responses/UpstreamFailure" }
+        }
+      }
+    },
+    "/v1/share-reports": {
+      "post": {
+        "operationId": "createShareReport",
+        "summary": "Create a public report pinned to a ready snapshot",
+        "tags": ["Shares"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateShareRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Share report created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": { "data": { "$ref": "#/components/schemas/CreateShareResult" } }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "429": { "$ref": "#/components/responses/RateLimited" }
+        }
+      }
+    },
+    "/v1/share-reports/{slug}": {
+      "parameters": [{ "$ref": "#/components/parameters/ShareSlug" }],
+      "get": {
+        "operationId": "getShareReport",
+        "summary": "Get a public immutable architecture report",
+        "tags": ["Shares"],
+        "responses": {
+          "200": {
+            "description": "Share report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    { "properties": { "data": { "$ref": "#/components/schemas/ShareReport" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "RepositoryId": {
+        "name": "repositoryId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "SnapshotId": {
+        "name": "snapshotId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "JobId": {
+        "name": "jobId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "ShareSlug": {
+        "name": "slug",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "minLength": 3, "maxLength": 300 }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Invalid input",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/FailureEnvelope" }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Resource not found",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/FailureEnvelope" }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Snapshot is not ready",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/FailureEnvelope" }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Rate limit exceeded",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/FailureEnvelope" }
+          }
+        }
+      },
+      "UpstreamFailure": {
+        "description": "Configured model provider failed",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/FailureEnvelope" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Uuid": { "type": "string", "format": "uuid" },
+      "DateTime": { "type": "string", "format": "date-time" },
+      "Health": {
+        "type": "object",
+        "required": ["status"],
+        "properties": { "status": { "const": "ok" } }
+      },
+      "HealthUnavailable": {
+        "type": "object",
+        "required": ["status"],
+        "properties": { "status": { "const": "unavailable" } }
+      },
+      "SuccessEnvelope": {
+        "type": "object",
+        "required": ["data", "meta"],
+        "properties": {
+          "data": {},
+          "meta": {
+            "type": "object",
+            "required": ["requestId"],
+            "properties": { "requestId": { "type": "string" } }
+          }
+        }
+      },
+      "FailureEnvelope": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message", "retryable", "requestId"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" },
+              "details": { "type": "object", "additionalProperties": true },
+              "retryable": { "type": "boolean" },
+              "requestId": { "type": "string" }
+            }
+          }
+        }
+      },
+      "SnapshotStatus": {
+        "type": "string",
+        "enum": [
+          "requested",
+          "cloning",
+          "scanning",
+          "parsing",
+          "building_graph",
+          "embedding",
+          "ready",
+          "failed",
+          "cancelled"
+        ]
+      },
+      "JobStatus": {
+        "type": "string",
+        "enum": ["queued", "running", "succeeded", "failed", "cancelled"]
+      },
+      "GraphLevel": {
+        "type": "string",
+        "enum": ["package", "file", "symbol"],
+        "default": "package"
+      },
+      "RelationType": {
+        "type": "string",
+        "enum": [
+          "contains",
+          "imports",
+          "calls",
+          "extends",
+          "implements",
+          "exports",
+          "reads",
+          "writes"
+        ]
+      },
+      "CreateRepositoryRequest": {
+        "type": "object",
+        "required": ["url"],
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri",
+            "examples": ["https://github.com/owner/repository"]
+          },
+          "ref": { "type": "string", "minLength": 1, "maxLength": 255 },
+          "ignore": {
+            "type": "array",
+            "maxItems": 100,
+            "default": [],
+            "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+          }
+        }
+      },
+      "CreateRepositoryResult": {
+        "type": "object",
+        "required": ["repositoryId", "snapshotId", "jobId", "status"],
+        "properties": {
+          "repositoryId": { "$ref": "#/components/schemas/Uuid" },
+          "snapshotId": { "$ref": "#/components/schemas/Uuid" },
+          "jobId": { "$ref": "#/components/schemas/Uuid" },
+          "status": { "const": "queued" }
+        }
+      },
+      "RepositorySummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "owner",
+          "name",
+          "canonicalUrl",
+          "defaultBranch",
+          "latestSnapshotId",
+          "latestSnapshotStatus",
+          "latestCommitSha",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "owner": { "type": "string" },
+          "name": { "type": "string" },
+          "canonicalUrl": { "type": "string", "format": "uri" },
+          "defaultBranch": { "type": ["string", "null"] },
+          "latestSnapshotId": {
+            "oneOf": [{ "$ref": "#/components/schemas/Uuid" }, { "type": "null" }]
+          },
+          "latestSnapshotStatus": {
+            "oneOf": [{ "$ref": "#/components/schemas/SnapshotStatus" }, { "type": "null" }]
+          },
+          "latestCommitSha": { "type": ["string", "null"] },
+          "createdAt": { "$ref": "#/components/schemas/DateTime" },
+          "updatedAt": { "$ref": "#/components/schemas/DateTime" }
+        }
+      },
+      "SnapshotStats": {
+        "type": "object",
+        "required": ["files", "symbols", "edges", "languages", "warnings"],
+        "properties": {
+          "files": { "type": "integer", "minimum": 0 },
+          "symbols": { "type": "integer", "minimum": 0 },
+          "edges": { "type": "integer", "minimum": 0 },
+          "languages": {
+            "type": "object",
+            "additionalProperties": { "type": "integer", "minimum": 0 }
+          },
+          "warnings": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "Snapshot": {
+        "type": "object",
+        "required": [
+          "id",
+          "repositoryId",
+          "commitSha",
+          "refName",
+          "status",
+          "parserVersion",
+          "stats",
+          "requestedAt",
+          "readyAt",
+          "failure"
+        ],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "repositoryId": { "$ref": "#/components/schemas/Uuid" },
+          "commitSha": { "type": ["string", "null"] },
+          "refName": { "type": ["string", "null"] },
+          "status": { "$ref": "#/components/schemas/SnapshotStatus" },
+          "parserVersion": { "type": "string" },
+          "stats": { "$ref": "#/components/schemas/SnapshotStats" },
+          "requestedAt": { "$ref": "#/components/schemas/DateTime" },
+          "readyAt": {
+            "oneOf": [{ "$ref": "#/components/schemas/DateTime" }, { "type": "null" }]
+          },
+          "failure": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["code", "message"],
+                "properties": {
+                  "code": { "type": "string" },
+                  "message": { "type": "string" }
+                }
+              },
+              { "type": "null" }
+            ]
+          }
+        }
+      },
+      "Job": {
+        "type": "object",
+        "required": [
+          "id",
+          "snapshotId",
+          "type",
+          "status",
+          "phase",
+          "progress",
+          "processed",
+          "total",
+          "retryable",
+          "error"
+        ],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "snapshotId": { "$ref": "#/components/schemas/Uuid" },
+          "type": { "type": "string" },
+          "status": { "$ref": "#/components/schemas/JobStatus" },
+          "phase": { "type": ["string", "null"] },
+          "progress": { "type": "number", "minimum": 0, "maximum": 1 },
+          "processed": { "type": ["integer", "null"], "minimum": 0 },
+          "total": { "type": ["integer", "null"], "minimum": 0 },
+          "retryable": { "type": "boolean" },
+          "error": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["code", "message"],
+                "properties": {
+                  "code": { "type": "string" },
+                  "message": { "type": "string" }
+                }
+              },
+              { "type": "null" }
+            ]
+          }
+        }
+      },
+      "CancellationResult": {
+        "type": "object",
+        "required": ["snapshotId", "status"],
+        "properties": {
+          "snapshotId": { "$ref": "#/components/schemas/Uuid" },
+          "status": { "type": "string", "enum": ["cancelled", "cancellation_requested"] }
+        }
+      },
+      "SourceRange": {
+        "type": "object",
+        "required": ["startLine", "endLine"],
+        "properties": {
+          "startLine": { "type": "integer", "minimum": 1 },
+          "endLine": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "GraphNode": {
+        "type": "object",
+        "required": ["id", "level", "kind", "label", "path", "range", "importance", "metadata"],
+        "properties": {
+          "id": { "type": "string" },
+          "level": { "$ref": "#/components/schemas/GraphLevel" },
+          "kind": { "type": "string" },
+          "label": { "type": "string" },
+          "path": { "type": ["string", "null"] },
+          "range": {
+            "oneOf": [{ "$ref": "#/components/schemas/SourceRange" }, { "type": "null" }]
+          },
+          "importance": { "type": "number", "minimum": 0, "maximum": 1 },
+          "metadata": { "type": "object", "additionalProperties": true }
+        }
+      },
+      "GraphEdge": {
+        "type": "object",
+        "required": ["id", "from", "to", "type", "confidence"],
+        "properties": {
+          "id": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "type": { "$ref": "#/components/schemas/RelationType" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      },
+      "GraphResponse": {
+        "type": "object",
+        "required": ["snapshot", "level", "nodes", "edges", "truncated"],
+        "properties": {
+          "snapshot": {
+            "type": "object",
+            "required": ["id", "commitSha", "parserVersion"],
+            "properties": {
+              "id": { "$ref": "#/components/schemas/Uuid" },
+              "commitSha": { "type": "string" },
+              "parserVersion": { "type": "string" }
+            }
+          },
+          "level": { "$ref": "#/components/schemas/GraphLevel" },
+          "nodes": { "type": "array", "items": { "$ref": "#/components/schemas/GraphNode" } },
+          "edges": { "type": "array", "items": { "$ref": "#/components/schemas/GraphEdge" } },
+          "truncated": { "type": "boolean" }
+        }
+      },
+      "SnapshotFileSummary": {
+        "type": "object",
+        "required": ["id", "path", "language", "byteSize", "lineCount", "blobHash", "parseStatus"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "path": { "type": "string" },
+          "language": { "type": ["string", "null"] },
+          "byteSize": { "type": "integer", "minimum": 0 },
+          "lineCount": { "type": "integer", "minimum": 0 },
+          "blobHash": { "type": "string" },
+          "parseStatus": { "type": "string" }
+        }
+      },
+      "SnapshotFilePage": {
+        "type": "object",
+        "required": ["files", "nextCursor"],
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/SnapshotFileSummary" }
+          },
+          "nextCursor": { "type": ["string", "null"] }
+        }
+      },
+      "SourceFile": {
+        "type": "object",
+        "required": [
+          "id",
+          "path",
+          "language",
+          "content",
+          "lineCount",
+          "startLine",
+          "commitSha",
+          "blobHash",
+          "truncated"
+        ],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "path": { "type": "string" },
+          "language": { "type": ["string", "null"] },
+          "content": { "type": "string" },
+          "lineCount": { "type": "integer", "minimum": 0 },
+          "startLine": { "type": "integer", "minimum": 1 },
+          "commitSha": { "type": "string" },
+          "blobHash": { "type": "string" },
+          "truncated": { "type": "boolean" }
+        }
+      },
+      "Evidence": {
+        "type": "object",
+        "required": [
+          "id",
+          "snapshotId",
+          "commitSha",
+          "fileId",
+          "path",
+          "symbolId",
+          "symbol",
+          "startLine",
+          "endLine",
+          "content",
+          "contentHash",
+          "score"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "snapshotId": { "$ref": "#/components/schemas/Uuid" },
+          "commitSha": { "type": "string" },
+          "fileId": { "$ref": "#/components/schemas/Uuid" },
+          "path": { "type": "string" },
+          "symbolId": {
+            "oneOf": [{ "$ref": "#/components/schemas/Uuid" }, { "type": "null" }]
+          },
+          "symbol": { "type": ["string", "null"] },
+          "startLine": { "type": "integer", "minimum": 1 },
+          "endLine": { "type": "integer", "minimum": 1 },
+          "content": { "type": "string" },
+          "contentHash": { "type": "string" },
+          "score": { "type": "number" }
+        }
+      },
+      "SearchResult": {
+        "type": "object",
+        "required": ["mode", "results"],
+        "properties": {
+          "mode": { "type": "string", "enum": ["text", "symbol", "hybrid"] },
+          "results": { "type": "array", "items": { "$ref": "#/components/schemas/Evidence" } }
+        }
+      },
+      "AskRequest": {
+        "type": "object",
+        "required": ["question"],
+        "properties": {
+          "question": { "type": "string", "minLength": 2, "maxLength": 4000 },
+          "snapshotId": { "$ref": "#/components/schemas/Uuid" },
+          "provider": { "type": "string", "enum": ["fake", "ollama", "openai-compatible"] },
+          "model": { "type": "string", "maxLength": 200 }
+        }
+      },
+      "Citation": {
+        "type": "object",
+        "required": ["evidenceId", "path", "symbol", "startLine", "endLine", "quote"],
+        "properties": {
+          "evidenceId": { "type": "string" },
+          "path": { "type": "string" },
+          "symbol": { "type": ["string", "null"] },
+          "startLine": { "type": "integer", "minimum": 1 },
+          "endLine": { "type": "integer", "minimum": 1 },
+          "quote": { "type": "string" }
+        }
+      },
+      "GroundedAnswer": {
+        "type": "object",
+        "required": ["summary", "steps", "limitations", "status", "citations", "provider", "model"],
+        "properties": {
+          "summary": { "type": "string" },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["text", "evidenceIds"],
+              "properties": {
+                "text": { "type": "string" },
+                "evidenceIds": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          },
+          "limitations": { "type": "array", "items": { "type": "string" } },
+          "status": { "type": "string", "enum": ["grounded", "partial", "refused"] },
+          "citations": { "type": "array", "items": { "$ref": "#/components/schemas/Citation" } },
+          "provider": { "type": "string" },
+          "model": { "type": "string" }
+        }
+      },
+      "AskResult": {
+        "type": "object",
+        "required": ["messageId", "answer", "evidence"],
+        "properties": {
+          "messageId": { "$ref": "#/components/schemas/Uuid" },
+          "answer": { "$ref": "#/components/schemas/GroundedAnswer" },
+          "evidence": { "type": "array", "items": { "$ref": "#/components/schemas/Evidence" } }
+        }
+      },
+      "CreateShareRequest": {
+        "type": "object",
+        "required": ["snapshotId"],
+        "properties": {
+          "snapshotId": { "$ref": "#/components/schemas/Uuid" },
+          "title": { "type": "string", "minLength": 1, "maxLength": 200 }
+        }
+      },
+      "CreateShareResult": {
+        "type": "object",
+        "required": ["id", "slug"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "slug": { "type": "string" }
+        }
+      },
+      "ShareReport": {
+        "type": "object",
+        "required": ["id", "slug", "title", "repository", "snapshot", "content", "createdAt"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "slug": { "type": "string" },
+          "title": { "type": "string" },
+          "repository": { "$ref": "#/components/schemas/RepositorySummary" },
+          "snapshot": { "$ref": "#/components/schemas/Snapshot" },
+          "content": {
+            "type": "object",
+            "required": ["overview", "readingPath", "map"],
+            "properties": {
+              "overview": { "type": "string" },
+              "readingPath": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["path", "reason"],
+                  "properties": {
+                    "path": { "type": "string" },
+                    "reason": { "type": "string" }
+                  }
+                }
+              },
+              "map": {
+                "type": "object",
+                "required": ["nodes", "edges", "truncated"],
+                "properties": {
+                  "nodes": {
+                    "type": "array",
+                    "items": { "$ref": "#/components/schemas/GraphNode" }
+                  },
+                  "edges": {
+                    "type": "array",
+                    "items": { "$ref": "#/components/schemas/GraphEdge" }
+                  },
+                  "truncated": { "type": "boolean" }
+                }
+              }
+            }
+          },
+          "createdAt": { "$ref": "#/components/schemas/DateTime" }
+        }
+      }
+    }
+  }
+}

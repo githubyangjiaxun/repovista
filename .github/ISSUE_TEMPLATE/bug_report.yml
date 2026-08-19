@@ -1,0 +1,69 @@
+name: Bug report
+description: Report a reproducible RepoVista defect.
+title: "[Bug]: "
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for helping make repository analysis safer and more reliable.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Include the smallest safe sequence of steps, repository URL, and fixed commit when possible.
+      placeholder: |
+        1. Start RepoVista with …
+        2. Import https://github.com/owner/repository at commit …
+        3. Open …
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Repository import or worker
+        - Architecture map or source viewer
+        - Evidence-backed answers
+        - API or database
+        - Web interface
+        - Docker or deployment
+        - Documentation
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: RepoVista version or commit
+      placeholder: v0.1.0 or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Node.js version, browser, database, and deployment method.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Remove credentials, private source, tokens, and personal data before posting.
+      render: shell
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secrets and private repository content from this report.
+          required: true
+        - label: I searched existing issues for the same problem.
+          required: true

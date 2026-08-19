@@ -1,0 +1,111 @@
+name: repovista
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+    environment:
+      POSTGRES_DB: repovista
+      POSTGRES_PASSWORD: repovista
+      POSTGRES_USER: repovista
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U repovista -d repovista"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+    environment:
+      APP_ENV: production
+      API_PORT: 4000
+      DATABASE_URL: postgresql://repovista:repovista@postgres:5432/repovista
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-fake}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OPENAI_COMPATIBLE_API_KEY: ${OPENAI_COMPATIBLE_API_KEY:-}
+      OPENAI_COMPATIBLE_BASE_URL: ${OPENAI_COMPATIBLE_BASE_URL:-}
+      CHAT_MODEL: ${CHAT_MODEL:-}
+      RUN_MIGRATIONS_ON_START: "true"
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4000/v1/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    ports:
+      - "${API_PORT:-4000}:4000"
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql://repovista:repovista@postgres:5432/repovista
+      JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-30}
+      JOB_POLL_INTERVAL_MS: ${JOB_POLL_INTERVAL_MS:-1000}
+      JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-900}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      RUN_MIGRATIONS_ON_START: "false"
+      WORKER_ID: ${WORKER_ID:-compose-worker}
+    depends_on:
+      api:
+        condition: service_healthy
+    tmpfs:
+      - /tmp:size=768m,mode=1777
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+        NEXT_PUBLIC_API_ORIGIN: ${API_ORIGIN:-http://localhost:4000}
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

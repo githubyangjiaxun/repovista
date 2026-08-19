@@ -14,10 +14,11 @@
     "typecheck": "turbo run typecheck",
     "lint": "biome check .",
     "format": "biome format --write .",
+    "openapi:check": "node scripts/validate-openapi.mjs",
     "test": "turbo run test",
     "test:coverage": "turbo run test:coverage",
     "test:e2e": "pnpm --filter @repovista/web test:e2e",
-    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "check": "pnpm openapi:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build",
     "db:migrate": "pnpm --filter @repovista/database migrate",
     "db:seed": "pnpm --filter @repovista/database seed",
     "benchmark": "pnpm --filter @repovista/benchmarks benchmark"

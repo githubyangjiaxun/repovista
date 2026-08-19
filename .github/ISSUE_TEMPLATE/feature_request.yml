@@ -1,0 +1,48 @@
+name: Feature request
+description: Propose a focused improvement to RepoVista.
+title: "[Feature]: "
+labels: [enhancement, needs-triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Explain the user problem before proposing an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed experience
+      description: Describe the smallest useful user flow and its expected outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and trust impact
+      description: If AI or analysis changes, explain evidence sources, failure behavior, and privacy implications.
+    validations:
+      required: true
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - v0.1 core workflow
+        - Parser or graph capability
+        - AI provider or retrieval
+        - Developer experience
+        - Deployment or operations
+        - Documentation
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked the roadmap and existing issues.
+          required: true
+        - label: This request does not require executing imported repository code.
+          required: true
