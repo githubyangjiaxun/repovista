@@ -9,7 +9,7 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "dev": "turbo run dev --parallel",
+    "dev": "node --env-file-if-exists=.env node_modules/turbo/bin/turbo run dev --parallel --env-mode=loose",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "lint": "biome check .",
