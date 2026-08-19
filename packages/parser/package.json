@@ -1,0 +1,19 @@
+{
+  "name": "@repovista/parser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@repovista/domain": "workspace:*",
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-typescript": "^0.23.0"
+  }
+}

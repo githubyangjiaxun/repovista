@@ -1,0 +1,18 @@
+{
+  "name": "@repovista/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "repovista": "./dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsup src/index.ts --format esm --platform node --sourcemap --banner.js '#!/usr/bin/env node'",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@repovista/contracts": "workspace:*"
+  }
+}

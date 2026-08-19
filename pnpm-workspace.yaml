@@ -1,0 +1,12 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+  - "benchmarks"
+
+onlyBuiltDependencies:
+  - "@biomejs/biome"
+  - "esbuild"
+  - "sharp"
+  - "tree-sitter"
+  - "tree-sitter-javascript"
+  - "tree-sitter-typescript"

@@ -1,0 +1,25 @@
+{
+  "name": "@repovista/database",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "migrate": "tsx src/cli.ts migrate",
+    "seed": "tsx src/cli.ts seed"
+  },
+  "dependencies": {
+    "@repovista/config": "workspace:*",
+    "@repovista/contracts": "workspace:*",
+    "@repovista/domain": "workspace:*",
+    "pg": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.0.0"
+  }
+}

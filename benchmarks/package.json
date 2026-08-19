@@ -1,0 +1,15 @@
+{
+  "name": "@repovista/benchmarks",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "benchmark": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@repovista/parser": "workspace:*"
+  }
+}

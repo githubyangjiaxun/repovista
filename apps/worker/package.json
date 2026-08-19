@@ -1,0 +1,21 @@
+{
+  "name": "@repovista/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsup src/server.ts --format esm --platform node --sourcemap --no-splitting",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@repovista/config": "workspace:*",
+    "@repovista/database": "workspace:*",
+    "@repovista/domain": "workspace:*",
+    "@repovista/git": "workspace:*",
+    "@repovista/graph": "workspace:*",
+    "@repovista/parser": "workspace:*"
+  }
+}
