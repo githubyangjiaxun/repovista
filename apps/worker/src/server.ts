@@ -1,5 +1,6 @@
 import { getConfig } from "@repovista/config";
 import { createDatabasePool, migrateDatabase, RepoVistaStore } from "@repovista/database";
+import { executeNextIndexJob } from "./indexer.js";
 
 let stopping = false;
 
@@ -25,7 +26,15 @@ async function main(): Promise<void> {
   });
 
   while (!stopping) {
-    await wait(config.JOB_POLL_INTERVAL_MS);
+    try {
+      const processed = await executeNextIndexJob(store, config);
+      if (!processed) {
+        await wait(config.JOB_POLL_INTERVAL_MS);
+      }
+    } catch (error) {
+      console.error("RepoVista worker loop failed.", error);
+      await wait(config.JOB_POLL_INTERVAL_MS);
+    }
   }
   await pool.end();
 }
