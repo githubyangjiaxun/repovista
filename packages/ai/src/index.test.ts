@@ -44,8 +44,13 @@ afterEach(async () => {
 });
 
 async function startProviderServer(
-  options: { chatContent?: string; chatStatus?: number } = {},
-): Promise<{ origin: string; requests: RecordedRequest[] }> {
+  options: {
+    chatContent?: string;
+    chatStatus?: number;
+    hangChat?: boolean;
+    rawChatResponse?: string;
+  } = {},
+): Promise<{ origin: string; requests: RecordedRequest[]; server: Server }> {
   const requests: RecordedRequest[] = [];
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
@@ -64,7 +69,12 @@ async function startProviderServer(
       return;
     }
     if (request.url === "/v1/chat/completions") {
+      if (options.hangChat) return;
       response.statusCode = options.chatStatus ?? 200;
+      if (options.rawChatResponse !== undefined) {
+        response.end(options.rawChatResponse);
+        return;
+      }
       response.end(
         JSON.stringify({
           choices: [
@@ -94,7 +104,7 @@ async function startProviderServer(
     server.listen(0, "127.0.0.1", resolve);
   });
   const address = server.address() as AddressInfo;
-  return { origin: `http://127.0.0.1:${address.port}`, requests };
+  return { origin: `http://127.0.0.1:${address.port}`, requests, server };
 }
 
 describe("verified answers", () => {
@@ -135,6 +145,27 @@ describe("verified answers", () => {
     expect(answer.status).toBe("refused");
     expect(answer.steps).toEqual([]);
     expect(answer.citations).toEqual([]);
+  });
+
+  it("does not retain citations when the model explicitly refuses", () => {
+    const answer = verifyModelAnswer(
+      {
+        summary: "The available evidence is insufficient.",
+        steps: [{ text: "Do not rely on this step.", evidenceIds: [evidence.id] }],
+        limitations: ["More context is required."],
+        status: "refused",
+      },
+      [evidence],
+      "test",
+      "test-model",
+    );
+
+    expect(answer).toMatchObject({
+      status: "refused",
+      summary: "The available evidence is insufficient.",
+      steps: [],
+      citations: [],
+    });
   });
 });
 
@@ -194,6 +225,44 @@ describe("OpenAI-compatible provider", () => {
 
     await expect(
       provider.generate({ question: "Where?", evidence: [evidence] }),
+    ).rejects.toMatchObject({ code: "AI_PROVIDER_FAILED", retryable: true });
+  });
+
+  it("maps a non-JSON provider response to invalid output", async () => {
+    const mock = await startProviderServer({ rawChatResponse: "not-json" });
+    const provider = new OpenAICompatibleProvider({
+      baseUrl: `${mock.origin}/v1`,
+      defaultModel: "test-model",
+    });
+
+    await expect(
+      provider.generate({ question: "Where?", evidence: [evidence] }),
+    ).rejects.toMatchObject({ code: "AI_OUTPUT_INVALID", retryable: false });
+  });
+
+  it("maps network failures and timeouts to retryable provider errors", async () => {
+    const closed = await startProviderServer();
+    openServers.splice(openServers.indexOf(closed.server), 1);
+    await new Promise<void>((resolve, reject) => {
+      closed.server.close((error) => (error ? reject(error) : resolve()));
+    });
+    const unavailable = new OpenAICompatibleProvider({
+      baseUrl: `${closed.origin}/v1`,
+      defaultModel: "test-model",
+      requestTimeoutMs: 100,
+    });
+    await expect(
+      unavailable.generate({ question: "Where?", evidence: [evidence] }),
+    ).rejects.toMatchObject({ code: "AI_PROVIDER_FAILED", retryable: true });
+
+    const hanging = await startProviderServer({ hangChat: true });
+    const timeout = new OpenAICompatibleProvider({
+      baseUrl: `${hanging.origin}/v1`,
+      defaultModel: "test-model",
+      requestTimeoutMs: 20,
+    });
+    await expect(
+      timeout.generate({ question: "Where?", evidence: [evidence] }),
     ).rejects.toMatchObject({ code: "AI_PROVIDER_FAILED", retryable: true });
   });
 });

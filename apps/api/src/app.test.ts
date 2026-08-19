@@ -167,6 +167,40 @@ describe("RepoVista API", () => {
     expect(result.headers["x-request-id"]).toBeTruthy();
   });
 
+  it.each([
+    ["a ref that starts with an option", "--upload-pack=malicious"],
+    ["a ref with parent traversal", "feature..main"],
+    ["a reflog expression", "main@{1}"],
+  ])("rejects %s", async (_label, ref) => {
+    const { app, store } = createTestApp();
+    openApps.push(app);
+
+    const result = await app.inject({
+      method: "POST",
+      url: "/v1/repositories",
+      payload: { url: "https://github.com/acme/demo", ref },
+    });
+
+    expect(result.statusCode).toBe(400);
+    expect(result.json().error.code).toBe("REPOSITORY_REF_INVALID");
+    expect(store.createRepositoryImport).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsafe ignored paths", async () => {
+    const { app, store } = createTestApp();
+    openApps.push(app);
+
+    const result = await app.inject({
+      method: "POST",
+      url: "/v1/repositories",
+      payload: { url: "https://github.com/acme/demo", ignore: ["generated/../secret"] },
+    });
+
+    expect(result.statusCode).toBe(400);
+    expect(result.json().error.code).toBe("SOURCE_PATH_INVALID");
+    expect(store.createRepositoryImport).not.toHaveBeenCalled();
+  });
+
   it("rejects source directory traversal", async () => {
     const { app } = createTestApp();
     openApps.push(app);

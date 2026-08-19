@@ -237,18 +237,32 @@ export function resolveLocalImport(
 ): string | null {
   if (!importSource.startsWith(".")) return null;
   const base = path.posix.normalize(path.posix.join(path.posix.dirname(fromPath), importSource));
+  const runtimeExtension = path.posix.extname(base);
+  const sourceBase = [".js", ".jsx", ".mjs", ".cjs"].includes(runtimeExtension)
+    ? base.slice(0, -runtimeExtension.length)
+    : base;
   const candidates = [
     base,
+    `${sourceBase}.ts`,
+    `${sourceBase}.tsx`,
+    `${sourceBase}.js`,
+    `${sourceBase}.jsx`,
+    `${sourceBase}.mjs`,
+    `${sourceBase}.cjs`,
     `${base}.ts`,
     `${base}.tsx`,
     `${base}.js`,
     `${base}.jsx`,
+    `${base}.mjs`,
+    `${base}.cjs`,
     `${base}/index.ts`,
     `${base}/index.tsx`,
     `${base}/index.js`,
     `${base}/index.jsx`,
+    `${base}/index.mjs`,
+    `${base}/index.cjs`,
   ];
-  return candidates.find((candidate) => knownPaths.has(candidate)) ?? null;
+  return [...new Set(candidates)].find((candidate) => knownPaths.has(candidate)) ?? null;
 }
 
 export function linkParsedImports(
@@ -258,10 +272,12 @@ export function linkParsedImports(
   const knownPaths = new Set(files.map((file) => file.path));
   const moduleByPath = new Map(parsedFiles.map((file) => [file.path, file.moduleStableKey]));
   return parsedFiles.map((parsed) => {
+    const resolvedSources = new Set<string>();
     const localEdges = parsed.imports.flatMap((item) => {
       const resolved = resolveLocalImport(parsed.path, item.source, knownPaths);
       const target = resolved ? moduleByPath.get(resolved) : undefined;
       if (!target) return [];
+      resolvedSources.add(item.source);
       return [
         {
           fromStableKey: parsed.moduleStableKey,
@@ -283,7 +299,8 @@ export function linkParsedImports(
         ...parsed.edges.filter(
           (edge) =>
             edge.type !== "imports" ||
-            !parsed.imports.some((item) => item.source === edge.unresolvedTarget),
+            !edge.unresolvedTarget ||
+            !resolvedSources.has(edge.unresolvedTarget),
         ),
         ...localEdges,
       ],

@@ -8,6 +8,7 @@ import { DomainError, type GitHubRepositoryIdentity, type ScannedFile } from "@r
 
 const executeFile = promisify(execFile);
 const githubHosts = new Set(["github.com", "www.github.com"]);
+const fullCommitSha = /^[a-f0-9]{40}$/i;
 const ignoredSegments = new Set([
   ".git",
   "node_modules",
@@ -182,47 +183,91 @@ export interface CloneRepositoryOptions {
   timeoutMs: number;
 }
 
+function gitEnvironment(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_ALLOW_PROTOCOL: "https",
+    GIT_CONFIG_GLOBAL: os.devNull,
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+  };
+}
+
+function gitArgs(...args: string[]): string[] {
+  return ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", ...args];
+}
+
+async function cloneCommit(options: CloneRepositoryOptions, environment: NodeJS.ProcessEnv) {
+  await executeFile("git", gitArgs("init", "--quiet", "--", options.destination), {
+    env: environment,
+    timeout: 10_000,
+  });
+  await executeFile(
+    "git",
+    gitArgs("-C", options.destination, "remote", "add", "origin", options.cloneUrl),
+    { env: environment, timeout: 10_000 },
+  );
+  await executeFile(
+    "git",
+    gitArgs(
+      "-C",
+      options.destination,
+      "fetch",
+      "--depth",
+      "1",
+      "--no-tags",
+      "origin",
+      options.ref as string,
+    ),
+    {
+      env: environment,
+      timeout: options.timeoutMs,
+      maxBuffer: 10 * 1024 * 1024,
+    },
+  );
+  await executeFile(
+    "git",
+    gitArgs("-C", options.destination, "checkout", "--quiet", "--detach", "FETCH_HEAD"),
+    { env: environment, timeout: 30_000 },
+  );
+}
+
 export async function cloneRepository(
   options: CloneRepositoryOptions,
 ): Promise<{ commitSha: string; branch: string | null }> {
-  const args = [
-    "-c",
-    "core.hooksPath=/dev/null",
-    "clone",
-    "--depth",
-    "1",
-    "--no-tags",
-    "--single-branch",
-  ];
+  const args = gitArgs("clone", "--depth", "1", "--no-tags", "--single-branch");
   if (options.ref) {
     args.push("--branch", options.ref);
   }
   args.push("--", options.cloneUrl, options.destination);
 
-  const environment = {
-    ...process.env,
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_ALLOW_PROTOCOL: "https",
-    GIT_CONFIG_NOSYSTEM: "1",
-  };
+  const environment = gitEnvironment();
   try {
-    await executeFile("git", args, {
-      env: environment,
-      timeout: options.timeoutMs,
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    const commit = await executeFile("git", ["rev-parse", "HEAD"], {
+    if (options.ref && fullCommitSha.test(options.ref)) {
+      await cloneCommit(options, environment);
+    } else {
+      await executeFile("git", args, {
+        env: environment,
+        timeout: options.timeoutMs,
+        maxBuffer: 10 * 1024 * 1024,
+      });
+    }
+    const commit = await executeFile("git", gitArgs("rev-parse", "HEAD"), {
       cwd: options.destination,
       env: environment,
       timeout: 10_000,
     });
-    const branch = await executeFile("git", ["branch", "--show-current"], {
+    const branch = await executeFile("git", gitArgs("branch", "--show-current"), {
       cwd: options.destination,
       env: environment,
       timeout: 10_000,
     });
+    const commitSha = commit.stdout.trim();
+    if (!fullCommitSha.test(commitSha)) {
+      throw new DomainError("REPOSITORY_COMMIT_INVALID", "Git returned an invalid commit SHA.");
+    }
     return {
-      commitSha: commit.stdout.trim(),
+      commitSha,
       branch: branch.stdout.trim() || null,
     };
   } catch (error) {

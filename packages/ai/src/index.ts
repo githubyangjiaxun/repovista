@@ -94,6 +94,7 @@ interface OpenAICompatibleOptions {
   apiKey?: string;
   defaultModel: string;
   id?: string;
+  requestTimeoutMs?: number;
 }
 
 export class OpenAICompatibleProvider implements ModelProvider {
@@ -101,18 +102,21 @@ export class OpenAICompatibleProvider implements ModelProvider {
   readonly defaultModel: string;
   private readonly baseUrl: string;
   private readonly apiKey?: string;
+  private readonly requestTimeoutMs: number;
 
   constructor(options: OpenAICompatibleOptions) {
     this.id = options.id ?? "openai-compatible";
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.apiKey = options.apiKey;
     this.defaultModel = options.defaultModel;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 60_000;
   }
 
   async healthCheck(): Promise<boolean> {
     try {
       const response = await fetch(`${this.baseUrl}/models`, {
         headers: this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : undefined,
+        signal: AbortSignal.timeout(Math.min(this.requestTimeoutMs, 5_000)),
       });
       return response.ok;
     } catch {
@@ -121,30 +125,38 @@ export class OpenAICompatibleProvider implements ModelProvider {
   }
 
   async generate(request: ModelRequest): Promise<ModelAnswerDraft> {
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model: request.model ?? this.defaultModel,
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: systemInstruction },
-          {
-            role: "user",
-            content:
-              "QUESTION:\n" +
-              request.question +
-              "\n\nEVIDENCE:\n" +
-              evidencePrompt(request.evidence),
-          },
-        ],
-      }),
-      signal: AbortSignal.timeout(60_000),
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {}),
+        },
+        body: JSON.stringify({
+          model: request.model ?? this.defaultModel,
+          temperature: 0,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: systemInstruction },
+            {
+              role: "user",
+              content:
+                "QUESTION:\n" +
+                request.question +
+                "\n\nEVIDENCE:\n" +
+                evidencePrompt(request.evidence),
+            },
+          ],
+        }),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
+      });
+    } catch (error) {
+      throw new DomainError("AI_PROVIDER_FAILED", "The configured model provider is unavailable.", {
+        retryable: true,
+        cause: error,
+      });
+    }
     if (!response.ok) {
       throw new DomainError(
         "AI_PROVIDER_FAILED",
@@ -152,9 +164,16 @@ export class OpenAICompatibleProvider implements ModelProvider {
         { retryable: response.status >= 500 },
       );
     }
-    const payload = (await response.json()) as {
+    let payload: {
       choices?: { message?: { content?: string } }[];
     };
+    try {
+      payload = (await response.json()) as typeof payload;
+    } catch (error) {
+      throw new DomainError("AI_OUTPUT_INVALID", "The model provider returned invalid JSON.", {
+        cause: error,
+      });
+    }
     const content = payload.choices?.[0]?.message?.content;
     if (!content) {
       throw new DomainError("AI_OUTPUT_INVALID", "The model returned no answer.");
@@ -191,7 +210,7 @@ export function verifyModelAnswer(
     evidenceIds: step.evidenceIds.filter((id) => evidenceById.has(id)),
   }));
   const usedIds = [...new Set(validSteps.flatMap((step) => step.evidenceIds))];
-  const citations = usedIds.flatMap((evidenceId) => {
+  const verifiedCitations = usedIds.flatMap((evidenceId) => {
     const item = evidenceById.get(evidenceId);
     if (!item) return [];
     return [
@@ -210,15 +229,16 @@ export function verifyModelAnswer(
   const status =
     draft.status === "refused"
       ? "refused"
-      : citations.length === 0
+      : verifiedCitations.length === 0
         ? "refused"
         : hasUnsupportedStep
           ? "partial"
           : draft.status;
 
+  const citations = status === "refused" ? [] : verifiedCitations;
   const answer: GroundedAnswer = {
     summary:
-      status === "refused" && citations.length === 0
+      status === "refused" && draft.status !== "refused"
         ? "There is not enough verified evidence to answer this question."
         : draft.summary,
     steps: status === "refused" ? [] : validSteps.filter((step) => step.evidenceIds.length > 0),
