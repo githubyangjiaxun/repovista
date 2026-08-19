@@ -216,13 +216,14 @@ describe("RepoVista API", () => {
   it("classifies malformed model output as an upstream failure", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
-        new Response(
-          JSON.stringify({
-            choices: [{ message: { content: "not-json" } }],
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              choices: [{ message: { content: "not-json" } }],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
       ),
     );
     const store = createStore();
