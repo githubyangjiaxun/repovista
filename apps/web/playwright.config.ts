@@ -1,6 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const webOrigin = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:3100";
+const webUrl = new URL(webOrigin);
+const webPort = webUrl.port || (webUrl.protocol === "https:" ? "443" : "80");
 const continuousIntegration = Boolean(process.env.CI);
 
 export default defineConfig({
@@ -32,7 +34,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "pnpm exec next dev --hostname 127.0.0.1 --port 3100",
+    command: `pnpm exec next dev --hostname ${webUrl.hostname} --port ${webPort}`,
     env: {
       NEXT_PUBLIC_API_ORIGIN: "http://localhost:4000",
     },

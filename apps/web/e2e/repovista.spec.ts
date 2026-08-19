@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { type BrowserContext, expect, type Locator, type Route, test } from "@playwright/test";
 
 const apiOrigin = "http://localhost:4000";
@@ -8,6 +9,8 @@ const jobId = "01900000-0000-7000-8000-000000000003";
 const fileId = "01900000-0000-7000-8000-000000000004";
 const symbolId = "01900000-0000-7000-8000-000000000005";
 const messageId = "01900000-0000-7000-8000-000000000006";
+const baseSnapshotId = "01900000-0000-7000-8000-000000000008";
+const baseCommitSha = "fedcba9876543210fedcba9876543210fedcba98";
 
 const repository = {
   id: repositoryId,
@@ -18,8 +21,8 @@ const repository = {
   latestSnapshotId: snapshotId,
   latestSnapshotStatus: "ready",
   latestCommitSha: "0123456789abcdef0123456789abcdef01234567",
-  autoUpdateEnabled: false,
-  lastWebhookAt: null,
+  autoUpdateEnabled: true,
+  lastWebhookAt: "2026-01-01T00:00:02.000Z",
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:03.000Z",
 };
@@ -30,18 +33,27 @@ const snapshot = {
   commitSha: repository.latestCommitSha,
   refName: "main",
   status: "ready",
-  parserVersion: "tree-sitter-ts-v1",
+  parserVersion: "tree-sitter-ts-js-py-v1",
   stats: {
-    files: 2,
-    symbols: 4,
-    edges: 3,
-    languages: { typescript: 2 },
+    files: 3,
+    symbols: 6,
+    edges: 5,
+    languages: { python: 1, typescript: 2 },
     warnings: 0,
-    indexing: null,
+    indexing: {
+      mode: "incremental",
+      baseSnapshotId,
+      baseCommitSha,
+      scannedFiles: 3,
+      changedFiles: 2,
+      reusedFiles: 1,
+      parsedFiles: 2,
+      deletedFiles: 1,
+    },
   },
-  baseSnapshotId: null,
-  indexMode: "full",
-  treeHash: null,
+  baseSnapshotId,
+  indexMode: "incremental",
+  treeHash: "sha256:tree",
   requestedAt: "2026-01-01T00:00:00.000Z",
   readyAt: "2026-01-01T00:00:03.000Z",
   failure: null,
@@ -66,6 +78,15 @@ const files = [
     blobHash: "sha256:router",
     parseStatus: "parsed",
   },
+  {
+    id: "01900000-0000-7000-8000-000000000009",
+    path: "src/worker.py",
+    language: "python",
+    byteSize: 180,
+    lineCount: 7,
+    blobHash: "sha256:worker",
+    parseStatus: "parsed",
+  },
 ];
 
 const sourceLines = [
@@ -86,6 +107,7 @@ const sourceLines = [
 ];
 
 interface MockState {
+  exportRequests: string[];
   importRequests: unknown[];
   jobRequests: number;
   mapLevels: string[];
@@ -177,6 +199,7 @@ async function installMockApi(
   options: { importFailure?: boolean } = {},
 ): Promise<MockState> {
   const state: MockState = {
+    exportRequests: [],
     importRequests: [],
     jobRequests: 0,
     mapLevels: [],
@@ -216,7 +239,7 @@ async function installMockApi(
 
     if (request.method() === "GET" && url.pathname === `/v1/jobs/${jobId}`) {
       state.jobRequests += 1;
-      const succeeded = state.jobRequests > 1;
+      const succeeded = state.jobRequests > 2;
       await json(route, {
         id: jobId,
         snapshotId,
@@ -234,7 +257,7 @@ async function installMockApi(
 
     if (request.method() === "GET" && url.pathname === `/v1/jobs/${jobId}/events`) {
       await route.fulfill({
-        body: `event: completed\ndata: ${JSON.stringify({ snapshotId })}\n\n`,
+        body: `event: progress\ndata: ${JSON.stringify({ message: "Parsed 2 of 2 changed files; reused 1 unchanged file." })}\n\n`,
         headers: { ...corsHeaders(), "Content-Type": "text/event-stream; charset=utf-8" },
         status: 200,
       });
@@ -243,6 +266,16 @@ async function installMockApi(
 
     if (request.method() === "GET" && url.pathname === "/v1/repositories") {
       await json(route, [repository]);
+      return;
+    }
+
+    if (request.method() === "GET" && url.pathname === "/v1/integrations/github") {
+      await json(route, {
+        enabled: true,
+        appSlug: "repovista-demo",
+        events: ["ping", "push"],
+        scope: "public-repositories",
+      });
       return;
     }
 
@@ -261,6 +294,43 @@ async function installMockApi(
       return;
     }
 
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/v1/snapshots/${snapshotId}/exports/markdown`
+    ) {
+      state.exportRequests.push(request.url());
+      await route.fulfill({
+        body: [
+          "# acme/signal-hub architecture report",
+          `- Commit SHA: \`${repository.latestCommitSha}\``,
+          `- Snapshot ID: \`${snapshotId}\``,
+          `- Parser version: \`${snapshot.parserVersion}\``,
+        ].join("\n"),
+        headers: {
+          ...corsHeaders(),
+          "Content-Disposition": 'attachment; filename="acme-signal-hub-0123456.md"',
+          "Content-Type": "text/markdown; charset=utf-8",
+        },
+        status: 200,
+      });
+      return;
+    }
+
+    if (request.method() === "GET" && url.pathname === `/v1/snapshots/${snapshotId}/exports/svg`) {
+      state.exportRequests.push(request.url());
+      await route.fulfill({
+        body: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 120"><title>acme/signal-hub ${snapshotId}</title><text x="10" y="30">${repository.latestCommitSha}</text></svg>`,
+        headers: {
+          ...corsHeaders(),
+          "Content-Disposition": 'attachment; filename="acme-signal-hub-0123456-package.svg"',
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "Content-Type": "image/svg+xml; charset=utf-8",
+        },
+        status: 200,
+      });
+      return;
+    }
+
     if (request.method() === "GET" && url.pathname === `/v1/snapshots/${snapshotId}/map`) {
       const level = url.searchParams.get("level") ?? "package";
       state.mapLevels.push(level);
@@ -271,12 +341,16 @@ async function installMockApi(
     if (request.method() === "GET" && url.pathname === `/v1/snapshots/${snapshotId}/source`) {
       const startLine = Number.parseInt(url.searchParams.get("startLine") ?? "1", 10);
       const endLine = Number.parseInt(url.searchParams.get("endLine") ?? "14", 10);
+      const requestedPath = url.searchParams.get("path") ?? "src/server.ts";
+      const python = requestedPath.endsWith(".py");
       await json(route, {
         id: fileId,
-        path: url.searchParams.get("path") ?? "src/server.ts",
-        language: "typescript",
-        content: sourceLines.slice(startLine - 1, endLine).join("\n"),
-        lineCount: sourceLines.length,
+        path: requestedPath,
+        language: python ? "python" : "typescript",
+        content: python
+          ? "from signal_hub.router import Router\n\ndef run():\n    return Router().start()"
+          : sourceLines.slice(startLine - 1, endLine).join("\n"),
+        lineCount: python ? 4 : sourceLines.length,
         startLine,
         commitSha: repository.latestCommitSha,
         blobHash: "sha256:server",
@@ -410,6 +484,9 @@ test("analyzes a repository and explores its evidence-backed result", async ({ c
 
   await expect(page).toHaveURL(new RegExp(`/jobs/${jobId}`));
   await expect(page.getByRole("progressbar")).toBeVisible();
+  await expect(
+    page.getByText("Parsed 2 of 2 changed files; reused 1 unchanged file."),
+  ).toBeVisible();
   await expect(page).toHaveURL(
     `${webOrigin}/repositories/${repositoryId}?snapshotId=${snapshotId}`,
     { timeout: 12_000 },
@@ -421,7 +498,14 @@ test("analyzes a repository and explores its evidence-backed result", async ({ c
   await expect(
     page.getByRole("heading", { name: "See the system before reading every file." }),
   ).toBeVisible();
+  await expect(page.getByText("incremental index", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Deterministic snapshot exports" })).toBeVisible();
+  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
   await expect(page.getByText("2", { exact: true }).first()).toBeVisible();
+  await expect(page.getByTitle("src/worker.py")).toContainText("python");
+  await page.getByTitle("src/worker.py").click();
+  await expect(page.locator(".source-code")).toContainText("from signal_hub.router import Router");
+  await page.getByRole("button", { name: "Close source" }).click();
   await page.getByTitle("src/server.ts").click();
   await expect(page.getByText("src/server.ts", { exact: true }).last()).toBeVisible();
   await expect(page.locator(".source-code")).toContainText("export async function start");
@@ -466,6 +550,45 @@ test("analyzes a repository and explores its evidence-backed result", async ({ c
   ).toBeVisible();
   await expect(popup.getByText("Read the repository in this order.")).toBeVisible();
   expect(state.shareRequests).toEqual([{ snapshotId, title: "acme/signal-hub architecture tour" }]);
+});
+
+test("downloads deterministic Markdown and SVG for the selected snapshot", async ({
+  context,
+  page,
+}) => {
+  const state = await installMockApi(context);
+  await page.goto(`/repositories/${repositoryId}?snapshotId=${snapshotId}`);
+
+  const markdownEvent = page.waitForEvent("download");
+  await page.getByRole("link", { name: "Download Markdown" }).click();
+  const markdown = await markdownEvent;
+  expect(markdown.suggestedFilename()).toBe("acme-signal-hub-0123456.md");
+  const markdownPath = await markdown.path();
+  expect(markdownPath).not.toBeNull();
+  const markdownBody = await readFile(markdownPath as string, "utf8");
+  expect(markdownBody).toContain(repository.latestCommitSha);
+  expect(markdownBody).toContain(snapshotId);
+  expect(markdownBody).toContain(snapshot.parserVersion);
+
+  const svgEvent = page.waitForEvent("download");
+  await page.getByRole("link", { name: "Download SVG" }).click();
+  const svg = await svgEvent;
+  expect(svg.suggestedFilename()).toBe("acme-signal-hub-0123456-package.svg");
+  const svgPath = await svg.path();
+  expect(svgPath).not.toBeNull();
+  const svgBody = await readFile(svgPath as string, "utf8");
+  expect(svgBody).toContain(snapshotId);
+  const validXml = await page.evaluate((body) => {
+    const document = new DOMParser().parseFromString(body, "image/svg+xml");
+    return (
+      document.querySelector("parsererror") === null && document.documentElement.nodeName === "svg"
+    );
+  }, svgBody);
+  expect(validXml).toBe(true);
+  expect(state.exportRequests).toEqual([
+    `${apiOrigin}/v1/snapshots/${snapshotId}/exports/markdown`,
+    `${apiOrigin}/v1/snapshots/${snapshotId}/exports/svg?level=package`,
+  ]);
 });
 
 test("lists existing repositories and opens an immutable snapshot", async ({ context, page }) => {

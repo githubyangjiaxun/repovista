@@ -1,5 +1,6 @@
 import type {
   Evidence,
+  GitHubIntegrationStatus,
   GraphResponse,
   GroundedAnswer,
   Job,
@@ -46,6 +47,23 @@ export class ApiError extends Error {
 export function apiErrorMessage(cause: unknown, fallback: string): string {
   if (!(cause instanceof ApiError)) return fallback;
   return `${cause.message}${cause.requestId ? ` Request ID: ${cause.requestId}` : ""}`;
+}
+
+/**
+ * Build a direct download URL for a deterministic snapshot export.
+ *
+ * Export responses are deliberately not routed through apiFetch: they are
+ * attachment bodies (Markdown/SVG), not JSON envelopes.
+ */
+export function snapshotExportUrl(
+  snapshotId: string,
+  format: "markdown" | "svg",
+  level: "package" | "file" | "symbol" = "package",
+): string {
+  const encodedSnapshotId = encodeURIComponent(snapshotId);
+  const suffix =
+    format === "svg" ? `/exports/svg?level=${encodeURIComponent(level)}` : "/exports/markdown";
+  return `${apiOrigin}/v1/snapshots/${encodedSnapshotId}${suffix}`;
 }
 
 export async function apiFetch<T>(pathname: string, init: RequestInit = {}): Promise<T> {
@@ -114,4 +132,11 @@ export interface ShareReport {
   createdAt: string;
 }
 
-export type { GraphResponse, Job, RepositorySummary, Snapshot, SourceFile };
+export type {
+  GitHubIntegrationStatus,
+  GraphResponse,
+  Job,
+  RepositorySummary,
+  Snapshot,
+  SourceFile,
+};

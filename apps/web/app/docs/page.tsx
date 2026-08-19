@@ -1,4 +1,13 @@
-import { Bot, Database, GitBranch, Network, ShieldCheck } from "lucide-react";
+import {
+  Bot,
+  Database,
+  Download,
+  GitBranch,
+  Network,
+  RefreshCw,
+  ShieldCheck,
+  Webhook,
+} from "lucide-react";
 import { SiteHeader } from "@/components/site-header";
 
 const layers = [
@@ -10,7 +19,7 @@ const layers = [
   {
     icon: Network,
     title: "2. Deterministic code graph",
-    copy: "Tree-sitter extracts files, symbols, imports, calls, and containment relationships for TypeScript and JavaScript.",
+    copy: "Tree-sitter extracts files, symbols, imports, calls, inheritance, and containment for TypeScript, JavaScript, and Python.",
   },
   {
     icon: Database,
@@ -21,6 +30,24 @@ const layers = [
     icon: Bot,
     title: "4. Optional explanation",
     copy: "Fake, local Ollama, or OpenAI-compatible providers may explain retrieved evidence. Invalid citations are removed.",
+  },
+];
+
+const capabilities = [
+  {
+    icon: RefreshCw,
+    title: "Full → incremental snapshots",
+    copy: "The first compatible run is full. Later runs compare path and content hash, reparse changed supported files, reuse unchanged parsed files, and rebuild the complete immutable graph.",
+  },
+  {
+    icon: Webhook,
+    title: "Signed GitHub updates",
+    copy: "An optional HMAC-SHA256 webhook accepts public-repository pushes. Only non-deleted pushes to the default branch create jobs, and delivery IDs are idempotent.",
+  },
+  {
+    icon: Download,
+    title: "Deterministic exports",
+    copy: "Every ready snapshot can produce Markdown and SVG containing its snapshot ID, complete commit SHA, parser version, and static-analysis provenance.",
   },
 ];
 
@@ -56,6 +83,22 @@ export default function DocsPage() {
               line range, immutable commit, and stored content hash.
             </p>
           </div>
+        </aside>
+        <div className="docs-capabilities">
+          {capabilities.map(({ icon: Icon, title, copy }) => (
+            <section key={title}>
+              <Icon size={20} aria-hidden />
+              <h2>{title}</h2>
+              <p>{copy}</p>
+            </section>
+          ))}
+        </div>
+        <aside className="docs-boundary">
+          <strong>Current automation boundary</strong>
+          <p>
+            Public repositories only. RepoVista does not use installation tokens, clone private
+            repositories, execute imported code, or treat AI-generated text as static-analysis fact.
+          </p>
         </aside>
       </article>
     </main>

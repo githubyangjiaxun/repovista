@@ -7,9 +7,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiErrorMessage, apiFetch, apiOrigin, type Job } from "@/lib/api";
 
 const stages = [
+  { key: "starting", label: "Reserve an immutable snapshot" },
   { key: "cloning", label: "Clone the fixed Git commit" },
   { key: "scanning", label: "Scan safe source files" },
-  { key: "parsing", label: "Parse TypeScript and JavaScript" },
+  { key: "parsing", label: "Parse TypeScript, JavaScript, and Python" },
   { key: "building_graph", label: "Resolve symbols and relationships" },
   { key: "persisting", label: "Build searchable evidence" },
   { key: "completed", label: "Snapshot ready" },
@@ -34,6 +35,7 @@ export function JobProgress({
   const [error, setError] = useState<string | null>(null);
   const [streamConnected, setStreamConnected] = useState(false);
   const [cancelling, setCancelling] = useState(false);
+  const [progressMessage, setProgressMessage] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -55,9 +57,21 @@ export function JobProgress({
     void refresh();
     const poll = window.setInterval(() => void refresh(), 2_000);
     const events = new EventSource(`${apiOrigin}/v1/jobs/${jobId}/events`);
-    const update = () => void refresh();
-    const terminal = () => {
+    const update = (event: Event) => {
+      if (event instanceof MessageEvent) {
+        try {
+          const payload = JSON.parse(event.data) as { message?: unknown };
+          if (typeof payload.message === "string" && payload.message.trim()) {
+            setProgressMessage(payload.message.trim());
+          }
+        } catch {
+          // Polling still provides authoritative progress if an event payload is malformed.
+        }
+      }
       void refresh();
+    };
+    const terminal = (event: Event) => {
+      update(event);
       events.close();
     };
     events.onopen = () => setStreamConnected(true);
@@ -128,6 +142,12 @@ export function JobProgress({
             : (job?.phase ?? "queued")}
         </span>
       </div>
+
+      {progressMessage ? (
+        <p className="progress-message" aria-live="polite">
+          {progressMessage}
+        </p>
+      ) : null}
 
       <ol className="stage-list">
         {stages.map((stage, index) => {

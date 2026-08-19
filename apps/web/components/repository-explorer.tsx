@@ -26,21 +26,26 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { ArchitectureMap } from "@/components/architecture-map";
+import { AutomationStatus } from "@/components/automation-status";
+import { SnapshotDelta } from "@/components/snapshot-delta";
 import {
   ApiError,
   type AskResult,
   apiErrorMessage,
   apiFetch,
   type CreateRepositoryResult,
+  type GitHubIntegrationStatus,
   type GraphResponse,
   type RepositorySummary,
   type Snapshot,
   type SnapshotFilePage,
   type SnapshotFileSummary,
   type SourceFile,
+  snapshotExportUrl,
 } from "@/lib/api";
 
 type WorkspaceTab = "ask" | "map" | "overview";
@@ -57,7 +62,9 @@ function shortSha(value: string | null): string {
 }
 
 function languageEntries(snapshot: Snapshot): [string, number][] {
-  return Object.entries(snapshot.stats.languages).sort((left, right) => right[1] - left[1]);
+  return Object.entries(snapshot.stats.languages).sort(
+    (left, right) => right[1] - left[1] || left[0].localeCompare(right[0]),
+  );
 }
 
 function sourceUrl(snapshotId: string, filePath: string, startLine?: number, endLine?: number) {
@@ -92,6 +99,8 @@ export function RepositoryExplorer({
   const [graphLoading, setGraphLoading] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [reindexing, setReindexing] = useState(false);
+  const [integration, setIntegration] = useState<GitHubIntegrationStatus | null>(null);
+  const [integrationUnavailable, setIntegrationUnavailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadGraph = useCallback(async (snapshotId: string, nextLevel: GraphLevel, query = "") => {
@@ -149,6 +158,22 @@ export function RepositoryExplorer({
       active = false;
     };
   }, [loadGraph, requestedSnapshotId, repositoryId]);
+
+  useEffect(() => {
+    let active = true;
+    apiFetch<GitHubIntegrationStatus>("/v1/integrations/github")
+      .then((status) => {
+        if (!active) return;
+        setIntegration(status);
+        setIntegrationUnavailable(false);
+      })
+      .catch(() => {
+        if (active) setIntegrationUnavailable(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   async function changeLevel(nextLevel: GraphLevel) {
     setLevel(nextLevel);
@@ -273,6 +298,11 @@ export function RepositoryExplorer({
             <GitBranch size={13} /> {snapshot.refName ?? repository.defaultBranch ?? "detached"} ·{" "}
             {shortSha(snapshot.commitSha)}
           </span>
+          <span
+            className={`index-mode-chip ${snapshot.indexMode === "incremental" ? "incremental" : "full"}`}
+          >
+            {snapshot.indexMode === "incremental" ? "incremental index" : "full index"}
+          </span>
           <span className="ready-chip">
             <CheckCircle2 size={13} /> indexed
           </span>
@@ -300,9 +330,9 @@ export function RepositoryExplorer({
       </header>
 
       <aside className="workspace-sidebar">
-        <a className="workspace-brand" href="/">
+        <Link className="workspace-brand" href="/">
           <span className="brand-mark">R</span> RepoVista
-        </a>
+        </Link>
         <nav className="workspace-nav" aria-label="Repository views">
           <button
             className={tab === "overview" ? "active" : ""}
@@ -349,7 +379,10 @@ export function RepositoryExplorer({
               type="button"
             >
               <FileCode2 size={14} />
-              <span>{file.path}</span>
+              <span>
+                {file.path}
+                <small>{file.language ?? "text"}</small>
+              </span>
             </button>
           ))}
         </div>
@@ -399,6 +432,14 @@ export function RepositoryExplorer({
                 <span>languages</span>
               </article>
             </div>
+            <div className="overview-grid secondary-overview-grid">
+              <SnapshotDelta repositoryId={repositoryId} snapshot={snapshot} />
+              <AutomationStatus
+                integration={integration}
+                repository={repository}
+                unavailable={integrationUnavailable}
+              />
+            </div>
             <div className="overview-grid">
               <article className="panel language-panel">
                 <div className="panel-heading">
@@ -438,6 +479,38 @@ export function RepositoryExplorer({
                 {graph ? <ArchitectureMap compact graph={graph} onOpenSource={openSource} /> : null}
               </article>
             </div>
+            {snapshot.status === "ready" ? (
+              <article className="panel export-panel" aria-labelledby="export-title">
+                <div>
+                  <span className="eyebrow">Take the map with you</span>
+                  <h2 id="export-title">Deterministic snapshot exports</h2>
+                  <p>
+                    Download a report or architecture SVG fixed to this snapshot&apos;s complete
+                    commit and parser version.
+                  </p>
+                </div>
+                <div className="export-actions">
+                  <a
+                    className="secondary-button"
+                    download
+                    href={snapshotExportUrl(snapshot.id, "markdown")}
+                    rel="noopener noreferrer"
+                    target="_blank"
+                  >
+                    <FileCode2 size={15} aria-hidden /> Download Markdown
+                  </a>
+                  <a
+                    className="secondary-button"
+                    download
+                    href={snapshotExportUrl(snapshot.id, "svg", "package")}
+                    rel="noopener noreferrer"
+                    target="_blank"
+                  >
+                    <MapIcon size={15} aria-hidden /> Download SVG
+                  </a>
+                </div>
+              </article>
+            ) : null}
             <article className="panel trust-panel">
               <div>
                 <Sparkles size={19} />

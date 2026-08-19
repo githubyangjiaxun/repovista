@@ -1,4 +1,11 @@
-import { ArrowRight, GitBranch, Map as MapIcon, ShieldCheck } from "lucide-react";
+import {
+  ArrowRight,
+  Download,
+  GitBranch,
+  Map as MapIcon,
+  RefreshCw,
+  ShieldCheck,
+} from "lucide-react";
 import { SiteHeader } from "@/components/site-header";
 
 const features = [
@@ -15,7 +22,17 @@ const features = [
   {
     icon: GitBranch,
     title: "Useful without AI",
-    description: "Static analysis, source navigation, and search work with no model key.",
+    description: "TypeScript, JavaScript, and Python maps work with no model key.",
+  },
+  {
+    icon: RefreshCw,
+    title: "Incremental by evidence",
+    description: "Content hashes reveal exactly what was parsed, reused, changed, or deleted.",
+  },
+  {
+    icon: Download,
+    title: "Portable snapshot reports",
+    description: "Export deterministic Markdown and SVG fixed to one complete commit SHA.",
   },
 ];
 
@@ -32,7 +49,7 @@ export default function HomePage() {
         </h1>
         <p className="hero-copy">
           Paste a public GitHub repository and explore its architecture, source relationships, and
-          verifiable AI guidance.
+          verifiable AI guidance across TypeScript, JavaScript, and Python.
         </p>
         <form action="/repositories/new" className="import-form">
           <label className="sr-only" htmlFor="repository-url">
@@ -51,7 +68,8 @@ export default function HomePage() {
           </button>
         </form>
         <p className="privacy-note">
-          Public repositories only in v0.1. Imported code is never run.
+          Public repositories only. Imported code is never run. Signed default-branch pushes can
+          create incremental snapshots automatically.
         </p>
       </section>
 
