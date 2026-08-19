@@ -9,7 +9,9 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: continuousIntegration,
   retries: continuousIntegration ? 2 : 0,
-  workers: continuousIntegration ? 1 : undefined,
+  // A single dev server is intentionally shared by all browser journeys. This avoids
+  // hydration/compilation races in Next development mode while CI remains deterministic.
+  workers: 1,
   reporter: continuousIntegration
     ? [["github"], ["html", { open: "never", outputFolder: "playwright-report" }]]
     : [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]],

@@ -177,6 +177,10 @@ export function RepositoryExplorer({ repositoryId }: { repositoryId: string }) {
   async function createShare() {
     if (!snapshot || !repository) return;
     setSharing(true);
+    // Open the tab during the user gesture so browser popup blockers do not discard the
+    // share destination after the asynchronous API request completes.
+    const shareWindow = window.open("about:blank", "_blank");
+    if (shareWindow) shareWindow.opener = null;
     try {
       const report = await apiFetch<{ id: string; slug: string }>("/v1/share-reports", {
         method: "POST",
@@ -185,8 +189,14 @@ export function RepositoryExplorer({ repositoryId }: { repositoryId: string }) {
           title: `${repository.owner}/${repository.name} architecture tour`,
         }),
       });
-      window.open(`/share/${report.slug}`, "_blank", "noopener,noreferrer");
+      const destination = `/share/${report.slug}`;
+      if (shareWindow && !shareWindow.closed) {
+        shareWindow.location.href = destination;
+      } else {
+        window.location.assign(destination);
+      }
     } catch (cause) {
+      if (shareWindow && !shareWindow.closed) shareWindow.close();
       setError(cause instanceof ApiError ? cause.message : "Unable to create a share report.");
     } finally {
       setSharing(false);

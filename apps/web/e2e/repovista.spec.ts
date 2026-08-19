@@ -441,6 +441,13 @@ test("analyzes a repository and explores its evidence-backed result", async ({ c
   await page.getByRole("button", { name: /src\/server\.ts:3-10/ }).click();
   await expect(page.getByText("Evidence lines 3-10")).toBeVisible();
 
+  if (process.env.REPOVISTA_CAPTURE_README === "1") {
+    await page.screenshot({
+      path: "../../docs/assets/repovista-explorer.png",
+      fullPage: true,
+    });
+  }
+
   const popupPromise = page.waitForEvent("popup");
   await page.getByRole("button", { name: "Share tour" }).click();
   const popup = await popupPromise;
