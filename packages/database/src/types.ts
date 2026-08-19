@@ -55,6 +55,21 @@ export interface SnapshotFileRecord {
   parseStatus: string;
 }
 
+export type SnapshotFileSummary = Omit<SnapshotFileRecord, "content">;
+
+export interface ListSnapshotFilesOptions {
+  afterPath?: string;
+  language?: string;
+  limit?: number;
+  pathPrefix?: string;
+  query?: string;
+}
+
+export interface SnapshotFilePage {
+  files: SnapshotFileSummary[];
+  nextCursor: string | null;
+}
+
 export interface SymbolRecord {
   id: string;
   fileId: string;

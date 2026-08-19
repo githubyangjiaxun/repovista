@@ -1,10 +1,11 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 
 function migrationDirectory(): string {
-  return path.resolve(process.cwd(), "packages/database/migrations");
+  return fileURLToPath(new URL("../migrations/", import.meta.url));
 }
 
 export async function migrateDatabase(pool: DatabasePool): Promise<string[]> {

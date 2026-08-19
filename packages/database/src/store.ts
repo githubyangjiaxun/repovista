@@ -20,10 +20,12 @@ import type {
   CreateImportInput,
   CreateImportResult,
   JobEventRecord,
+  ListSnapshotFilesOptions,
   SaveAnswerInput,
   SearchEvidenceRecord,
   ShareReportContent,
   ShareReportRecord,
+  SnapshotFilePage,
   SnapshotFileRecord,
   SnapshotGraphData,
   SymbolEdgeRecord,
@@ -878,6 +880,53 @@ export class RepoVistaStore {
       commitSha: row.commit_sha,
       blobHash: row.blob_hash,
       truncated,
+    };
+  }
+
+  async listSnapshotFiles(
+    snapshotId: string,
+    options: ListSnapshotFilesOptions = {},
+  ): Promise<SnapshotFilePage> {
+    const limit = Math.min(100, Math.max(1, options.limit ?? 50));
+    const result = await this.pool.query<{
+      id: string;
+      path: string;
+      language: string | null;
+      byte_size: string | number;
+      line_count: number;
+      blob_hash: string;
+      parse_status: string;
+    }>(
+      "SELECT f.id, f.path, f.language, f.byte_size, f.line_count, f.blob_hash, " +
+        "f.parse_status FROM snapshot_files f " +
+        "JOIN repository_snapshots s ON s.id = f.snapshot_id " +
+        "WHERE f.snapshot_id = $1 AND s.status = 'ready' " +
+        "AND ($2::text IS NULL OR f.path > $2) " +
+        "AND ($3::text IS NULL OR f.path LIKE $3 || '%') " +
+        "AND ($4::text IS NULL OR f.language = $4) " +
+        "AND ($5::text IS NULL OR f.path ILIKE '%' || $5 || '%') " +
+        "ORDER BY f.path ASC LIMIT $6",
+      [
+        snapshotId,
+        options.afterPath ?? null,
+        options.pathPrefix ?? null,
+        options.language ?? null,
+        options.query ?? null,
+        limit + 1,
+      ],
+    );
+    const pageRows = result.rows.slice(0, limit);
+    return {
+      files: pageRows.map((row) => ({
+        id: row.id,
+        path: row.path,
+        language: row.language,
+        byteSize: Number(row.byte_size),
+        lineCount: row.line_count,
+        blobHash: row.blob_hash,
+        parseStatus: row.parse_status,
+      })),
+      nextCursor: result.rows.length > limit ? (pageRows.at(-1)?.path ?? null) : null,
     };
   }
 

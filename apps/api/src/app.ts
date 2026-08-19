@@ -5,11 +5,23 @@ import { getConfig } from "@repovista/config";
 import { createDatabasePool, type DatabasePool, RepoVistaStore } from "@repovista/database";
 import { isDomainError } from "@repovista/domain";
 import Fastify, { type FastifyInstance } from "fastify";
+import { registerRoutes } from "./routes.js";
 
 export interface AppDependencies {
   config?: AppConfig;
   pool?: DatabasePool;
   store?: RepoVistaStore;
+}
+
+function hasHttpStatus(error: unknown): error is { message: string; statusCode: number } {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "statusCode" in error &&
+    typeof error.statusCode === "number" &&
+    "message" in error &&
+    typeof error.message === "string"
+  );
 }
 
 export function buildApp(dependencies: AppDependencies = {}): {
@@ -37,6 +49,11 @@ export function buildApp(dependencies: AppDependencies = {}): {
     timeWindow: "1 minute",
   });
 
+  app.addHook("onSend", async (request, reply, payload) => {
+    reply.header("X-Request-ID", request.id);
+    return payload;
+  });
+
   app.get("/v1/health/live", async () => ({ status: "ok" }));
   app.get("/v1/health/ready", async (_request, reply) => {
     try {
@@ -48,15 +65,35 @@ export function buildApp(dependencies: AppDependencies = {}): {
     }
   });
 
+  registerRoutes(app, { config, store });
+
   app.setErrorHandler((error, request, reply) => {
     request.log.error({ err: error }, "request failed");
     if (isDomainError(error)) {
-      reply.status(error.code.endsWith("NOT_FOUND") ? 404 : 400).send({
+      const status = error.code.endsWith("NOT_FOUND")
+        ? 404
+        : error.code === "SNAPSHOT_NOT_READY"
+          ? 409
+          : error.code.startsWith("AI_PROVIDER")
+            ? 502
+            : 400;
+      reply.status(status).send({
         error: {
           code: error.code,
           message: error.message,
           details: error.details,
           retryable: error.retryable,
+          requestId: request.id,
+        },
+      });
+      return;
+    }
+    if (hasHttpStatus(error) && error.statusCode >= 400 && error.statusCode < 500) {
+      reply.status(error.statusCode).send({
+        error: {
+          code: error.statusCode === 429 ? "RATE_LIMITED" : "REQUEST_FAILED",
+          message: error.statusCode === 429 ? "Too many requests." : error.message,
+          retryable: error.statusCode === 429,
           requestId: request.id,
         },
       });

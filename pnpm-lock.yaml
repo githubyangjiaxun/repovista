@@ -59,6 +59,9 @@ importers:
       '@repovista/git':
         specifier: workspace:*
         version: link:../../packages/git
+      '@repovista/graph':
+        specifier: workspace:*
+        version: link:../../packages/graph
       '@repovista/retrieval':
         specifier: workspace:*
         version: link:../../packages/retrieval

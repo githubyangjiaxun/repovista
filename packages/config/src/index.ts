@@ -31,6 +31,9 @@ const envSchema = z.object({
   JOB_POLL_INTERVAL_MS: z.coerce.number().int().min(100).default(1_000),
   JOB_LEASE_SECONDS: z.coerce.number().int().min(5).default(30),
   WORKER_ID: z.string().min(1).default("local-worker"),
+  ANONYMOUS_IMPORTS_PER_HOUR: z.coerce.number().int().positive().default(3),
+  ANONYMOUS_QUESTIONS_PER_HOUR: z.coerce.number().int().positive().default(10),
+  SHARE_REPORTS_PER_HOUR: z.coerce.number().int().positive().default(10),
   RUN_MIGRATIONS_ON_START: booleanFromString,
 });
 
