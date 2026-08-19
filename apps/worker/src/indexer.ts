@@ -303,15 +303,36 @@ export async function executeIndexJob(
     return "succeeded";
   } catch (error) {
     if (error instanceof CancellationRequested) {
-      await store.cancelJob(job.id, job.snapshotId);
-      return "cancelled";
+      try {
+        await store.cancelJob(job.id, job.snapshotId, config.WORKER_ID);
+        return "cancelled";
+      } catch (cancelError) {
+        if (isDomainError(cancelError) && cancelError.code === "JOB_LEASE_LOST") {
+          return "lease-lost";
+        }
+        throw cancelError;
+      }
     }
     if (isDomainError(error) && error.code === "JOB_LEASE_LOST") {
       return "lease-lost";
     }
     const failure = failureDetails(error);
-    await store.failJob(job.id, job.snapshotId, failure.code, failure.message, failure.retryable);
-    return "failed";
+    try {
+      await store.failJob(
+        job.id,
+        job.snapshotId,
+        config.WORKER_ID,
+        failure.code,
+        failure.message,
+        failure.retryable,
+      );
+      return "failed";
+    } catch (failureError) {
+      if (isDomainError(failureError) && failureError.code === "JOB_LEASE_LOST") {
+        return "lease-lost";
+      }
+      throw failureError;
+    }
   } finally {
     await lease.stop();
     if (workspace) {

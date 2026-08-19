@@ -125,7 +125,7 @@ describe("executeIndexJob", () => {
 
     await expect(executeIndexJob(store, job, config, dependencies)).resolves.toBe("cancelled");
 
-    expect(store.cancelJob).toHaveBeenCalledWith(job.id, job.snapshotId);
+    expect(store.cancelJob).toHaveBeenCalledWith(job.id, job.snapshotId, config.WORKER_ID);
     expect(dependencies.cloneRepository).not.toHaveBeenCalled();
     expect(store.completeIndexJob).not.toHaveBeenCalled();
   });
@@ -143,10 +143,27 @@ describe("executeIndexJob", () => {
     expect(store.failJob).toHaveBeenCalledWith(
       job.id,
       job.snapshotId,
+      config.WORKER_ID,
       "REPOSITORY_CLONE_FAILED",
       "Clone failed.",
       true,
     );
+    expect(dependencies.removeWorkspace).toHaveBeenCalledWith("/tmp/repovista-test");
+  });
+
+  it("does not overwrite a job after failure handling loses the lease", async () => {
+    const store = createStore();
+    vi.mocked(store.failJob).mockRejectedValue(
+      new DomainError("JOB_LEASE_LOST", "Another worker owns this job.", { retryable: true }),
+    );
+    const dependencies = createDependencies({
+      cloneRepository: vi.fn(async () => {
+        throw new DomainError("REPOSITORY_CLONE_FAILED", "Clone failed.", { retryable: true });
+      }),
+    });
+
+    await expect(executeIndexJob(store, job, config, dependencies)).resolves.toBe("lease-lost");
+    expect(store.completeIndexJob).not.toHaveBeenCalled();
     expect(dependencies.removeWorkspace).toHaveBeenCalledWith("/tmp/repovista-test");
   });
 });

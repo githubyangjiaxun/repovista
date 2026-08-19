@@ -12,7 +12,7 @@ const integration = describe.runIf(databaseUrl !== undefined);
 integration("RepoVistaStore with PostgreSQL", () => {
   let pool: DatabasePool;
   let store: RepoVistaStore;
-  let repositoryId: string | undefined;
+  const repositoryIds = new Set<string>();
 
   beforeAll(async () => {
     if (!databaseUrl) throw new Error("DATABASE_TEST_URL is required.");
@@ -22,8 +22,8 @@ integration("RepoVistaStore with PostgreSQL", () => {
   }, 30_000);
 
   afterAll(async () => {
-    if (repositoryId) {
-      await pool.query("DELETE FROM repositories WHERE id = $1", [repositoryId]);
+    if (repositoryIds.size > 0) {
+      await pool.query("DELETE FROM repositories WHERE id = ANY($1::uuid[])", [[...repositoryIds]]);
       await pool.query(
         "DELETE FROM content_blobs b WHERE NOT EXISTS (" +
           "SELECT 1 FROM snapshot_files f WHERE f.blob_hash = b.hash" +
@@ -46,12 +46,13 @@ integration("RepoVistaStore with PostgreSQL", () => {
       ignore: [],
       parserVersion: "integration-test-v1",
     });
-    repositoryId = imported.repositoryId;
+    repositoryIds.add(imported.repositoryId);
     const job = await store.claimIndexJob("integration-worker", 30);
     expect(job).toMatchObject({ id: imported.jobId, snapshotId: imported.snapshotId });
     if (!job) throw new Error("Expected a claimed job.");
 
     const content = [
+      'const moduleEntryMarker = "module-entry-marker";',
       "export function hello(name: string) {",
       '  return "Hello " + name;',
       "}",
@@ -68,7 +69,7 @@ integration("RepoVistaStore with PostgreSQL", () => {
           absolutePath: "/tmp/repovista-integration/src/index.ts",
           language: "typescript",
           byteSize: Buffer.byteLength(content),
-          lineCount: 3,
+          lineCount: 4,
           content,
           contentHash,
           isGenerated: false,
@@ -88,7 +89,7 @@ integration("RepoVistaStore with PostgreSQL", () => {
               signature: null,
               startLine: 1,
               startColumn: 0,
-              endLine: 3,
+              endLine: 4,
               endColumn: 0,
               docText: null,
               contentHash,
@@ -99,9 +100,9 @@ integration("RepoVistaStore with PostgreSQL", () => {
               name: "hello",
               qualifiedName: "hello",
               signature: "hello(name: string)",
-              startLine: 1,
+              startLine: 2,
               startColumn: 0,
-              endLine: 3,
+              endLine: 4,
               endColumn: 1,
               docText: null,
               contentHash,
@@ -115,8 +116,8 @@ integration("RepoVistaStore with PostgreSQL", () => {
               confidence: 1,
               evidence: {
                 path: "src/index.ts",
-                startLine: 1,
-                endLine: 3,
+                startLine: 2,
+                endLine: 4,
                 syntaxType: "function_declaration",
               },
             },
@@ -140,22 +141,27 @@ integration("RepoVistaStore with PostgreSQL", () => {
       indexed,
     );
 
-    const [snapshot, completedJob, graph, source, filePage, evidence] = await Promise.all([
-      store.getSnapshot(job.snapshotId),
-      store.getJob(job.id),
-      store.getSnapshotGraphData(job.snapshotId),
-      store.getSourceFile(job.snapshotId, "src/index.ts"),
-      store.listSnapshotFiles(job.snapshotId),
-      store.searchEvidence(job.snapshotId, "hello", 10),
-    ]);
+    const [snapshot, completedJob, graph, source, boundedSource, filePage, evidence, fileEvidence] =
+      await Promise.all([
+        store.getSnapshot(job.snapshotId),
+        store.getJob(job.id),
+        store.getSnapshotGraphData(job.snapshotId),
+        store.getSourceFile(job.snapshotId, "src/index.ts"),
+        store.getSourceFile(job.snapshotId, "src/index.ts", 999, 1_000),
+        store.listSnapshotFiles(job.snapshotId),
+        store.searchEvidence(job.snapshotId, "hello", 10),
+        store.searchEvidence(job.snapshotId, "module-entry-marker", 10),
+      ]);
     expect(snapshot).toMatchObject({ status: "ready", commitSha: indexed.commitSha });
     expect(completedJob).toMatchObject({ status: "succeeded", progress: 1 });
     expect(graph?.symbols).toHaveLength(2);
     expect(graph?.edges).toHaveLength(1);
     expect(source?.content).toBe(content);
     expect(source?.startLine).toBe(1);
+    expect(boundedSource).toMatchObject({ startLine: 4, content: "}" });
     expect(filePage.files).toHaveLength(1);
     expect(evidence[0]).toMatchObject({ path: "src/index.ts", symbol: "hello" });
+    expect(fileEvidence[0]).toMatchObject({ path: "src/index.ts", symbol: null, startLine: 1 });
 
     const firstEvidence = evidence[0];
     if (!firstEvidence) throw new Error("Expected searchable evidence.");
@@ -198,6 +204,51 @@ integration("RepoVistaStore with PostgreSQL", () => {
     expect(loadedShare).toMatchObject({
       title: "Integration report",
       snapshot: { id: job.snapshotId },
+    });
+  });
+
+  it("allows only the lease owner to fail a job and preserves retryability", async () => {
+    const suffix = randomUUID();
+    const imported = await store.createRepositoryImport({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      identity: {
+        owner: "repovista-test",
+        name: suffix,
+        canonicalUrl: `https://github.com/repovista-test/${suffix}`,
+        cloneUrl: `https://github.com/repovista-test/${suffix}.git`,
+      },
+      ignore: [],
+      parserVersion: "integration-test-v1",
+    });
+    repositoryIds.add(imported.repositoryId);
+    const job = await store.claimIndexJob("lease-owner", 30);
+    expect(job?.id).toBe(imported.jobId);
+    if (!job) throw new Error("Expected a claimed job.");
+
+    await expect(
+      store.failJob(
+        job.id,
+        job.snapshotId,
+        "different-worker",
+        "REPOSITORY_CLONE_FAILED",
+        "Clone failed.",
+        true,
+      ),
+    ).rejects.toMatchObject({ code: "JOB_LEASE_LOST" });
+    expect(await store.getJob(job.id)).toMatchObject({ status: "running", retryable: false });
+
+    await store.failJob(
+      job.id,
+      job.snapshotId,
+      "lease-owner",
+      "REPOSITORY_CLONE_FAILED",
+      "Clone failed.",
+      true,
+    );
+    expect(await store.getJob(job.id)).toMatchObject({
+      status: "queued",
+      retryable: true,
+      error: { code: "REPOSITORY_CLONE_FAILED" },
     });
   });
 });

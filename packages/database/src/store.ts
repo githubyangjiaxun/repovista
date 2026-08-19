@@ -72,6 +72,7 @@ interface JobRow {
   max_attempts: number;
   error_code: string | null;
   error_message: string | null;
+  error_retryable: boolean;
 }
 
 function iso(value: Date | string): string {
@@ -134,7 +135,7 @@ function mapJob(row: JobRow): Job {
     progress: Number(row.progress),
     processed: row.processed === null ? null : Number(row.processed),
     total: row.total === null ? null : Number(row.total),
-    retryable: row.status === "failed" && row.attempt_count < row.max_attempts,
+    retryable: row.error_retryable,
     error:
       row.error_code === null
         ? null
@@ -158,6 +159,52 @@ function hashText(content: string): string {
 
 function approximateTokens(content: string): number {
   return Math.max(1, Math.ceil(content.length / 4));
+}
+
+function fileTextChunks(content: string, maximumCharacters = 100_000) {
+  const lines = content.split(/\r?\n/);
+  const chunks: { content: string; endLine: number; startLine: number }[] = [];
+  let selected: string[] = [];
+  let selectedCharacters = 0;
+  let startLine = 1;
+
+  const flush = (endLine: number) => {
+    const chunkContent = selected.join("\n");
+    if (chunkContent.trim().length > 0) {
+      chunks.push({ content: chunkContent, startLine, endLine });
+    }
+    selected = [];
+    selectedCharacters = 0;
+  };
+
+  for (const [index, line] of lines.entries()) {
+    const lineNumber = index + 1;
+    if (line.length > maximumCharacters) {
+      if (selected.length > 0) flush(lineNumber - 1);
+      for (let offset = 0; offset < line.length; offset += maximumCharacters) {
+        chunks.push({
+          content: line.slice(offset, offset + maximumCharacters),
+          startLine: lineNumber,
+          endLine: lineNumber,
+        });
+      }
+      startLine = lineNumber + 1;
+      continue;
+    }
+
+    const separatorCharacters = selected.length > 0 ? 1 : 0;
+    if (
+      selected.length > 0 &&
+      selectedCharacters + separatorCharacters + line.length > maximumCharacters
+    ) {
+      flush(lineNumber - 1);
+      startLine = lineNumber;
+    }
+    selected.push(line);
+    selectedCharacters += (selected.length > 1 ? 1 : 0) + line.length;
+  }
+  if (selected.length > 0) flush(lines.length);
+  return chunks;
 }
 
 export class RepoVistaStore {
@@ -303,7 +350,9 @@ export class RepoVistaStore {
   async getJob(jobId: string): Promise<Job | null> {
     const result = await this.pool.query<JobRow>(
       "SELECT id, snapshot_id, job_type, status, phase, progress, processed, total, " +
-        "attempt_count, max_attempts, error_code, error_message " +
+        "attempt_count, max_attempts, error_code, error_message, " +
+        "COALESCE((error_details_json->>'retryable')::boolean, false) " +
+        "AND status IN ('queued', 'failed') AS error_retryable " +
         "FROM analysis_jobs WHERE id = $1",
       [jobId],
     );
@@ -350,7 +399,9 @@ export class RepoVistaStore {
           ") UPDATE analysis_jobs jobs SET " +
           "status = 'running', lease_owner = $1, " +
           "lease_expires_at = now() + ($2 * interval '1 second'), " +
-          "attempt_count = attempt_count + 1, started_at = COALESCE(started_at, now()) " +
+          "attempt_count = attempt_count + 1, started_at = COALESCE(started_at, now()), " +
+          "phase = 'starting', progress = 0, processed = NULL, total = NULL, " +
+          "error_code = NULL, error_message = NULL, error_details_json = NULL, finished_at = NULL " +
           "FROM candidate WHERE jobs.id = candidate.id " +
           "RETURNING jobs.id, jobs.repository_id, jobs.snapshot_id, jobs.workspace_id, " +
           "jobs.attempt_count, jobs.max_attempts",
@@ -461,13 +512,22 @@ export class RepoVistaStore {
     });
   }
 
-  async cancelJob(jobId: string, snapshotId: string): Promise<void> {
+  async cancelJob(jobId: string, snapshotId: string, workerId: string): Promise<void> {
     await withTransaction(this.pool, async (client) => {
-      await client.query(
+      const cancelled = await client.query(
         "UPDATE analysis_jobs SET status = 'cancelled', finished_at = now(), " +
-          "lease_owner = NULL, lease_expires_at = NULL WHERE id = $1",
-        [jobId],
+          "phase = 'cancelled', progress = 1, lease_owner = NULL, lease_expires_at = NULL " +
+          "WHERE id = $1 AND snapshot_id = $2 AND lease_owner = $3 AND status = 'running' " +
+          "RETURNING id",
+        [jobId, snapshotId, workerId],
       );
+      if (cancelled.rowCount !== 1) {
+        throw new DomainError(
+          "JOB_LEASE_LOST",
+          "The indexing job lease was lost before cancellation.",
+          { retryable: true },
+        );
+      }
       await client.query("UPDATE repository_snapshots SET status = 'cancelled' WHERE id = $1", [
         snapshotId,
       ]);
@@ -481,23 +541,34 @@ export class RepoVistaStore {
   async failJob(
     jobId: string,
     snapshotId: string,
+    workerId: string,
     code: string,
     message: string,
     retryable: boolean,
   ): Promise<void> {
     await withTransaction(this.pool, async (client) => {
       const jobResult = await client.query<{ attempt_count: number; max_attempts: number }>(
-        "SELECT attempt_count, max_attempts FROM analysis_jobs WHERE id = $1 FOR UPDATE",
-        [jobId],
+        "SELECT attempt_count, max_attempts FROM analysis_jobs " +
+          "WHERE id = $1 AND snapshot_id = $2 AND lease_owner = $3 AND status = 'running' " +
+          "FOR UPDATE",
+        [jobId, snapshotId, workerId],
       );
       const job = jobResult.rows[0];
-      const shouldRetry = retryable && job !== undefined && job.attempt_count < job.max_attempts;
+      if (!job) {
+        throw new DomainError(
+          "JOB_LEASE_LOST",
+          "The indexing job lease was lost before failure handling.",
+          { retryable: true },
+        );
+      }
+      const shouldRetry = retryable && job.attempt_count < job.max_attempts;
       await client.query(
         "UPDATE analysis_jobs SET status = $2, error_code = $3, error_message = $4, " +
+          "error_details_json = jsonb_build_object('retryable', $5::boolean), " +
           "lease_owner = NULL, lease_expires_at = NULL, " +
           "finished_at = CASE WHEN $2 = 'failed' THEN now() ELSE NULL END " +
           "WHERE id = $1",
-        [jobId, shouldRetry ? "queued" : "failed", code, message],
+        [jobId, shouldRetry ? "queued" : "failed", code, message, retryable],
       );
       await client.query(
         "UPDATE repository_snapshots SET status = $2, error_code = $3, error_message = $4, " +
@@ -683,25 +754,23 @@ export class RepoVistaStore {
         if (!fileId) continue;
         const parsedFile = parsedByPath.get(file.path);
         const chunkSymbols = parsedFile?.symbols.filter((symbol) => symbol.kind !== "module") ?? [];
-        if (chunkSymbols.length === 0) {
-          const content = file.content.slice(0, 100_000);
-          if (content.trim().length === 0) continue;
+        for (const chunk of fileTextChunks(file.content)) {
           await client.query(
             "INSERT INTO code_chunks (" +
               "id, snapshot_id, snapshot_file_id, chunk_type, start_line, end_line, " +
               "content, content_hash, token_count" +
-              ") VALUES ($1, $2, $3, 'file', 1, $4, $5, $6, $7)",
+              ") VALUES ($1, $2, $3, 'file', $4, $5, $6, $7, $8)",
             [
               createId(),
               snapshotId,
               fileId,
-              Math.max(1, Math.min(file.lineCount, content.split(/\r?\n/).length)),
-              content,
-              hashText(content),
-              approximateTokens(content),
+              chunk.startLine,
+              chunk.endLine,
+              chunk.content,
+              hashText(chunk.content),
+              approximateTokens(chunk.content),
             ],
           );
-          continue;
         }
         for (const symbol of chunkSymbols) {
           const symbolId = symbolIdByStableKey.get(symbol.stableKey);
@@ -742,7 +811,7 @@ export class RepoVistaStore {
       await client.query(
         "UPDATE analysis_jobs SET status = 'succeeded', phase = 'completed', progress = 1, " +
           "processed = total, lease_owner = NULL, lease_expires_at = NULL, finished_at = now(), " +
-          "error_code = NULL, error_message = NULL WHERE id = $1",
+          "error_code = NULL, error_message = NULL, error_details_json = NULL WHERE id = $1",
         [jobId],
       );
       await this.appendJobEvent(client, jobId, "completed", {
@@ -868,9 +937,10 @@ export class RepoVistaStore {
     );
     const row = result.rows[0];
     if (!row) return null;
-    const from = startLine ?? 1;
-    const to = endLine ?? row.line_count;
-    const truncated = from > 1 || to < row.line_count;
+    const maximumLine = Math.max(1, row.line_count);
+    const from = Math.min(startLine ?? 1, maximumLine);
+    const to = Math.min(Math.max(endLine ?? maximumLine, from), maximumLine);
+    const truncated = from > 1 || to < maximumLine;
     return {
       id: row.id,
       path: row.path,
@@ -987,6 +1057,12 @@ export class RepoVistaStore {
   }
 
   async saveAnswer(input: SaveAnswerInput): Promise<string> {
+    if (input.evidence.some((item) => item.snapshotId !== input.snapshotId)) {
+      throw new DomainError(
+        "EVIDENCE_SCOPE_INVALID",
+        "Answer evidence must belong to the selected snapshot.",
+      );
+    }
     return withTransaction(this.pool, async (client) => {
       const conversationId = createId();
       const userMessageId = createId();
@@ -1027,7 +1103,12 @@ export class RepoVistaStore {
       const evidenceById = new Map(input.evidence.map((item) => [item.id, item]));
       for (const [ordinal, citation] of input.answer.citations.entries()) {
         const evidence = evidenceById.get(citation.evidenceId);
-        if (!evidence) continue;
+        if (!evidence) {
+          throw new DomainError(
+            "EVIDENCE_NOT_FOUND",
+            "A verified answer citation is missing its source evidence.",
+          );
+        }
         await client.query(
           "INSERT INTO message_citations (" +
             "id, message_id, snapshot_file_id, symbol_id, evidence_id, start_line, end_line, " +
@@ -1060,7 +1141,13 @@ export class RepoVistaStore {
   ): Promise<{ id: string; slug: string }> {
     const repository = await this.getRepository(repositoryId);
     const snapshot = await this.getSnapshot(snapshotId);
-    if (!repository || !snapshot || snapshot.status !== "ready" || !snapshot.commitSha) {
+    if (
+      !repository ||
+      !snapshot ||
+      snapshot.repositoryId !== repositoryId ||
+      snapshot.status !== "ready" ||
+      !snapshot.commitSha
+    ) {
       throw new DomainError(
         "SNAPSHOT_NOT_READY",
         "A share report can only be created for a ready snapshot.",
