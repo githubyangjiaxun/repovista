@@ -32,6 +32,7 @@ import { ArchitectureMap } from "@/components/architecture-map";
 import {
   ApiError,
   type AskResult,
+  apiErrorMessage,
   apiFetch,
   type CreateRepositoryResult,
   type GraphResponse,
@@ -66,7 +67,13 @@ function sourceUrl(snapshotId: string, filePath: string, startLine?: number, end
   return `/v1/snapshots/${snapshotId}/source?${query.toString()}`;
 }
 
-export function RepositoryExplorer({ repositoryId }: { repositoryId: string }) {
+export function RepositoryExplorer({
+  repositoryId,
+  snapshotId: requestedSnapshotId,
+}: {
+  repositoryId: string;
+  snapshotId?: string;
+}) {
   const router = useRouter();
   const [repository, setRepository] = useState<RepositorySummary | null>(null);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -94,7 +101,7 @@ export function RepositoryExplorer({ repositoryId }: { repositoryId: string }) {
       if (query.trim()) params.set("query", query.trim());
       setGraph(await apiFetch<GraphResponse>(`/v1/snapshots/${snapshotId}/map?${params}`));
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : "Unable to load the architecture map.");
+      setError(apiErrorMessage(cause, "Unable to load the architecture map."));
     } finally {
       setGraphLoading(false);
     }
@@ -108,18 +115,22 @@ export function RepositoryExplorer({ repositoryId }: { repositoryId: string }) {
         const nextRepository = await apiFetch<RepositorySummary>(
           `/v1/repositories/${repositoryId}`,
         );
-        if (!nextRepository.latestSnapshotId) {
+        const selectedSnapshotId = requestedSnapshotId ?? nextRepository.latestSnapshotId;
+        if (!selectedSnapshotId) {
           throw new ApiError("This repository does not have a ready snapshot yet.", {
             code: "SNAPSHOT_NOT_READY",
             retryable: true,
           });
         }
         const [nextSnapshot, filePage] = await Promise.all([
-          apiFetch<Snapshot>(`/v1/snapshots/${nextRepository.latestSnapshotId}`),
-          apiFetch<SnapshotFilePage>(
-            `/v1/snapshots/${nextRepository.latestSnapshotId}/files?pageSize=100`,
-          ),
+          apiFetch<Snapshot>(`/v1/snapshots/${selectedSnapshotId}`),
+          apiFetch<SnapshotFilePage>(`/v1/snapshots/${selectedSnapshotId}/files?pageSize=100`),
         ]);
+        if (nextSnapshot.repositoryId !== repositoryId) {
+          throw new ApiError("The selected snapshot does not belong to this repository.", {
+            code: "SNAPSHOT_NOT_FOUND",
+          });
+        }
         if (!active) return;
         setRepository(nextRepository);
         setSnapshot(nextSnapshot);
@@ -127,7 +138,7 @@ export function RepositoryExplorer({ repositoryId }: { repositoryId: string }) {
         await loadGraph(nextSnapshot.id, "package");
       } catch (cause) {
         if (active) {
-          setError(cause instanceof ApiError ? cause.message : "Unable to load this repository.");
+          setError(apiErrorMessage(cause, "Unable to load this repository."));
         }
       } finally {
         if (active) setLoading(false);
@@ -137,7 +148,7 @@ export function RepositoryExplorer({ repositoryId }: { repositoryId: string }) {
     return () => {
       active = false;
     };
-  }, [loadGraph, repositoryId]);
+  }, [loadGraph, requestedSnapshotId, repositoryId]);
 
   async function changeLevel(nextLevel: GraphLevel) {
     setLevel(nextLevel);
@@ -151,7 +162,7 @@ export function RepositoryExplorer({ repositoryId }: { repositoryId: string }) {
       setSource(await apiFetch<SourceFile>(sourceUrl(snapshot.id, filePath, startLine, endLine)));
       setError(null);
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : "Unable to load this source file.");
+      setError(apiErrorMessage(cause, "Unable to load this source file."));
     }
   }
 
@@ -168,7 +179,7 @@ export function RepositoryExplorer({ repositoryId }: { repositoryId: string }) {
         }),
       );
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : "Unable to answer this question.");
+      setError(apiErrorMessage(cause, "Unable to answer this question."));
     } finally {
       setAsking(false);
     }
@@ -197,7 +208,7 @@ export function RepositoryExplorer({ repositoryId }: { repositoryId: string }) {
       }
     } catch (cause) {
       if (shareWindow && !shareWindow.closed) shareWindow.close();
-      setError(cause instanceof ApiError ? cause.message : "Unable to create a share report.");
+      setError(apiErrorMessage(cause, "Unable to create a share report."));
     } finally {
       setSharing(false);
     }
@@ -215,7 +226,7 @@ export function RepositoryExplorer({ repositoryId }: { repositoryId: string }) {
         `/jobs/${result.jobId}?repositoryId=${result.repositoryId}&snapshotId=${result.snapshotId}`,
       );
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : "Unable to start reindexing.");
+      setError(apiErrorMessage(cause, "Unable to start reindexing."));
       setReindexing(false);
     }
   }

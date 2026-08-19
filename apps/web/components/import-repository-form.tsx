@@ -3,7 +3,7 @@
 import { ArrowRight, ChevronDown, Github, LoaderCircle, ShieldCheck } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useState } from "react";
-import { ApiError, apiFetch, type CreateRepositoryResult } from "@/lib/api";
+import { apiErrorMessage, apiFetch, type CreateRepositoryResult } from "@/lib/api";
 
 function validateGitHubUrl(value: string): string | null {
   try {
@@ -59,11 +59,7 @@ export function ImportRepositoryForm({ initialUrl = "" }: { initialUrl?: string 
       });
       router.push(`/jobs/${result.jobId}?${query.toString()}`);
     } catch (cause) {
-      setError(
-        cause instanceof ApiError
-          ? `${cause.message}${cause.requestId ? ` Request ID: ${cause.requestId}` : ""}`
-          : "Unable to start the repository analysis.",
-      );
+      setError(apiErrorMessage(cause, "Unable to start the repository analysis."));
     } finally {
       setSubmitting(false);
     }

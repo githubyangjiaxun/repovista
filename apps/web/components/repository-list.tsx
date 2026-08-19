@@ -3,7 +3,7 @@
 import { ArrowRight, GitBranch, Github, LoaderCircle, Plus } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { ApiError, apiFetch, type RepositorySummary } from "@/lib/api";
+import { apiErrorMessage, apiFetch, type RepositorySummary } from "@/lib/api";
 
 export function RepositoryList() {
   const [repositories, setRepositories] = useState<RepositorySummary[]>([]);
@@ -13,9 +13,7 @@ export function RepositoryList() {
   useEffect(() => {
     apiFetch<RepositorySummary[]>("/v1/repositories")
       .then(setRepositories)
-      .catch((cause) =>
-        setError(cause instanceof ApiError ? cause.message : "Unable to load repositories."),
-      )
+      .catch((cause) => setError(apiErrorMessage(cause, "Unable to load repositories.")))
       .finally(() => setLoading(false));
   }, []);
 
@@ -42,7 +40,11 @@ export function RepositoryList() {
         repositories.map((repository) => (
           <Link
             className="repository-card"
-            href={`/repositories/${repository.id}`}
+            href={
+              repository.latestSnapshotId
+                ? `/repositories/${repository.id}?snapshotId=${encodeURIComponent(repository.latestSnapshotId)}`
+                : `/repositories/${repository.id}`
+            }
             key={repository.id}
           >
             <div className="repository-card-icon">

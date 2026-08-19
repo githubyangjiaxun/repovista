@@ -43,6 +43,11 @@ export class ApiError extends Error {
   }
 }
 
+export function apiErrorMessage(cause: unknown, fallback: string): string {
+  if (!(cause instanceof ApiError)) return fallback;
+  return `${cause.message}${cause.requestId ? ` Request ID: ${cause.requestId}` : ""}`;
+}
+
 export async function apiFetch<T>(pathname: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${apiOrigin}${pathname}`, {
     ...init,

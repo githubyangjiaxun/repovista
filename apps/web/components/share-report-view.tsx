@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ArchitectureMap } from "@/components/architecture-map";
-import { ApiError, apiFetch, type ShareReport } from "@/lib/api";
+import { apiErrorMessage, apiFetch, type ShareReport } from "@/lib/api";
 
 function isGraph(value: unknown): value is Omit<GraphResponse, "level" | "snapshot"> {
   return typeof value === "object" && value !== null && "nodes" in value && "edges" in value;
@@ -24,9 +24,7 @@ export function ShareReportView({ slug }: { slug: string }) {
   useEffect(() => {
     apiFetch<ShareReport>(`/v1/share-reports/${encodeURIComponent(slug)}`)
       .then(setReport)
-      .catch((cause) =>
-        setError(cause instanceof ApiError ? cause.message : "Unable to load this report."),
-      );
+      .catch((cause) => setError(apiErrorMessage(cause, "Unable to load this report.")));
   }, [slug]);
 
   if (error)

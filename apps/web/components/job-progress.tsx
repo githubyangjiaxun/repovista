@@ -4,7 +4,7 @@ import { Check, Circle, CircleX, LoaderCircle, Radio, RotateCcw, X } from "lucid
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ApiError, apiFetch, apiOrigin, type Job } from "@/lib/api";
+import { apiErrorMessage, apiFetch, apiOrigin, type Job } from "@/lib/api";
 
 const stages = [
   { key: "cloning", label: "Clone the fixed Git commit" },
@@ -41,12 +41,15 @@ export function JobProgress({
       setJob(next);
       setError(null);
       if (next.status === "succeeded" && repositoryId) {
-        window.setTimeout(() => router.replace(`/repositories/${repositoryId}`), 900);
+        const destination = snapshotId
+          ? `/repositories/${repositoryId}?snapshotId=${encodeURIComponent(snapshotId)}`
+          : `/repositories/${repositoryId}`;
+        window.setTimeout(() => router.replace(destination), 900);
       }
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : "Unable to load job progress.");
+      setError(apiErrorMessage(cause, "Unable to load job progress."));
     }
-  }, [jobId, repositoryId, router]);
+  }, [jobId, repositoryId, router, snapshotId]);
 
   useEffect(() => {
     void refresh();
@@ -79,7 +82,7 @@ export function JobProgress({
       await apiFetch(`/v1/snapshots/${snapshotId}/cancel`, { method: "POST" });
       await refresh();
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : "Unable to cancel this analysis.");
+      setError(apiErrorMessage(cause, "Unable to cancel this analysis."));
     } finally {
       setCancelling(false);
     }
@@ -164,7 +167,14 @@ export function JobProgress({
 
       <div className="progress-actions">
         {job?.status === "succeeded" && repositoryId ? (
-          <Link className="primary-button" href={`/repositories/${repositoryId}`}>
+          <Link
+            className="primary-button"
+            href={
+              snapshotId
+                ? `/repositories/${repositoryId}?snapshotId=${encodeURIComponent(snapshotId)}`
+                : `/repositories/${repositoryId}`
+            }
+          >
             Open repository map
           </Link>
         ) : null}

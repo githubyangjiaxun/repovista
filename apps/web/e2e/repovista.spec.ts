@@ -404,7 +404,10 @@ test("analyzes a repository and explores its evidence-backed result", async ({ c
 
   await expect(page).toHaveURL(new RegExp(`/jobs/${jobId}`));
   await expect(page.getByRole("progressbar")).toBeVisible();
-  await expect(page).toHaveURL(`${webOrigin}/repositories/${repositoryId}`, { timeout: 12_000 });
+  await expect(page).toHaveURL(
+    `${webOrigin}/repositories/${repositoryId}?snapshotId=${snapshotId}`,
+    { timeout: 12_000 },
+  );
   expect(state.importRequests).toEqual([
     { url: repository.canonicalUrl, ref: "main", ignore: ["dist", "generated"] },
   ]);
@@ -468,7 +471,9 @@ test("lists existing repositories and opens an immutable snapshot", async ({ con
   await expect(page.getByRole("heading", { name: "signal-hub" })).toBeVisible();
   await expect(page.getByText("ready", { exact: true })).toBeVisible();
   await page.getByRole("link", { name: /acme signal-hub/ }).click();
-  await expect(page).toHaveURL(`${webOrigin}/repositories/${repositoryId}`);
+  await expect(page).toHaveURL(
+    `${webOrigin}/repositories/${repositoryId}?snapshotId=${snapshotId}`,
+  );
   await expect(page.getByText("main · 0123456")).toBeVisible();
 });
 
