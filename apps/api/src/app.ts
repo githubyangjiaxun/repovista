@@ -98,7 +98,8 @@ export function buildApp(dependencies: AppDependencies = {}): {
           : error.code === "GITHUB_APP_DISABLED"
             ? 503
             : error.code === "SNAPSHOT_NOT_READY" ||
-                error.code === "GITHUB_WEBHOOK_DELIVERY_CONFLICT"
+                error.code === "GITHUB_WEBHOOK_DELIVERY_CONFLICT" ||
+                error.code === "EXPORT_NOT_AVAILABLE"
               ? 409
               : error.code.startsWith("AI_")
                 ? 502

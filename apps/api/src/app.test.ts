@@ -478,6 +478,86 @@ describe("RepoVista API", () => {
     expect(result.json().data.nodes).toHaveLength(1);
   });
 
+  it("downloads deterministic Markdown and safely escaped SVG for the requested snapshot", async () => {
+    const { app } = createTestApp();
+    openApps.push(app);
+    const markdown = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/exports/markdown`,
+    });
+
+    expect(markdown.statusCode).toBe(200);
+    expect(markdown.headers["content-type"]).toBe("text/markdown; charset=utf-8");
+    expect(markdown.headers["content-disposition"]).toMatch(
+      /^attachment; filename="acme-demo-[a-f0-9]{12}-architecture\.md"$/,
+    );
+    expect(markdown.headers.etag).toMatch(/^"sha256-[A-Za-z0-9_-]+"$/);
+    expect(markdown.headers["x-content-type-options"]).toBe("nosniff");
+    expect(markdown.body).toContain(snapshot.commitSha);
+    expect(markdown.body).toContain(snapshotId);
+    expect(markdown.body).toContain(snapshot.parserVersion);
+    expect(markdown.body).not.toContain('"data"');
+
+    const store = createStore();
+    const graphData = await store.getSnapshotGraphData(snapshotId);
+    if (!graphData) throw new Error("Expected graph data fixture.");
+    vi.mocked(store.getRepository).mockResolvedValue({
+      ...repository,
+      owner: "acme & <team>",
+      name: 'demo "map"',
+    });
+    vi.mocked(store.getSnapshotGraphData).mockResolvedValue({
+      ...graphData,
+      files: graphData.files.map((file) => ({ ...file, path: "src/a&b/<entry>.ts" })),
+      symbols: graphData.symbols.map((symbol) => ({
+        ...symbol,
+        path: "src/a&b/<entry>.ts",
+        name: 'hello & <world> "quoted"',
+        qualifiedName: "hello & <world> 'quoted'",
+      })),
+    });
+    const special = createTestApp(store);
+    openApps.push(special.app);
+    const firstSvg = await special.app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/exports/svg?level=symbol`,
+    });
+    const secondSvg = await special.app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/exports/svg?level=symbol`,
+    });
+
+    expect(firstSvg.statusCode).toBe(200);
+    expect(firstSvg.headers["content-type"]).toBe("image/svg+xml; charset=utf-8");
+    expect(firstSvg.headers["content-disposition"]).toMatch(/-symbol-map\.svg"$/);
+    expect(firstSvg.headers["content-security-policy"]).toContain("default-src 'none'");
+    expect(firstSvg.body).toBe(secondSvg.body);
+    expect(firstSvg.body).toContain("&amp;");
+    expect(firstSvg.body).toContain("&lt;team&gt;");
+    expect(firstSvg.body).toContain("&quot;");
+    expect(firstSvg.body).toContain("&apos;");
+    expect(firstSvg.body).not.toContain("<team>");
+  });
+
+  it("rejects export requests until the exact snapshot is ready", async () => {
+    const store = createStore();
+    const graphData = await store.getSnapshotGraphData(snapshotId);
+    if (!graphData) throw new Error("Expected graph data fixture.");
+    vi.mocked(store.getSnapshotGraphData).mockResolvedValue({
+      ...graphData,
+      snapshot: { ...graphData.snapshot, commitSha: null, status: "parsing" },
+    });
+    const { app } = createTestApp(store);
+    openApps.push(app);
+    const result = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/exports/markdown`,
+    });
+
+    expect(result.statusCode).toBe(409);
+    expect(result.json().error.code).toBe("SNAPSHOT_NOT_READY");
+  });
+
   it("answers from retrieved evidence with the transparent fake provider", async () => {
     const { app, store } = createTestApp();
     openApps.push(app);

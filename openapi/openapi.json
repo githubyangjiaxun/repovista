@@ -313,6 +313,77 @@
         }
       }
     },
+    "/v1/snapshots/{snapshotId}/exports/markdown": {
+      "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
+      "get": {
+        "operationId": "exportSnapshotMarkdown",
+        "summary": "Download a deterministic architecture report for an immutable snapshot",
+        "tags": ["Snapshots"],
+        "responses": {
+          "200": {
+            "description": "Commit-pinned Markdown architecture report",
+            "headers": {
+              "Content-Disposition": {
+                "description": "Safe attachment filename",
+                "schema": { "type": "string" }
+              },
+              "ETag": {
+                "description": "Digest of the deterministic response body",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "text/markdown": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/exports/svg": {
+      "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
+      "get": {
+        "operationId": "exportSnapshotSvg",
+        "summary": "Download a deterministic architecture map for an immutable snapshot",
+        "tags": ["Snapshots"],
+        "parameters": [
+          {
+            "name": "level",
+            "in": "query",
+            "schema": {
+              "allOf": [{ "$ref": "#/components/schemas/GraphLevel" }],
+              "default": "package"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Commit-pinned, XML-escaped SVG architecture map",
+            "headers": {
+              "Content-Disposition": {
+                "description": "Safe attachment filename",
+                "schema": { "type": "string" }
+              },
+              "ETag": {
+                "description": "Digest of the deterministic response body",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "image/svg+xml": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
     "/v1/snapshots/{snapshotId}/cancel": {
       "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
       "post": {

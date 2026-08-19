@@ -13,11 +13,17 @@ import {
 } from "@repovista/contracts";
 import type { RepoVistaStore, SearchEvidenceRecord } from "@repovista/database";
 import { DomainError, PUBLIC_WORKSPACE_ID } from "@repovista/domain";
+import {
+  createMarkdownExport,
+  createSvgExport,
+  type ExportArtifact,
+  type SnapshotExportInput,
+} from "@repovista/exporter";
 import { parseGitHubUrl } from "@repovista/git";
 import { buildGraphView, type GraphView } from "@repovista/graph";
 import { PARSER_VERSION } from "@repovista/parser";
 import { reciprocalRankFusion, tokenizeQuestion } from "@repovista/retrieval";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 
 const repositoryParamsSchema = z.object({ repositoryId: idSchema });
@@ -73,6 +79,10 @@ const mapQuerySchema = z.object({
   query: z.string().trim().max(500).optional(),
   relationTypes: z.union([z.string(), z.array(z.string())]).optional(),
   rootId: z.string().max(1_000).optional(),
+});
+
+const svgExportQuerySchema = z.object({
+  level: graphLevelSchema.default("package"),
 });
 
 const askBodySchema = askRequestSchema.extend({
@@ -336,6 +346,52 @@ async function wait(milliseconds: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function loadSnapshotExport(
+  store: RepoVistaStore,
+  snapshotId: string,
+  level: GraphLevel,
+): Promise<SnapshotExportInput> {
+  const graphData = await store.getSnapshotGraphData(snapshotId);
+  if (!graphData) {
+    throw new DomainError("SNAPSHOT_NOT_FOUND", "The requested snapshot does not exist.");
+  }
+  requireReadySnapshot(graphData.snapshot);
+  const repository = await store.getRepository(graphData.snapshot.repositoryId);
+  if (!repository) {
+    throw new DomainError("EXPORT_NOT_AVAILABLE", "The snapshot repository is not available.");
+  }
+  const graph = buildGraphView(graphData, level, Number.MAX_SAFE_INTEGER);
+  return {
+    repository,
+    snapshot: graphData.snapshot,
+    files: graphData.files.map((file) => ({
+      path: file.path,
+      language: file.language,
+      byteSize: file.byteSize,
+      lineCount: file.lineCount,
+      parseStatus: file.parseStatus,
+    })),
+    graph: { level, ...graph },
+  };
+}
+
+function sendExport(reply: FastifyReply, artifact: ExportArtifact) {
+  const etag = `"sha256-${createHash("sha256").update(artifact.body).digest("base64url")}"`;
+  reply
+    .header("Cache-Control", "public, max-age=0, must-revalidate")
+    .header("Content-Disposition", `attachment; filename="${artifact.filename}"`)
+    .header("Content-Type", artifact.contentType)
+    .header("ETag", etag)
+    .header("X-Content-Type-Options", "nosniff");
+  if (artifact.contentType.startsWith("image/svg+xml")) {
+    reply.header(
+      "Content-Security-Policy",
+      "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+    );
+  }
+  return reply.send(artifact.body);
+}
+
 export function registerRoutes(
   app: FastifyInstance,
   dependencies: { config: AppConfig; store: RepoVistaStore },
@@ -473,6 +529,19 @@ export function registerRoutes(
       throw new DomainError("SNAPSHOT_NOT_FOUND", "The requested snapshot does not exist.");
     }
     return response(request, snapshot);
+  });
+
+  app.get("/v1/snapshots/:snapshotId/exports/markdown", async (request, reply) => {
+    const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    const input = await loadSnapshotExport(store, snapshotId, "package");
+    return sendExport(reply, createMarkdownExport(input));
+  });
+
+  app.get("/v1/snapshots/:snapshotId/exports/svg", async (request, reply) => {
+    const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    const { level } = parseInput(svgExportQuerySchema, request.query);
+    const input = await loadSnapshotExport(store, snapshotId, level);
+    return sendExport(reply, createSvgExport(input));
   });
 
   app.post("/v1/snapshots/:snapshotId/cancel", async (request, reply) => {

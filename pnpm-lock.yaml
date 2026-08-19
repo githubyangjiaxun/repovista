@@ -56,6 +56,9 @@ importers:
       '@repovista/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@repovista/exporter':
+        specifier: workspace:*
+        version: link:../../packages/exporter
       '@repovista/git':
         specifier: workspace:*
         version: link:../../packages/git
@@ -214,6 +217,12 @@ importers:
       uuid:
         specifier: ^13.0.0
         version: 13.0.2
+
+  packages/exporter:
+    dependencies:
+      '@repovista/contracts':
+        specifier: workspace:*
+        version: link:../contracts
 
   packages/git:
     dependencies:
