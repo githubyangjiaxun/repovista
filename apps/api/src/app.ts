@@ -74,7 +74,7 @@ export function buildApp(dependencies: AppDependencies = {}): {
         ? 404
         : error.code === "SNAPSHOT_NOT_READY"
           ? 409
-          : error.code.startsWith("AI_PROVIDER")
+          : error.code.startsWith("AI_")
             ? 502
             : 400;
       reply.status(status).send({

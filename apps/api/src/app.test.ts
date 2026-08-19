@@ -146,6 +146,7 @@ const openApps: ReturnType<typeof createTestApp>["app"][] = [];
 
 afterEach(async () => {
   await Promise.all(openApps.splice(0).map((app) => app.close()));
+  vi.unstubAllGlobals();
 });
 
 describe("RepoVista API", () => {
@@ -210,6 +211,44 @@ describe("RepoVista API", () => {
     });
     expect(result.json().data.answer.citations).toHaveLength(1);
     expect(store.saveAnswer).toHaveBeenCalledOnce();
+  });
+
+  it("classifies malformed model output as an upstream failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "not-json" } }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+    const store = createStore();
+    const config = loadConfig({
+      APP_ENV: "test",
+      LOG_LEVEL: "fatal",
+      MODEL_PROVIDER: "openai-compatible",
+      OPENAI_COMPATIBLE_BASE_URL: "http://model.test/v1",
+      CHAT_MODEL: "test-model",
+    });
+    const pool = { end: vi.fn(async () => undefined) } as unknown as DatabasePool;
+    const { app } = buildApp({ config, pool, store });
+    openApps.push(app);
+
+    const result = await app.inject({
+      method: "POST",
+      url: `/v1/repositories/${repositoryId}/ask`,
+      payload: { question: "Where is hello implemented?" },
+    });
+
+    expect(result.statusCode).toBe(502);
+    expect(result.json().error).toMatchObject({
+      code: "AI_OUTPUT_INVALID",
+      retryable: false,
+    });
+    expect(store.saveAnswer).not.toHaveBeenCalled();
   });
 
   it("streams persisted job events as SSE", async () => {
