@@ -1,4 +1,5 @@
 import type {
+  GitHubWebhookResult,
   GroundedAnswer,
   Job,
   RepositorySummary,
@@ -49,6 +50,27 @@ export interface IncrementalIndexBase {
   }[];
   parsedFiles: ParsedFile[];
 }
+
+export interface GitHubWebhookInput {
+  deliveryId: string;
+  eventName: string;
+  payloadSha256: string;
+  push: {
+    owner: string;
+    name: string;
+    canonicalUrl: string;
+    cloneUrl: string;
+    providerRepoId: string | null;
+    defaultBranch: string;
+    after: string;
+    ref: string;
+    deleted: boolean;
+    isPrivate: boolean;
+    installationId: number | null;
+  } | null;
+}
+
+export type GitHubWebhookProcessResult = GitHubWebhookResult;
 
 export interface JobEventRecord {
   id: number;

@@ -17,9 +17,116 @@
     { "name": "Snapshots" },
     { "name": "Jobs" },
     { "name": "Answers" },
-    { "name": "Shares" }
+    { "name": "Shares" },
+    { "name": "Integrations" }
   ],
   "paths": {
+    "/v1/integrations/github": {
+      "get": {
+        "operationId": "getGitHubIntegrationStatus",
+        "summary": "Report signed GitHub update capability",
+        "tags": ["Integrations"],
+        "responses": {
+          "200": {
+            "description": "GitHub integration status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/GitHubIntegrationStatus" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/integrations/github/webhooks": {
+      "post": {
+        "operationId": "receiveGitHubWebhook",
+        "summary": "Receive a signed public-repository GitHub event",
+        "tags": ["Integrations"],
+        "parameters": [
+          {
+            "name": "X-GitHub-Delivery",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 200 }
+          },
+          {
+            "name": "X-GitHub-Event",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "pattern": "^[A-Za-z0-9_-]+$"
+            }
+          },
+          {
+            "name": "X-Hub-Signature-256",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^sha256=[a-f0-9]{64}$" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "additionalProperties": true }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Event ignored or duplicate",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/GitHubWebhookResult" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Push accepted for indexing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/GitHubWebhookResult" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
     "/v1/health/live": {
       "get": {
         "operationId": "getLiveness",
@@ -601,6 +708,22 @@
           }
         }
       },
+      "Unauthorized": {
+        "description": "Webhook signature is invalid",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/FailureEnvelope" }
+          }
+        }
+      },
+      "ServiceUnavailable": {
+        "description": "The integration is disabled",
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/FailureEnvelope" }
+          }
+        }
+      },
       "NotFound": {
         "description": "Resource not found",
         "content": {
@@ -610,7 +733,7 @@
         }
       },
       "Conflict": {
-        "description": "Snapshot is not ready",
+        "description": "The request conflicts with current resource state",
         "content": {
           "application/json": {
             "schema": { "$ref": "#/components/schemas/FailureEnvelope" }
@@ -751,6 +874,8 @@
           "latestSnapshotId",
           "latestSnapshotStatus",
           "latestCommitSha",
+          "autoUpdateEnabled",
+          "lastWebhookAt",
           "createdAt",
           "updatedAt"
         ],
@@ -767,6 +892,10 @@
             "oneOf": [{ "$ref": "#/components/schemas/SnapshotStatus" }, { "type": "null" }]
           },
           "latestCommitSha": { "type": ["string", "null"] },
+          "autoUpdateEnabled": { "type": "boolean" },
+          "lastWebhookAt": {
+            "oneOf": [{ "$ref": "#/components/schemas/DateTime" }, { "type": "null" }]
+          },
           "createdAt": { "$ref": "#/components/schemas/DateTime" },
           "updatedAt": { "$ref": "#/components/schemas/DateTime" }
         }
@@ -813,6 +942,39 @@
               { "type": "null" }
             ]
           }
+        }
+      },
+      "GitHubIntegrationStatus": {
+        "type": "object",
+        "required": ["enabled", "appSlug", "events", "scope"],
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "appSlug": { "type": ["string", "null"] },
+          "events": { "type": "array", "items": { "type": "string", "enum": ["ping", "push"] } },
+          "scope": { "const": "public-repositories" }
+        }
+      },
+      "GitHubWebhookResult": {
+        "type": "object",
+        "required": [
+          "status",
+          "duplicate",
+          "deliveryId",
+          "reason",
+          "repositoryId",
+          "snapshotId",
+          "jobId"
+        ],
+        "properties": {
+          "status": { "type": "string", "enum": ["enqueued", "ignored", "duplicate"] },
+          "duplicate": { "type": "boolean" },
+          "deliveryId": { "type": "string" },
+          "reason": { "type": ["string", "null"] },
+          "repositoryId": {
+            "oneOf": [{ "$ref": "#/components/schemas/Uuid" }, { "type": "null" }]
+          },
+          "snapshotId": { "oneOf": [{ "$ref": "#/components/schemas/Uuid" }, { "type": "null" }] },
+          "jobId": { "oneOf": [{ "$ref": "#/components/schemas/Uuid" }, { "type": "null" }] }
         }
       },
       "Snapshot": {

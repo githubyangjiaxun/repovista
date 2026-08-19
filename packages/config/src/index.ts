@@ -5,6 +5,11 @@ const booleanFromString = z
   .transform((value) => value === "true")
   .default(false);
 
+const optionalSecret = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.string().min(1).optional(),
+);
+
 const envSchema = z.object({
   APP_ENV: z.enum(["development", "test", "production"]).default("development"),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
@@ -34,6 +39,14 @@ const envSchema = z.object({
   ANONYMOUS_IMPORTS_PER_HOUR: z.coerce.number().int().positive().default(3),
   ANONYMOUS_QUESTIONS_PER_HOUR: z.coerce.number().int().positive().default(10),
   SHARE_REPORTS_PER_HOUR: z.coerce.number().int().positive().default(10),
+  GITHUB_WEBHOOK_SECRET: optionalSecret,
+  GITHUB_APP_SLUG: z.string().trim().min(1).max(100).default("repovista-local"),
+  GITHUB_WEBHOOK_BODY_MAX_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(10_485_760)
+    .default(1_048_576),
   RUN_MIGRATIONS_ON_START: booleanFromString,
 });
 

@@ -7,6 +7,7 @@ import {
   type IndexedRepository,
   type JobProgress,
   PUBLIC_USER_ID,
+  PUBLIC_WORKSPACE_ID,
 } from "@repovista/domain";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
@@ -14,6 +15,8 @@ import type {
   ClaimedIndexJob,
   CreateImportInput,
   CreateImportResult,
+  GitHubWebhookInput,
+  GitHubWebhookProcessResult,
   IncrementalIndexBase,
   JobEventRecord,
   ListSnapshotFilesOptions,
@@ -37,6 +40,8 @@ interface RepositoryRow {
   latest_ready_snapshot_id: string | null;
   latest_snapshot_status: Snapshot["status"] | null;
   latest_commit_sha: string | null;
+  auto_update_enabled: boolean;
+  last_webhook_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
 }
@@ -92,6 +97,8 @@ function mapRepository(row: RepositoryRow): RepositorySummary {
     latestSnapshotId: row.latest_ready_snapshot_id,
     latestSnapshotStatus: row.latest_snapshot_status,
     latestCommitSha: row.latest_commit_sha,
+    autoUpdateEnabled: row.auto_update_enabled ?? false,
+    lastWebhookAt: nullableIso(row.last_webhook_at),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
   };
@@ -298,7 +305,8 @@ export class RepoVistaStore {
     const result = await this.pool.query<RepositoryRow>(
       "SELECT r.id, r.owner_name, r.repo_name, r.canonical_url, r.default_branch, " +
         "r.latest_ready_snapshot_id, s.status AS latest_snapshot_status, " +
-        "s.commit_sha AS latest_commit_sha, r.created_at, r.updated_at " +
+        "s.commit_sha AS latest_commit_sha, r.auto_update_enabled, r.last_webhook_at, " +
+        "r.created_at, r.updated_at " +
         "FROM repositories r " +
         "LEFT JOIN repository_snapshots s ON s.id = r.latest_ready_snapshot_id " +
         "WHERE r.workspace_id = $1 ORDER BY r.updated_at DESC",
@@ -311,7 +319,8 @@ export class RepoVistaStore {
     const result = await this.pool.query<RepositoryRow>(
       "SELECT r.id, r.owner_name, r.repo_name, r.canonical_url, r.default_branch, " +
         "r.latest_ready_snapshot_id, s.status AS latest_snapshot_status, " +
-        "s.commit_sha AS latest_commit_sha, r.created_at, r.updated_at " +
+        "s.commit_sha AS latest_commit_sha, r.auto_update_enabled, r.last_webhook_at, " +
+        "r.created_at, r.updated_at " +
         "FROM repositories r " +
         "LEFT JOIN repository_snapshots s ON s.id = r.latest_ready_snapshot_id " +
         "WHERE r.id = $1",
@@ -319,6 +328,175 @@ export class RepoVistaStore {
     );
     const row = result.rows[0];
     return row ? mapRepository(row) : null;
+  }
+
+  async processGitHubWebhook(
+    input: GitHubWebhookInput,
+    parserVersion: string,
+  ): Promise<GitHubWebhookProcessResult> {
+    return withTransaction(this.pool, async (client) => {
+      const push = input.push;
+      if (input.eventName === "push" && !push) {
+        throw new DomainError(
+          "GITHUB_WEBHOOK_PAYLOAD_INVALID",
+          "A push webhook requires a validated push payload.",
+        );
+      }
+      const ignoredReason =
+        input.eventName === "ping"
+          ? "ping"
+          : input.eventName !== "push"
+            ? "event_not_supported"
+            : push?.isPrivate
+              ? "private_repository"
+              : push?.deleted
+                ? "deleted_ref"
+                : push?.ref !== `refs/heads/${push?.defaultBranch}`
+                  ? "non_default_branch"
+                  : !/^[a-f0-9]{40}$/i.test(push?.after ?? "")
+                    ? "invalid_commit"
+                    : null;
+      const inserted = await client.query<{ delivery_id: string }>(
+        "INSERT INTO github_webhook_deliveries " +
+          "(delivery_id, event_name, payload_sha256, status, reason) " +
+          "VALUES ($1, $2, $3, $4, $5) " +
+          "ON CONFLICT (delivery_id) DO NOTHING RETURNING delivery_id",
+        [
+          input.deliveryId,
+          input.eventName,
+          input.payloadSha256,
+          ignoredReason ? "ignored" : "enqueued",
+          ignoredReason,
+        ],
+      );
+      if (inserted.rowCount === 0) {
+        const existing = await client.query<{
+          delivery_id: string;
+          payload_sha256: string;
+          status: "enqueued" | "ignored";
+          reason: string | null;
+          repository_id: string | null;
+          snapshot_id: string | null;
+          job_id: string | null;
+        }>(
+          "SELECT delivery_id, payload_sha256, status, reason, repository_id, snapshot_id, job_id " +
+            "FROM github_webhook_deliveries WHERE delivery_id = $1",
+          [input.deliveryId],
+        );
+        const old = existing.rows[0];
+        if (!old) {
+          throw new DomainError(
+            "GITHUB_WEBHOOK_DELIVERY_CONFLICT",
+            "The webhook delivery could not be resolved after an idempotency conflict.",
+            { retryable: true },
+          );
+        }
+        if (old.payload_sha256 !== input.payloadSha256) {
+          throw new DomainError(
+            "GITHUB_WEBHOOK_DELIVERY_CONFLICT",
+            "The delivery ID was received with a different payload.",
+          );
+        }
+        return {
+          status: "duplicate" as const,
+          duplicate: true,
+          deliveryId: old.delivery_id,
+          reason: old.reason,
+          repositoryId: old.repository_id,
+          snapshotId: old.snapshot_id,
+          jobId: old.job_id,
+        };
+      }
+
+      if (ignoredReason) {
+        return {
+          status: "ignored" as const,
+          duplicate: false,
+          deliveryId: input.deliveryId,
+          reason: ignoredReason,
+          repositoryId: null,
+          snapshotId: null,
+          jobId: null,
+        };
+      }
+
+      if (!push) {
+        throw new DomainError(
+          "GITHUB_WEBHOOK_PAYLOAD_INVALID",
+          "A supported webhook event did not contain repository data.",
+        );
+      }
+      const repositoryResult = await client.query<{ id: string }>(
+        "INSERT INTO repositories (" +
+          "id, workspace_id, provider, provider_repo_id, canonical_url, clone_url, " +
+          "owner_name, repo_name, default_branch, visibility, auto_update_enabled, " +
+          "github_installation_id, last_webhook_at" +
+          ") VALUES ($1, $2, 'github', $3, $4, $5, $6, $7, $8, 'public', true, $9, now()) " +
+          "ON CONFLICT (workspace_id, canonical_url) DO UPDATE SET " +
+          "provider_repo_id = COALESCE(EXCLUDED.provider_repo_id, repositories.provider_repo_id), " +
+          "clone_url = EXCLUDED.clone_url, owner_name = EXCLUDED.owner_name, " +
+          "repo_name = EXCLUDED.repo_name, default_branch = EXCLUDED.default_branch, " +
+          "visibility = 'public', auto_update_enabled = true, " +
+          "github_installation_id = COALESCE(" +
+          "EXCLUDED.github_installation_id, repositories.github_installation_id), " +
+          "last_webhook_at = now(), updated_at = now() RETURNING id",
+        [
+          createId(),
+          PUBLIC_WORKSPACE_ID,
+          push.providerRepoId,
+          push.canonicalUrl,
+          push.cloneUrl,
+          push.owner,
+          push.name,
+          push.defaultBranch,
+          push.installationId,
+        ],
+      );
+      const repositoryId = repositoryResult.rows[0]?.id;
+      if (!repositoryId) {
+        throw new DomainError(
+          "GITHUB_WEBHOOK_PAYLOAD_INVALID",
+          "The webhook repository could not be persisted.",
+          { retryable: true },
+        );
+      }
+
+      const snapshotId = createId();
+      const jobId = createId();
+      await client.query(
+        "INSERT INTO repository_snapshots (" +
+          "id, repository_id, commit_sha, parent_commit_sha, requested_ref, ref_name, status, parser_version" +
+          ") VALUES ($1, $2, $3, NULL, $4, $5, 'requested', $6)",
+        [snapshotId, repositoryId, null, push.after, push.defaultBranch, parserVersion],
+      );
+      await client.query(
+        "INSERT INTO analysis_jobs (" +
+          "id, workspace_id, repository_id, snapshot_id, job_type, status, idempotency_key" +
+          ") VALUES ($1, $2, $3, $4, 'index_snapshot', 'queued', $5)",
+        [jobId, PUBLIC_WORKSPACE_ID, repositoryId, snapshotId, `github:${input.deliveryId}`],
+      );
+      await this.appendJobEvent(client, jobId, "queued", {
+        phase: "queued",
+        progress: 0,
+        snapshotId,
+        source: "github_webhook",
+        deliveryId: input.deliveryId,
+      });
+      await client.query(
+        "UPDATE github_webhook_deliveries SET repository_id = $2, snapshot_id = $3, job_id = $4, " +
+          "processed_at = now() WHERE delivery_id = $1",
+        [input.deliveryId, repositoryId, snapshotId, jobId],
+      );
+      return {
+        status: "enqueued" as const,
+        duplicate: false,
+        deliveryId: input.deliveryId,
+        reason: null,
+        repositoryId,
+        snapshotId,
+        jobId,
+      };
+    });
   }
 
   async listSnapshots(repositoryId: string): Promise<Snapshot[]> {
@@ -773,7 +951,7 @@ export class RepoVistaStore {
       );
       const indexVersion = indexVersionResult.rows[0]?.next_version ?? 1;
       await client.query(
-        "UPDATE repository_snapshots SET commit_sha = $2, ref_name = $3, " +
+        "UPDATE repository_snapshots SET commit_sha = $2, ref_name = COALESCE($3, ref_name), " +
           "index_version = $4, base_snapshot_id = $5, index_mode = $6, tree_hash = $7, " +
           "status = 'building_graph', error_code = NULL, error_message = NULL " +
           "WHERE id = $1",

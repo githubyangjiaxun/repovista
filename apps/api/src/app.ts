@@ -7,6 +7,8 @@ import { isDomainError } from "@repovista/domain";
 import Fastify, { type FastifyInstance } from "fastify";
 import { registerRoutes } from "./routes.js";
 
+type FastifyRequestWithRawBody = { rawBody?: Buffer };
+
 export interface AppDependencies {
   config?: AppConfig;
   pool?: DatabasePool;
@@ -34,11 +36,30 @@ export function buildApp(dependencies: AppDependencies = {}): {
     dependencies.pool ?? createDatabasePool(config.DATABASE_URL, config.DATABASE_MAX_CONNECTIONS);
   const store = dependencies.store ?? new RepoVistaStore(pool);
   const app = Fastify({
+    bodyLimit: config.GITHUB_WEBHOOK_BODY_MAX_BYTES,
     logger: {
       level: config.LOG_LEVEL,
     },
     requestIdHeader: "x-request-id",
   });
+
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "buffer", bodyLimit: config.GITHUB_WEBHOOK_BODY_MAX_BYTES },
+    (request, body, done) => {
+      const rawBody = Buffer.isBuffer(body) ? body : Buffer.from(body);
+      if (request.url === "/v1/integrations/github/webhooks") {
+        (request as unknown as FastifyRequestWithRawBody).rawBody = rawBody;
+        done(null, rawBody);
+        return;
+      }
+      try {
+        done(null, JSON.parse(rawBody.toString("utf8")));
+      } catch (error) {
+        done(error as Error);
+      }
+    },
+  );
 
   void app.register(cors, {
     origin: config.WEB_ORIGIN,
@@ -72,11 +93,16 @@ export function buildApp(dependencies: AppDependencies = {}): {
     if (isDomainError(error)) {
       const status = error.code.endsWith("NOT_FOUND")
         ? 404
-        : error.code === "SNAPSHOT_NOT_READY"
-          ? 409
-          : error.code.startsWith("AI_")
-            ? 502
-            : 400;
+        : error.code === "GITHUB_WEBHOOK_SIGNATURE_INVALID"
+          ? 401
+          : error.code === "GITHUB_APP_DISABLED"
+            ? 503
+            : error.code === "SNAPSHOT_NOT_READY" ||
+                error.code === "GITHUB_WEBHOOK_DELIVERY_CONFLICT"
+              ? 409
+              : error.code.startsWith("AI_")
+                ? 502
+                : 400;
       reply.status(status).send({
         error: {
           code: error.code,

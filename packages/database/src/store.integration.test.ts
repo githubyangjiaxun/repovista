@@ -357,4 +357,148 @@ integration("RepoVistaStore with PostgreSQL", () => {
       error: { code: "REPOSITORY_CLONE_FAILED" },
     });
   });
+
+  it("enqueues GitHub pushes idempotently and records automation metadata", async () => {
+    const suffix = randomUUID();
+    const input = {
+      deliveryId: `delivery-${suffix}`,
+      eventName: "push",
+      payloadSha256: `sha256:${"a".repeat(64)}`,
+      push: {
+        owner: "repovista-test",
+        name: suffix,
+        canonicalUrl: `https://github.com/repovista-test/${suffix}`,
+        cloneUrl: `https://github.com/repovista-test/${suffix}.git`,
+        providerRepoId: "123456",
+        defaultBranch: "main",
+        after: "2123456789abcdef0123456789abcdef01234567",
+        ref: "refs/heads/main",
+        deleted: false,
+        isPrivate: false,
+        installationId: 789,
+      },
+    };
+
+    const concurrent = await Promise.all([
+      store.processGitHubWebhook(input, "integration-test-v2"),
+      store.processGitHubWebhook(input, "integration-test-v2"),
+    ]);
+    const created = concurrent.find((result) => result.status === "enqueued");
+    const concurrentDuplicate = concurrent.find((result) => result.status === "duplicate");
+    expect(created).toMatchObject({ status: "enqueued", duplicate: false, reason: null });
+    expect(concurrentDuplicate).toMatchObject({
+      status: "duplicate",
+      duplicate: true,
+      repositoryId: created?.repositoryId,
+      snapshotId: created?.snapshotId,
+      jobId: created?.jobId,
+    });
+    if (!created) throw new Error("Expected one concurrent delivery to enqueue resources.");
+    if (!created.repositoryId || !created.snapshotId || !created.jobId) {
+      throw new Error("Expected webhook resources.");
+    }
+    repositoryIds.add(created.repositoryId);
+    const replayed = await store.processGitHubWebhook(input, "integration-test-v2");
+    expect(replayed).toEqual({ ...created, status: "duplicate", duplicate: true });
+    await expect(
+      store.processGitHubWebhook(
+        { ...input, payloadSha256: `sha256:${"b".repeat(64)}` },
+        "integration-test-v2",
+      ),
+    ).rejects.toMatchObject({ code: "GITHUB_WEBHOOK_DELIVERY_CONFLICT" });
+
+    const [repository, snapshot, job] = await Promise.all([
+      store.getRepository(created.repositoryId),
+      store.getSnapshot(created.snapshotId),
+      store.getJob(created.jobId),
+    ]);
+    expect(repository).toMatchObject({
+      autoUpdateEnabled: true,
+      defaultBranch: "main",
+    });
+    expect(repository?.lastWebhookAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(snapshot).toMatchObject({
+      commitSha: null,
+      refName: input.push.defaultBranch,
+      status: "requested",
+      parserVersion: "integration-test-v2",
+    });
+    expect(job).toMatchObject({ status: "queued", snapshotId: created.snapshotId });
+    await pool.query("UPDATE analysis_jobs SET priority = -100 WHERE id = $1", [created.jobId]);
+    const claimed = await store.claimIndexJob("github-integration-worker", 30);
+    expect(claimed).toMatchObject({
+      id: created.jobId,
+      requestedRef: input.push.after,
+    });
+    if (!claimed) throw new Error("Expected the GitHub webhook job to be claimed.");
+    await store.completeIndexJob(
+      claimed.id,
+      claimed.snapshotId,
+      claimed.repositoryId,
+      "github-integration-worker",
+      {
+        commitSha: input.push.after,
+        branch: null,
+        baseSnapshotId: null,
+        indexMode: "full",
+        treeHash: `sha256:${"e".repeat(64)}`,
+        files: [],
+        parsedFiles: [],
+        stats: {
+          files: 0,
+          symbols: 0,
+          edges: 0,
+          languages: {},
+          warnings: 0,
+          indexing: {
+            mode: "full",
+            baseSnapshotId: null,
+            baseCommitSha: null,
+            scannedFiles: 0,
+            changedFiles: 0,
+            reusedFiles: 0,
+            parsedFiles: 0,
+            deletedFiles: 0,
+          },
+        },
+      },
+    );
+    expect(await store.getSnapshot(created.snapshotId)).toMatchObject({
+      commitSha: input.push.after,
+      refName: input.push.defaultBranch,
+      status: "ready",
+    });
+
+    const ignored = await store.processGitHubWebhook(
+      {
+        ...input,
+        deliveryId: `ignored-${suffix}`,
+        payloadSha256: `sha256:${"c".repeat(64)}`,
+        push: { ...input.push, ref: "refs/heads/feature" },
+      },
+      "integration-test-v2",
+    );
+    expect(ignored).toMatchObject({
+      status: "ignored",
+      duplicate: false,
+      reason: "non_default_branch",
+      repositoryId: null,
+    });
+
+    const unknown = await store.processGitHubWebhook(
+      {
+        deliveryId: `unknown-${suffix}`,
+        eventName: "issues",
+        payloadSha256: `sha256:${"d".repeat(64)}`,
+        push: null,
+      },
+      "integration-test-v2",
+    );
+    expect(unknown).toMatchObject({
+      status: "ignored",
+      duplicate: false,
+      reason: "event_not_supported",
+      repositoryId: null,
+    });
+  });
 });

@@ -1,6 +1,7 @@
+import { createHmac } from "node:crypto";
 import { loadConfig } from "@repovista/config";
 import type { DatabasePool, RepoVistaStore } from "@repovista/database";
-import { PUBLIC_WORKSPACE_ID } from "@repovista/domain";
+import { DomainError, PUBLIC_WORKSPACE_ID } from "@repovista/domain";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "./app.js";
 
@@ -20,6 +21,8 @@ const repository = {
   latestSnapshotId: snapshotId,
   latestSnapshotStatus: "ready" as const,
   latestCommitSha: "0123456789abcdef0123456789abcdef01234567",
+  autoUpdateEnabled: false,
+  lastWebhookAt: null,
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
@@ -143,11 +146,30 @@ function createStore(): RepoVistaStore {
     saveAnswer: vi.fn(async () => messageId),
     createShareReport: vi.fn(async () => ({ id: messageId, slug: "acme-demo-report" })),
     getShareReport: vi.fn(async () => null),
+    processGitHubWebhook: vi.fn(async (input) => ({
+      status: input.eventName === "push" ? ("enqueued" as const) : ("ignored" as const),
+      duplicate: false,
+      deliveryId: input.deliveryId,
+      reason:
+        input.eventName === "push"
+          ? null
+          : input.eventName === "ping"
+            ? "ping"
+            : "event_not_supported",
+      repositoryId: input.eventName === "push" ? repositoryId : null,
+      snapshotId: input.eventName === "push" ? snapshotId : null,
+      jobId: input.eventName === "push" ? jobId : null,
+    })),
   } as unknown as RepoVistaStore;
 }
 
-function createTestApp(store = createStore()) {
-  const config = loadConfig({ APP_ENV: "test", LOG_LEVEL: "fatal", MODEL_PROVIDER: "fake" });
+function createTestApp(store = createStore(), environment: NodeJS.ProcessEnv = {}) {
+  const config = loadConfig({
+    APP_ENV: "test",
+    LOG_LEVEL: "fatal",
+    MODEL_PROVIDER: "fake",
+    ...environment,
+  });
   const pool = { end: vi.fn(async () => undefined) } as unknown as DatabasePool;
   return { ...buildApp({ config, pool, store }), store };
 }
@@ -160,6 +182,223 @@ afterEach(async () => {
 });
 
 describe("RepoVista API", () => {
+  it("reports GitHub automation without exposing the webhook secret", async () => {
+    const { app } = createTestApp(createStore(), {
+      GITHUB_WEBHOOK_SECRET: "test-secret",
+      GITHUB_APP_SLUG: "repovista-test",
+    });
+    openApps.push(app);
+    const result = await app.inject({ method: "GET", url: "/v1/integrations/github" });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.json().data).toEqual({
+      enabled: true,
+      appSlug: "repovista-test",
+      events: ["ping", "push"],
+      scope: "public-repositories",
+    });
+    expect(result.body).not.toContain("test-secret");
+  });
+
+  it("verifies and enqueues a signed public default-branch push", async () => {
+    const store = createStore();
+    const secret = "test-secret";
+    const { app } = createTestApp(store, { GITHUB_WEBHOOK_SECRET: secret });
+    openApps.push(app);
+    const payload = JSON.stringify({
+      after: "1123456789abcdef0123456789abcdef01234567",
+      deleted: false,
+      ref: "refs/heads/main",
+      repository: {
+        id: 123,
+        name: "demo",
+        full_name: "acme/demo",
+        html_url: "https://github.com/acme/demo",
+        default_branch: "main",
+        private: false,
+        owner: { login: "acme" },
+      },
+      installation: { id: 456 },
+    });
+    const signature = `sha256=${createHmac("sha256", secret).update(payload).digest("hex")}`;
+    const result = await app.inject({
+      method: "POST",
+      url: "/v1/integrations/github/webhooks",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "delivery-1",
+        "x-github-event": "push",
+        "x-hub-signature-256": signature,
+      },
+      payload,
+    });
+
+    expect(result.statusCode).toBe(202);
+    expect(result.json().data).toMatchObject({ status: "enqueued", deliveryId: "delivery-1" });
+    expect(store.processGitHubWebhook).toHaveBeenCalledWith(
+      expect.objectContaining({
+        deliveryId: "delivery-1",
+        push: expect.objectContaining({
+          canonicalUrl: "https://github.com/acme/demo",
+          after: "1123456789abcdef0123456789abcdef01234567",
+          installationId: 456,
+        }),
+      }),
+      "tree-sitter-ts-js-py-v1",
+    );
+  });
+
+  it("records a signed unknown GitHub event and safely ignores it", async () => {
+    const store = createStore();
+    const secret = "test-secret";
+    const { app } = createTestApp(store, { GITHUB_WEBHOOK_SECRET: secret });
+    openApps.push(app);
+    const payload = JSON.stringify({ action: "opened" });
+    const signature = `sha256=${createHmac("sha256", secret).update(payload).digest("hex")}`;
+    const result = await app.inject({
+      method: "POST",
+      url: "/v1/integrations/github/webhooks",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "delivery-unknown",
+        "x-github-event": "issues",
+        "x-hub-signature-256": signature,
+      },
+      payload,
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.json().data).toMatchObject({
+      status: "ignored",
+      reason: "event_not_supported",
+    });
+    expect(store.processGitHubWebhook).toHaveBeenCalledWith(
+      expect.objectContaining({
+        deliveryId: "delivery-unknown",
+        eventName: "issues",
+        push: null,
+      }),
+      "tree-sitter-ts-js-py-v1",
+    );
+  });
+
+  it("accepts a signed GitHub ping without creating an indexing job", async () => {
+    const store = createStore();
+    const secret = "test-secret";
+    const { app } = createTestApp(store, { GITHUB_WEBHOOK_SECRET: secret });
+    openApps.push(app);
+    const payload = JSON.stringify({ zen: "Keep it logically awesome." });
+    const signature = `sha256=${createHmac("sha256", secret).update(payload).digest("hex")}`;
+    const result = await app.inject({
+      method: "POST",
+      url: "/v1/integrations/github/webhooks",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "delivery-ping",
+        "x-github-event": "ping",
+        "x-hub-signature-256": signature,
+      },
+      payload,
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.json().data).toMatchObject({ status: "ignored", reason: "ping" });
+    expect(store.processGitHubWebhook).toHaveBeenCalledWith(
+      expect.objectContaining({ eventName: "ping", push: null }),
+      "tree-sitter-ts-js-py-v1",
+    );
+  });
+
+  it("rejects invalid signatures and disabled webhooks", async () => {
+    const enabled = createTestApp(createStore(), { GITHUB_WEBHOOK_SECRET: "test-secret" });
+    openApps.push(enabled.app);
+    const invalid = await enabled.app.inject({
+      method: "POST",
+      url: "/v1/integrations/github/webhooks",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "delivery-2",
+        "x-github-event": "ping",
+        "x-hub-signature-256": `sha256=${"0".repeat(64)}`,
+      },
+      payload: JSON.stringify({ zen: "safe" }),
+    });
+    expect(invalid.statusCode).toBe(401);
+    expect(invalid.json().error.code).toBe("GITHUB_WEBHOOK_SIGNATURE_INVALID");
+
+    const disabled = createTestApp();
+    openApps.push(disabled.app);
+    const unavailable = await disabled.app.inject({
+      method: "POST",
+      url: "/v1/integrations/github/webhooks",
+      headers: { "content-type": "application/json" },
+      payload: {},
+    });
+    expect(unavailable.statusCode).toBe(503);
+    expect(unavailable.json().error.code).toBe("GITHUB_APP_DISABLED");
+  });
+
+  it("verifies raw webhook bytes before parsing JSON and maps delivery conflicts to 409", async () => {
+    const secret = "test-secret";
+    const malformed = "{not-json";
+    const { app } = createTestApp(createStore(), { GITHUB_WEBHOOK_SECRET: secret });
+    openApps.push(app);
+    const invalidSignature = await app.inject({
+      method: "POST",
+      url: "/v1/integrations/github/webhooks",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "delivery-malformed-1",
+        "x-github-event": "ping",
+        "x-hub-signature-256": `sha256=${"0".repeat(64)}`,
+      },
+      payload: malformed,
+    });
+    expect(invalidSignature.statusCode).toBe(401);
+    expect(invalidSignature.json().error.code).toBe("GITHUB_WEBHOOK_SIGNATURE_INVALID");
+
+    const malformedSignature = `sha256=${createHmac("sha256", secret)
+      .update(malformed)
+      .digest("hex")}`;
+    const malformedPayload = await app.inject({
+      method: "POST",
+      url: "/v1/integrations/github/webhooks",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "delivery-malformed-2",
+        "x-github-event": "ping",
+        "x-hub-signature-256": malformedSignature,
+      },
+      payload: malformed,
+    });
+    expect(malformedPayload.statusCode).toBe(400);
+    expect(malformedPayload.json().error.code).toBe("GITHUB_WEBHOOK_PAYLOAD_INVALID");
+
+    const conflictStore = createStore();
+    vi.mocked(conflictStore.processGitHubWebhook).mockRejectedValueOnce(
+      new DomainError(
+        "GITHUB_WEBHOOK_DELIVERY_CONFLICT",
+        "The delivery ID was received with a different payload.",
+      ),
+    );
+    const conflictApp = createTestApp(conflictStore, { GITHUB_WEBHOOK_SECRET: secret });
+    openApps.push(conflictApp.app);
+    const payload = JSON.stringify({ zen: "safe" });
+    const signature = `sha256=${createHmac("sha256", secret).update(payload).digest("hex")}`;
+    const conflict = await conflictApp.app.inject({
+      method: "POST",
+      url: "/v1/integrations/github/webhooks",
+      headers: {
+        "content-type": "application/json",
+        "x-github-delivery": "delivery-conflict",
+        "x-github-event": "ping",
+        "x-hub-signature-256": signature,
+      },
+      payload,
+    });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().error.code).toBe("GITHUB_WEBHOOK_DELIVERY_CONFLICT");
+  });
   it("queues a validated public GitHub repository", async () => {
     const { app, store } = createTestApp();
     openApps.push(app);

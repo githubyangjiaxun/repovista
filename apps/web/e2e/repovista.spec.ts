@@ -18,6 +18,8 @@ const repository = {
   latestSnapshotId: snapshotId,
   latestSnapshotStatus: "ready",
   latestCommitSha: "0123456789abcdef0123456789abcdef01234567",
+  autoUpdateEnabled: false,
+  lastWebhookAt: null,
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:03.000Z",
 };

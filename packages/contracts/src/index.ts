@@ -70,10 +70,31 @@ export const repositorySummarySchema = z.object({
   latestSnapshotId: idSchema.nullable(),
   latestSnapshotStatus: snapshotStatusSchema.nullable(),
   latestCommitSha: z.string().nullable(),
+  autoUpdateEnabled: z.boolean().default(false),
+  lastWebhookAt: z.iso.datetime().nullable().default(null),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
 });
 export type RepositorySummary = z.infer<typeof repositorySummarySchema>;
+
+export const githubIntegrationStatusSchema = z.object({
+  enabled: z.boolean(),
+  appSlug: z.string().nullable(),
+  events: z.array(z.literal("ping").or(z.literal("push"))),
+  scope: z.literal("public-repositories"),
+});
+export type GitHubIntegrationStatus = z.infer<typeof githubIntegrationStatusSchema>;
+
+export const githubWebhookResultSchema = z.object({
+  status: z.enum(["enqueued", "ignored", "duplicate"]),
+  duplicate: z.boolean(),
+  deliveryId: z.string(),
+  reason: z.string().nullable(),
+  repositoryId: idSchema.nullable(),
+  snapshotId: idSchema.nullable(),
+  jobId: idSchema.nullable(),
+});
+export type GitHubWebhookResult = z.infer<typeof githubWebhookResultSchema>;
 
 export const snapshotStatsSchema = z.object({
   files: z.number().int().nonnegative().default(0),

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { createModelProvider, verifyModelAnswer } from "@repovista/ai";
 import type { AppConfig } from "@repovista/config";
@@ -24,6 +24,28 @@ const repositoryParamsSchema = z.object({ repositoryId: idSchema });
 const snapshotParamsSchema = z.object({ snapshotId: idSchema });
 const jobParamsSchema = z.object({ jobId: idSchema });
 const shareParamsSchema = z.object({ slug: z.string().min(3).max(300) });
+
+const githubWebhookHeadersSchema = z.object({
+  delivery: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/),
+  event: z.string().regex(/^[A-Za-z0-9_-]{1,100}$/),
+  signature: z.string().regex(/^sha256=[a-f0-9]{64}$/i),
+});
+
+const githubPushPayloadSchema = z.object({
+  after: z.string(),
+  deleted: z.boolean().default(false),
+  ref: z.string(),
+  repository: z.object({
+    id: z.union([z.number().int().positive(), z.string().regex(/^\d+$/)]).optional(),
+    name: z.string().min(1).max(100),
+    full_name: z.string().min(3).max(300),
+    html_url: z.url(),
+    default_branch: z.string().min(1).max(255),
+    private: z.boolean(),
+    owner: z.object({ login: z.string().min(1).max(100) }),
+  }),
+  installation: z.object({ id: z.number().int().positive() }).optional(),
+});
 
 const filesQuerySchema = z.object({
   cursor: z.string().max(1_000).optional(),
@@ -78,6 +100,66 @@ function parseInput<T extends z.ZodType>(schema: T, value: unknown): z.infer<T> 
 
 function response<T>(request: FastifyRequest, data: T) {
   return { data, meta: { requestId: request.id } };
+}
+
+function rawWebhookBody(request: FastifyRequest): Buffer {
+  const rawBody = (request as unknown as { rawBody?: Buffer }).rawBody;
+  if (!rawBody) {
+    throw new DomainError(
+      "GITHUB_WEBHOOK_PAYLOAD_INVALID",
+      "The webhook body was not available for signature verification.",
+    );
+  }
+  return rawBody;
+}
+
+function verifyGitHubSignature(rawBody: Buffer, signature: string, secret: string): void {
+  const expected = `sha256=${createHmac("sha256", secret).update(rawBody).digest("hex")}`;
+  const receivedBuffer = Buffer.from(signature, "utf8");
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  if (
+    receivedBuffer.length !== expectedBuffer.length ||
+    !timingSafeEqual(receivedBuffer, expectedBuffer)
+  ) {
+    throw new DomainError(
+      "GITHUB_WEBHOOK_SIGNATURE_INVALID",
+      "The GitHub webhook signature is invalid.",
+    );
+  }
+}
+
+function parseWebhookJson(rawBody: Buffer): unknown {
+  try {
+    return JSON.parse(rawBody.toString("utf8"));
+  } catch {
+    throw new DomainError(
+      "GITHUB_WEBHOOK_PAYLOAD_INVALID",
+      "The GitHub webhook body must be valid JSON.",
+    );
+  }
+}
+
+function githubWebhookHeaders(request: FastifyRequest) {
+  const parsed = githubWebhookHeadersSchema.safeParse({
+    delivery: request.headers["x-github-delivery"],
+    event: request.headers["x-github-event"],
+    signature: request.headers["x-hub-signature-256"],
+  });
+  if (!parsed.success) {
+    throw new DomainError(
+      "GITHUB_WEBHOOK_HEADERS_INVALID",
+      "The GitHub webhook headers are invalid.",
+      {
+        details: {
+          issues: parsed.error.issues.map((issue) => ({
+            path: issue.path.join("."),
+            message: issue.message,
+          })),
+        },
+      },
+    );
+  }
+  return parsed.data;
 }
 
 function requireSafePath(value: string, label = "path"): string {
@@ -259,6 +341,80 @@ export function registerRoutes(
   dependencies: { config: AppConfig; store: RepoVistaStore },
 ): void {
   const { config, store } = dependencies;
+
+  app.get("/v1/integrations/github", async (request) =>
+    response(request, {
+      enabled: Boolean(config.GITHUB_WEBHOOK_SECRET),
+      appSlug: config.GITHUB_APP_SLUG || null,
+      events: ["ping", "push"],
+      scope: "public-repositories",
+    }),
+  );
+
+  app.post("/v1/integrations/github/webhooks", async (request, reply) => {
+    if (!config.GITHUB_WEBHOOK_SECRET) {
+      throw new DomainError(
+        "GITHUB_APP_DISABLED",
+        "GitHub webhook updates are disabled on this server.",
+        { retryable: true },
+      );
+    }
+    const headers = githubWebhookHeaders(request);
+    const rawBody = rawWebhookBody(request);
+    verifyGitHubSignature(rawBody, headers.signature, config.GITHUB_WEBHOOK_SECRET);
+    const payloadSha256 = `sha256:${createHash("sha256").update(rawBody).digest("hex")}`;
+    const body = parseWebhookJson(rawBody);
+
+    if (headers.event !== "push") {
+      const result = await store.processGitHubWebhook(
+        {
+          deliveryId: headers.delivery,
+          eventName: headers.event,
+          payloadSha256,
+          push: null,
+        },
+        PARSER_VERSION,
+      );
+      return response(request, result);
+    }
+
+    const payload = parseInput(githubPushPayloadSchema, body);
+    const identity = parseGitHubUrl(payload.repository.html_url);
+    if (
+      identity.owner.toLowerCase() !== payload.repository.owner.login.toLowerCase() ||
+      identity.name.toLowerCase() !== payload.repository.name.toLowerCase() ||
+      payload.repository.full_name.toLowerCase() !==
+        `${identity.owner}/${identity.name}`.toLowerCase()
+    ) {
+      throw new DomainError(
+        "GITHUB_WEBHOOK_PAYLOAD_INVALID",
+        "The repository identity in the webhook payload is inconsistent.",
+      );
+    }
+    const result = await store.processGitHubWebhook(
+      {
+        deliveryId: headers.delivery,
+        eventName: "push",
+        payloadSha256,
+        push: {
+          owner: identity.owner,
+          name: identity.name,
+          canonicalUrl: identity.canonicalUrl,
+          cloneUrl: identity.cloneUrl,
+          providerRepoId: payload.repository.id ? String(payload.repository.id) : null,
+          defaultBranch: payload.repository.default_branch,
+          after: payload.after,
+          ref: payload.ref,
+          deleted: payload.deleted,
+          isPrivate: payload.repository.private,
+          installationId: payload.installation?.id ?? null,
+        },
+      },
+      PARSER_VERSION,
+    );
+    if (result.status === "enqueued") reply.code(202);
+    return response(request, result);
+  });
 
   app.post(
     "/v1/repositories",
