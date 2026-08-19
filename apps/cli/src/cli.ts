@@ -6,8 +6,8 @@ import {
   type Snapshot,
 } from "@repovista/contracts";
 import { ApiError, type AskResult, RepoVistaClient } from "./api-client.js";
+import { CLI_VERSION } from "./version.js";
 
-const VERSION = "0.1.0";
 const DEFAULT_API_URL = "http://localhost:4000";
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 15 * 60_000;
@@ -401,7 +401,7 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
       return 0;
     }
     if (["-V", "--version", "version"].includes(args[0] ?? "")) {
-      output.stdout(VERSION);
+      output.stdout(CLI_VERSION);
       return 0;
     }
 
@@ -412,7 +412,7 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
       return 0;
     }
     if (["-V", "--version"].includes(command)) {
-      output.stdout(VERSION);
+      output.stdout(CLI_VERSION);
       return 0;
     }
     if (commandArguments.includes("-h") || commandArguments.includes("--help")) {
@@ -440,7 +440,7 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     if (!commandSpecification) throw new UsageError(`Unknown command: ${command}`);
     const parsed = parseOptions(commandArguments, specification(commandSpecification));
     if (parsed.options.version === true) {
-      output.stdout(VERSION);
+      output.stdout(CLI_VERSION);
       return 0;
     }
     const json = jsonEnabled(parsed.options);

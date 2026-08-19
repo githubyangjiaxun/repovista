@@ -78,6 +78,18 @@ function harness(fetchImplementation: typeof fetch) {
 }
 
 describe("RepoVista CLI", () => {
+  it("reports the released CLI version without contacting the API", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>();
+    const { dependencies, stdout, stderr } = harness(fetchImplementation as typeof fetch);
+
+    const exitCode = await runCli(["--version"], dependencies);
+
+    expect(exitCode).toBe(0);
+    expect(stdout).toEqual(["0.2.0"]);
+    expect(stderr).toEqual([]);
+    expect(fetchImplementation).not.toHaveBeenCalled();
+  });
+
   it("queues an analysis with ref and repeated ignore paths", async () => {
     const fetchImplementation = vi.fn<typeof fetch>(async () =>
       envelope({ repositoryId, snapshotId, jobId, status: "queued" }),

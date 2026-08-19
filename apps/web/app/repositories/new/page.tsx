@@ -38,7 +38,7 @@ export default async function NewRepositoryPage({
             <div>
               <LockKeyhole size={19} />
               <span>
-                <strong>Public GitHub only in v0.1</strong>
+                <strong>Public GitHub repositories only</strong>
                 <small>HTTPS URLs without embedded credentials.</small>
               </span>
             </div>

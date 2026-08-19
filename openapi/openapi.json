@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RepoVista API",
-    "version": "0.1.0",
-    "description": "Evidence-first repository indexing, architecture maps, source retrieval, grounded answers, and immutable share reports."
+    "version": "0.2.0",
+    "description": "Evidence-first incremental repository indexing for TypeScript, JavaScript, and Python, with signed GitHub updates, deterministic exports, grounded answers, and immutable share reports."
   },
   "servers": [
     {

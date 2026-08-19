@@ -37,6 +37,7 @@ describe("RepoVistaClient", () => {
       expect.objectContaining({ method: "POST" }),
     );
     const request = fetchImplementation.mock.calls[0]?.[1] as RequestInit;
+    expect((request.headers as Headers).get("User-Agent")).toBe("RepoVista-CLI/0.2.0");
     expect(JSON.parse(String(request.body))).toEqual({
       url: "https://github.com/acme/demo",
       ref: "main",

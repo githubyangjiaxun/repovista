@@ -15,6 +15,7 @@ import {
   type Snapshot,
   snapshotSchema,
 } from "@repovista/contracts";
+import { CLI_USER_AGENT } from "./version.js";
 
 const repositoryListSchema = repositorySummarySchema.array();
 const snapshotListSchema = snapshotSchema.array();
@@ -221,7 +222,7 @@ export class RepoVistaClient {
     const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
-    headers.set("User-Agent", "RepoVista-CLI/0.1.0");
+    headers.set("User-Agent", CLI_USER_AGENT);
     if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     let response: Response;
     try {
