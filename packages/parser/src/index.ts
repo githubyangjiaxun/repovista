@@ -59,6 +59,23 @@ function symbolKey(
   return [kind, filePath, qualifiedName, digest(signature ?? qualifiedName).slice(0, 12)].join(":");
 }
 
+function reserveSymbolKey(baseKey: string, sourceHash: string, reservedKeys: Set<string>): string {
+  if (!reservedKeys.has(baseKey)) {
+    reservedKeys.add(baseKey);
+    return baseKey;
+  }
+
+  const collisionKey = `${baseKey}:${sourceHash.slice(0, 12)}`;
+  let candidate = collisionKey;
+  let occurrence = 2;
+  while (reservedKeys.has(candidate)) {
+    candidate = `${collisionKey}:${occurrence}`;
+    occurrence += 1;
+  }
+  reservedKeys.add(candidate);
+  return candidate;
+}
+
 function sourceLines(content: string, startLine: number, endLine: number): string {
   return content
     .split(/\r?\n/)
@@ -111,6 +128,7 @@ export function parseSourceFile(file: ScannedFile): ParsedFile {
     contentHash: file.contentHash,
   };
   const symbols: ParsedSymbol[] = [moduleSymbol];
+  const reservedSymbolKeys = new Set([rootStableKey]);
   const edges: ParsedEdge[] = [];
   const imports: ParsedFile["imports"] = [];
 
@@ -127,9 +145,14 @@ export function parseSourceFile(file: ScannedFile): ParsedFile {
       if (name) {
         const qualifiedName = parentQualifiedName ? `${parentQualifiedName}.${name}` : name;
         const signature = signatureFor(node, name);
-        const stableKey = symbolKey(file.path, kind, qualifiedName, signature);
         const startLine = node.startPosition.row + 1;
         const endLine = Math.max(startLine, node.endPosition.row + 1);
+        const declarationHash = digest(sourceLines(file.content, startLine, endLine));
+        const stableKey = reserveSymbolKey(
+          symbolKey(file.path, kind, qualifiedName, signature),
+          declarationHash,
+          reservedSymbolKeys,
+        );
         symbols.push({
           stableKey,
           kind,
@@ -141,7 +164,7 @@ export function parseSourceFile(file: ScannedFile): ParsedFile {
           endLine,
           endColumn: node.endPosition.column,
           docText: null,
-          contentHash: `sha256:${digest(sourceLines(file.content, startLine, endLine))}`,
+          contentHash: `sha256:${declarationHash}`,
         });
         edges.push({
           fromStableKey: currentSymbolKey,

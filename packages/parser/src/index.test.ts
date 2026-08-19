@@ -35,4 +35,33 @@ describe("parseSourceFile", () => {
     expect(parsed.edges.some((edge) => edge.type === "imports")).toBe(true);
     expect(parsed.edges.some((edge) => edge.type === "calls")).toBe(true);
   });
+
+  it("assigns unique stable keys to repeated declarations in anonymous scopes", () => {
+    const parsed = parseSourceFile(
+      fixture(
+        [
+          'it("first", () => {',
+          "  interface SharedConfig { value: string }",
+          "});",
+          'it("second", () => {',
+          "  interface SharedConfig { value: number }",
+          "});",
+          'it("third", () => {',
+          "  interface SharedConfig { value: number }",
+          "});",
+        ].join("\n"),
+      ),
+    );
+
+    const repeated = parsed.symbols.filter((symbol) => symbol.name === "SharedConfig");
+    expect(repeated).toHaveLength(3);
+    expect(new Set(repeated.map((symbol) => symbol.stableKey))).toHaveLength(3);
+    expect(
+      parsed.edges.filter(
+        (edge) =>
+          edge.type === "contains" &&
+          repeated.some((item) => item.stableKey === edge.targetStableKey),
+      ),
+    ).toHaveLength(3);
+  });
 });
