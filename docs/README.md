@@ -1,6 +1,6 @@
 # RepoVista 工程文档
 
-状态：v0.1 已实现基线（2026-08-20）
+状态：v0.1 已实现基线；v0.2 已冻结开发计划（2026-08-20）
 
 本目录描述当前代码，而不是早期愿景。发生冲突时，事实来源优先级如下：
 
@@ -17,6 +17,17 @@
 | [系统架构](./architecture/系统架构.md) | Web、API、Worker、PostgreSQL、CLI 和模型适配器的真实拓扑 |
 | [领域模型与数据流](./architecture/领域模型与数据流.md) | 仓库、快照、任务、证据、答案与分享报告的生命周期 |
 | [ADR 0001](./decisions/0001-implementation-baseline.md) | v0.1 技术选型和明确边界 |
+| [ADR 0002](./decisions/0002-v02-update-pipeline.md) | v0.2 增量、多语言、Webhook 与导出的共同边界 |
+
+## v0.2 实施计划
+
+| 文档 | 内容 |
+|---|---|
+| [版本开发计划](./releases/v0.2-开发计划.md) | 四项 Roadmap 能力的完整链路、成功标准与非目标 |
+| [v0.2 前端开发文档](./frontend/v0.2前端开发文档.md) | Snapshot Delta、Automation 状态和下载交互 |
+| [v0.2 后端开发文档](./backend/v0.2后端开发文档.md) | 增量 Planner、Python Adapter、Webhook 与 Export API |
+| [v0.2 数据库设计](./database/v0.2数据库设计.md) | Snapshot 基线、Repository 自动更新和 Delivery 幂等表 |
+| [v0.2 测试与发布计划](./operations/v0.2测试与发布计划.md) | 自动化、真实仓库、Compose 和发布门禁 |
 
 ## 前端
 

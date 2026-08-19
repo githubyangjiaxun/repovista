@@ -12,10 +12,10 @@
 
 ## v0.2
 
-- Incremental indexing.
-- Python parser adapter.
-- GitHub App updates.
-- Markdown and SVG exports.
+- [Planned](./docs/releases/v0.2-开发计划.md) Incremental indexing with immutable, self-contained snapshots.
+- [Planned](./docs/releases/v0.2-开发计划.md) Python parser adapter and cross-language graph support.
+- [Planned](./docs/releases/v0.2-开发计划.md) Signed GitHub App push updates for public repositories.
+- [Planned](./docs/releases/v0.2-开发计划.md) Deterministic Markdown and SVG exports.
 
 ## v0.3
 
