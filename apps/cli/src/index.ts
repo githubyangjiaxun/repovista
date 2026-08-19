@@ -1,17 +1,5 @@
 #!/usr/bin/env node
 
-const help = [
-  "RepoVista CLI",
-  "",
-  "Usage:",
-  "  repovista analyze <https://github.com/owner/repository>",
-  "",
-  "The v0.1 CLI sends the repository to a running RepoVista API.",
-].join("\n");
+import { runCli } from "./cli.js";
 
-if (process.argv.includes("--help") || process.argv.length <= 2) {
-  console.log(help);
-} else {
-  console.error("CLI analysis will be enabled after the API import endpoint is ready.");
-  process.exitCode = 1;
-}
+process.exitCode = await runCli(process.argv.slice(2));

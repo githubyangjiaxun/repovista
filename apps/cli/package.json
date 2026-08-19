@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "tsx src/index.ts",
-    "build": "tsup src/index.ts --format esm --platform node --sourcemap",
+    "build": "tsup src/index.ts --format esm --platform node --sourcemap --no-splitting",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests"
   },
