@@ -2,6 +2,7 @@ node_modules/
 .pnpm-store/
 .turbo/
 .next/
+next-env.d.ts
 dist/
 coverage/
 playwright-report/
