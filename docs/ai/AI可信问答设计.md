@@ -1,6 +1,6 @@
 # AI 可信问答设计
 
-状态：v0.1 已实现基线
+状态：v0.2 已实现并验收（2026-08-20）
 
 ## 1. 核心原则
 
@@ -98,7 +98,8 @@ System Instruction 明确：
 - Evidence 不足时返回 Partial/Refused。
 - 只返回约定 JSON。
 
-User Message 由 Question 和带显式分隔的 Evidence 组成。v0.1 不把整个仓库、Git History、环境变量或数据库元数据发送给模型。
+User Message 由 Question 和带显式分隔的 Evidence 组成。当前版本不把整个仓库、Git History、
+环境变量或数据库元数据发送给模型。
 
 ## 6. 引用验证
 
@@ -135,7 +136,8 @@ User Message 由 Question 和带显式分隔的 Evidence 组成。v0.1 不把整
 - API Key 只来自服务环境，不进入 Request/Response/日志。
 - Scanner 跳过常见 `.env`、PEM 和 Key 文件，但不能保证公开仓库没有其他敏感文本。
 
-部署者必须在连接外部 Provider 前确认仓库内容允许发送。v0.1 只支持公共仓库，但“公开”不等于没有隐私或许可证约束。
+部署者必须在连接外部 Provider 前确认仓库内容允许发送。当前版本只支持公共仓库，但“公开”
+不等于没有隐私或许可证约束。Python 与 TS/JS Evidence 走相同发送和引用验证边界。
 
 ## 10. 失败行为
 

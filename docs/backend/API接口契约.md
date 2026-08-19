@@ -1,6 +1,6 @@
 # API 接口契约
 
-状态：v0.1 已实现基线
+状态：v0.2 已实现并验收
 Base path：`/v1`
 机器事实来源：`openapi/openapi.json`
 
@@ -38,7 +38,7 @@ X-Request-ID: client-generated-id
 }
 ```
 
-Health Endpoint 直接返回 `{ "status": "ok" }`，不包信封。v0.1 没有 Authorization Header 约定。
+Health Endpoint 直接返回 `{ "status": "ok" }`，不包信封。v0.2 仍没有 Authorization Header 约定。
 
 ## 2. Operation 列表
 
@@ -46,11 +46,15 @@ Health Endpoint 直接返回 `{ "status": "ok" }`，不包信封。v0.1 没有 A
 |---|---|---|
 | GET | `/v1/health/live` | 进程存活 |
 | GET | `/v1/health/ready` | 数据库可用 |
+| GET | `/v1/integrations/github` | 非敏感 GitHub 自动更新能力状态 |
+| POST | `/v1/integrations/github/webhooks` | 验签、筛选并幂等处理 GitHub 事件 |
 | POST | `/v1/repositories` | 创建/复用仓库并排队 Snapshot |
 | GET | `/v1/repositories` | 列出 Public Workspace 仓库 |
 | GET | `/v1/repositories/{repositoryId}` | 仓库摘要和最新 Snapshot |
 | GET | `/v1/repositories/{repositoryId}/snapshots` | 列出不可变 Snapshot |
 | GET | `/v1/snapshots/{snapshotId}` | Snapshot 状态与统计 |
+| GET | `/v1/snapshots/{snapshotId}/exports/markdown` | 下载固定 Snapshot 的 Markdown 报告 |
+| GET | `/v1/snapshots/{snapshotId}/exports/svg` | 下载固定 Snapshot 的 SVG 地图 |
 | POST | `/v1/snapshots/{snapshotId}/cancel` | 请求取消活动任务 |
 | GET | `/v1/jobs/{jobId}` | 当前任务状态 |
 | GET | `/v1/jobs/{jobId}/events` | SSE 任务事件 |
@@ -62,7 +66,7 @@ Health Endpoint 直接返回 `{ "status": "ok" }`，不包信封。v0.1 没有 A
 | POST | `/v1/share-reports` | 创建公开导览 |
 | GET | `/v1/share-reports/{slug}` | 读取公开导览 |
 
-共 17 个 Operation。
+共 21 个 Operation。
 
 ## 3. 创建分析
 
@@ -111,6 +115,8 @@ data: {"phase":"parsing","progress":0.62,"processed":120,"total":190}
 ```
 
 客户端断线后应携带最后 Event ID 重连，并同时读取 Job 当前状态，避免错过终态。
+
+Progress Event 的 `message` 是可展示的阶段说明。增量 Parsing 会明确报告本轮 Parsed 与 Reused 文件数；客户端不能只根据百分比猜测。
 
 ## 5. 地图
 
@@ -190,16 +196,40 @@ POST /v1/share-reports
 
 返回 201 和 `{id, slug}`。`GET /v1/share-reports/{slug}` 公开读取创建时固定的 Repository、Snapshot、Overview、Reading Path 和 Package Map。
 
-## 10. 状态码
+## 10. GitHub 自动更新
+
+`GET /v1/integrations/github` 只返回 `enabled/appSlug/events/scope`，永不返回 Secret。
+
+Webhook 请求必须包含：
+
+- `X-GitHub-Delivery`。
+- `X-GitHub-Event`。
+- `X-Hub-Signature-256: sha256=<hex>`。
+
+服务端先对原始 JSON Bytes 做 HMAC-SHA256，再解析 Payload。`ping`、未知事件、Private、非默认分支和删除 Push 被安全忽略；Public 默认分支 Push 以完整 `after` SHA 创建 Snapshot/Job。同 Delivery/同 Body 返回 Duplicate；同 Delivery/不同 Body 返回 409。
+
+## 11. Snapshot 导出
+
+Markdown 与 SVG 只允许 Ready Snapshot。它们是附件正文，不使用 JSON Success Envelope；错误仍使用统一失败信封。
+
+```http
+GET /v1/snapshots/{snapshotId}/exports/markdown
+GET /v1/snapshots/{snapshotId}/exports/svg?level=package|file|symbol
+```
+
+响应设置安全 `Content-Disposition`、`ETag`、`X-Content-Type-Options`；SVG 额外设置 Sandbox CSP。输出固定完整 Commit SHA、Snapshot ID 和 Parser Version，不调用 AI Provider。
+
+## 12. 状态码
 
 - 200：读取或问答成功。
 - 201：Share Report 创建成功。
 - 202：分析或取消请求被接受。
+- 401：GitHub Webhook 签名错误。
 - 400：输入、URL、Ref 或 Path 不合法。
 - 404：资源不存在。
-- 409：Snapshot 未 Ready 等状态冲突。
+- 409：Snapshot 未 Ready、Delivery Payload 冲突等状态冲突。
 - 429：匿名业务限流。
 - 502：上游模型失败或输出不合法。
-- 503：Readiness 数据库不可用。
+- 503：Readiness 数据库不可用或 Webhook 未配置。
 
 调用方必须按 `error.code` 和 `retryable` 决策，不解析英文 Message。

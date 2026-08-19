@@ -10,12 +10,12 @@
 - Generate a commit-pinned public share page.
 - Run locally with Docker Compose and optional Ollama.
 
-## v0.2
+## v0.2 — Continuous, multi-language snapshot maps (implemented 2026-08-20)
 
-- [Planned](./docs/releases/v0.2-开发计划.md) Incremental indexing with immutable, self-contained snapshots.
-- [Planned](./docs/releases/v0.2-开发计划.md) Python parser adapter and cross-language graph support.
-- [Planned](./docs/releases/v0.2-开发计划.md) Signed GitHub App push updates for public repositories.
-- [Planned](./docs/releases/v0.2-开发计划.md) Deterministic Markdown and SVG exports.
+- [Done](./docs/releases/v0.2-开发计划.md) Incremental indexing with immutable, self-contained snapshots.
+- [Done](./docs/releases/v0.2-开发计划.md) Python parser adapter and cross-language graph support.
+- [Done](./docs/releases/v0.2-开发计划.md) Signed GitHub push updates for public repositories.
+- [Done](./docs/releases/v0.2-开发计划.md) Deterministic Markdown and SVG exports.
 
 ## v0.3
 

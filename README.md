@@ -1,6 +1,6 @@
 # RepoVista
 
-> Understand any TypeScript codebase as a map, not a maze.
+> Understand any codebase as a map, not a maze.
 
 RepoVista is an evidence-first repository explorer for public GitHub projects. It clones a fixed
 snapshot, extracts files and symbols with Tree-sitter, builds package/file/symbol graphs, and lets
@@ -26,11 +26,11 @@ The map, source browser, search, reading path, and share reports remain useful w
 key. The default `fake` provider is a transparent deterministic evidence summarizer, so the full
 workflow can be evaluated locally before connecting Ollama or an OpenAI-compatible endpoint.
 
-## What v0.1 includes
+## What v0.2 includes
 
 - Public GitHub repository import with branch, tag, or commit selection.
 - Security-constrained shallow clones; repository scripts are never installed or executed.
-- TypeScript, TSX, JavaScript, JSX, MJS, and CJS indexing with Tree-sitter.
+- TypeScript, TSX, JavaScript, JSX, MJS, CJS, and Python indexing with Tree-sitter.
 - Package-, file-, and symbol-level architecture maps with source navigation.
 - Immutable source browsing and full-text/symbol evidence search.
 - PostgreSQL-backed jobs with leases, progress events, cancellation, retries, and crash recovery.
@@ -39,10 +39,16 @@ workflow can be evaluated locally before connecting Ollama or an OpenAI-compatib
 - Commit-pinned public architecture tours.
 - Web UI, JSON HTTP API, and scriptable CLI.
 - Reproducible API, Worker, and Web containers plus Docker Compose.
+- Content-hash incremental indexing with immutable, self-contained snapshots and explicit
+  parsed/reused/changed/deleted counters.
+- Signed GitHub `ping`/`push` webhook updates for public default-branch repositories with delivery
+  idempotency and HMAC-SHA256 verification.
+- Deterministic Markdown architecture reports and CSP-protected SVG maps for every ready snapshot.
 
-Current scope is intentionally narrow: v0.1 accepts public `https://github.com/owner/repository`
-URLs and performs structural analysis for JavaScript/TypeScript. Authentication, private
-repositories, and additional language adapters are roadmap work.
+Current scope is intentionally narrow: RepoVista accepts public
+`https://github.com/owner/repository` URLs. Private repositories, installation tokens, OAuth, and
+additional language adapters remain out of scope. AI is an optional explanation layer; the map,
+source browser, search, and exports work without a model key.
 
 ## Quick start
 
@@ -119,13 +125,15 @@ or a locally controlled Ollama instance when source must remain on the machine.
 flowchart LR
     Browser[Next.js Web] --> API[Fastify API]
     CLI[RepoVista CLI] --> API
+    GitHub[Signed GitHub webhook] --> API
     API --> PG[(PostgreSQL 17 + pgvector)]
     API --> Model[Fake / Ollama / OpenAI-compatible]
-    API --> SSE[Job event stream]
+    API --> Export[Deterministic Markdown / SVG]
     Worker[Index Worker] --> PG
     Worker --> Git[Safe shallow Git clone]
-    Git --> Parser[Tree-sitter parser]
-    Parser --> Graph[Package / file / symbol graph]
+    Git --> Plan[Content-hash incremental plan]
+    Plan --> Parser[Tree-sitter TS / JS / Python]
+    Parser --> Graph[Complete package / file / symbol graph]
     Graph --> PG
 ```
 
@@ -134,16 +142,17 @@ This is a modular TypeScript monorepo:
 ```text
 apps/web       Next.js repository explorer
 apps/api       Fastify HTTP API and grounded-answer orchestration
-apps/worker    leased indexing worker
+apps/worker    leased full/incremental indexing worker
 apps/cli       command-line client
-packages/*     contracts, database, Git, parser, graph, retrieval, AI, UI
+packages/*     contracts, database, Git, parser, graph, retrieval, AI, exporter, UI
 openapi/       checked API contract
 benchmarks/    parser benchmark harness
 ```
 
 The API and Worker coordinate through PostgreSQL rather than Redis. Source blobs are content
-addressed and stored inline in PostgreSQL in v0.1. See the accepted
-[implementation baseline](./docs/decisions/0001-implementation-baseline.md) for the architectural
+addressed and stored inline in PostgreSQL. See the accepted
+[implementation baseline](./docs/decisions/0001-implementation-baseline.md) and
+[v0.2 update pipeline](./docs/decisions/0002-v02-update-pipeline.md) for the architectural
 trade-offs.
 
 ## Local development
@@ -172,16 +181,17 @@ docker compose config --quiet
 DATABASE_TEST_URL=postgresql://repovista:repovista@localhost:5432/repovista pnpm test
 ```
 
-`pnpm check` validates the 17-operation OpenAPI contract, formatting/lint rules, TypeScript,
+`pnpm check` validates the 21-operation OpenAPI contract, formatting/lint rules, TypeScript,
 unit/integration tests that have their required environment, and production builds. Playwright
-covers import, progress, map/source exploration, grounded answers, sharing, repository listing,
-and structured failures with deterministic network mocks.
+covers import, incremental progress, Python source navigation, map/source exploration, grounded
+answers, sharing, repository listing, deterministic Markdown/SVG downloads, and structured
+failures with deterministic network mocks.
 
 ## Security model
 
 Imported repositories are hostile input. RepoVista:
 
-- accepts only public HTTPS GitHub URLs in v0.1;
+- accepts only public HTTPS GitHub URLs in the current release;
 - disables Git hooks and interactive credential prompts;
 - never installs dependencies or executes repository code;
 - rejects symbolic links and repository-relative path traversal;

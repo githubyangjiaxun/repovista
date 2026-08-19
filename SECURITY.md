@@ -15,12 +15,13 @@ code or live credentials unless the owner explicitly provides a secure transfer 
 
 Include the affected version or commit, reproduction steps, impact, and any suggested mitigation.
 
-## v0.1 security boundary
+## Current security boundary (v0.2)
 
-RepoVista v0.1 imports public HTTPS GitHub repositories only. It has no private-repository token or
-authentication flow. Deployment operators should not expose a local instance to untrusted users
-without adding network access controls because the public workspace and share-report endpoints are
-anonymous by design.
+RepoVista v0.2 imports public HTTPS GitHub repositories only. It has no private-repository token or
+authentication flow. Signed GitHub Push automation is limited to public default-branch events and
+does not add private-repository access. Deployment operators should not expose a local instance to
+untrusted users without adding network access controls because the public workspace and
+share-report endpoints are anonymous by design.
 
 Imported repositories are hostile input. The implementation must not:
 

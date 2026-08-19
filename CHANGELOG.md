@@ -5,6 +5,41 @@ Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-20
+
+### Added
+
+- Immutable content-hash incremental snapshots with parser-compatible baselines and explicit
+  full/incremental delta metadata.
+- Python Tree-sitter analysis for modules, classes, functions, methods, variables, imports, calls,
+  and inheritance in the shared evidence graph.
+- HMAC-SHA256 GitHub webhook automation for public default-branch pushes, including delivery
+  idempotency, payload conflicts, and safe ping/unsupported-event handling.
+- Deterministic Markdown and SVG exports with complete provenance, safe filenames, XML escaping,
+  CSP, ETag, and bounded graph output.
+- Web panels for Snapshot Delta, GitHub Automation, Python source navigation, job progress
+  messages, and fixed-snapshot downloads.
+
+### Verification
+
+- A new `repovista_release_v02` database applied exactly `0001_initial.sql` and
+  `0002_incremental_github.sql`; a second migration run was a no-op.
+- `DATABASE_TEST_URL=postgresql://repovista:repovista@127.0.0.1:65432/repovista_release_v02 pnpm check`
+  passed: 21 OpenAPI operations, Biome, 16 typecheck tasks, 27 test tasks, real PostgreSQL
+  integration, and every production build.
+- Chromium Playwright passed 4/4 with import/progress/source/map/Ask/share regression and real
+  Markdown/SVG download assertions.
+- ARM64 Compose built and ran API, Worker, and Web. Public `pypa/sampleproject` commits
+  `8603eaf898a2db2c89c36ad6b302f2994700ad6a` →
+  `621e4974ca25ce531773def586ba3ed8e736b3fc` produced Full → Incremental snapshots; the latter
+  reported 3 changed, 4 reused, 1 parsed, and 0 deleted files.
+- Public `unjs/defu` at `82632b66f5914e9946edce300e10633a3d5c0cb7` passed the TS/JS map,
+  source, search, and grounded-answer regression in the same clean database.
+- Real API checks covered Python source/search/fake Ask, byte-identical repeated exports, SVG XML
+  parsing, and webhook valid/duplicate/conflict/invalid-signature/non-default/deleted cases.
+
+## [0.1.0] - 2026-08-20
+
 ### Added
 
 - Next.js repository explorer with import, progress, repository list, overview, architecture map,
