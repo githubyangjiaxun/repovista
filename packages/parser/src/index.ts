@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { PARSER_VERSION } from "@repovista/contracts";
 import type { ParsedEdge, ParsedFile, ParsedSymbol, ScannedFile } from "@repovista/domain";
 import Parser from "tree-sitter";
 import Python from "tree-sitter-python";
 import TypeScript from "tree-sitter-typescript";
 
-export const PARSER_VERSION = "tree-sitter-ts-js-py-v1";
+export { PARSER_VERSION };
 
 const declarationKinds: Record<string, ParsedSymbol["kind"]> = {
   function_declaration: "function",

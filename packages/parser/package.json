@@ -20,6 +20,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@repovista/contracts": "workspace:*",
     "@repovista/domain": "workspace:*",
     "tree-sitter": "^0.21.1",
     "tree-sitter-python": "^0.21.0",

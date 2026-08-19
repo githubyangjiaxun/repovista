@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const PARSER_VERSION = "tree-sitter-ts-js-py-v1";
+
 export const idSchema = z.string().uuid();
 export const commitShaSchema = z.string().regex(/^[a-f0-9]{7,64}$/i);
 

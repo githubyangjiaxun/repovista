@@ -227,10 +227,29 @@ function calculateStats(files: readonly ScannedFile[], parsedFiles: readonly Par
     const language = file.language ?? "other";
     languages[language] = (languages[language] ?? 0) + 1;
   }
+  // The database enforces uniqueness for a relationship per snapshot. Count
+  // the same canonical edge once here as well, so Snapshot.stats describes the
+  // graph that is actually persisted (not duplicate syntax nodes emitted by a
+  // parser, such as repeated calls to the same session method).
+  const edgeKeys = new Set<string>();
+  for (const parsedFile of parsedFiles) {
+    for (const edge of parsedFile.edges) {
+      edgeKeys.add(
+        [
+          edge.fromStableKey,
+          edge.targetStableKey ?? null,
+          edge.unresolvedTarget ??
+            (edge.type === "calls" ? edge.evidence.referenceTarget : undefined) ??
+            null,
+          edge.type,
+        ].join("\u0000"),
+      );
+    }
+  }
   return {
     files: files.length,
     symbols: parsedFiles.reduce((total, file) => total + file.symbols.length, 0),
-    edges: parsedFiles.reduce((total, file) => total + file.edges.length, 0),
+    edges: edgeKeys.size,
     languages,
     warnings: 0,
   };

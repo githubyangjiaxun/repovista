@@ -9,6 +9,7 @@ import {
   createShareRequestSchema,
   graphLevelSchema,
   idSchema,
+  PARSER_VERSION,
   relationTypeSchema,
 } from "@repovista/contracts";
 import type { RepoVistaStore, SearchEvidenceRecord } from "@repovista/database";
@@ -21,7 +22,6 @@ import {
 } from "@repovista/exporter";
 import { parseGitHubUrl } from "@repovista/git";
 import { buildGraphView, type GraphView } from "@repovista/graph";
-import { PARSER_VERSION } from "@repovista/parser";
 import { reciprocalRankFusion, tokenizeQuestion } from "@repovista/retrieval";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";

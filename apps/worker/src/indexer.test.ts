@@ -264,6 +264,45 @@ describe("executeIndexJob", () => {
   });
 });
 
+describe("snapshot statistics", () => {
+  it("counts canonical relationships once, matching persisted edge uniqueness", async () => {
+    const duplicateEdge = {
+      fromStableKey: "function:src/index.ts:run:abc",
+      unresolvedTarget: "session.run",
+      type: "calls" as const,
+      confidence: 1,
+      evidence: {
+        path: "src/index.ts",
+        startLine: 2,
+        endLine: 2,
+        syntaxType: "call_expression",
+        referenceTarget: "session.run",
+      },
+    };
+    const dependencies = createDependencies({
+      parseRepository: vi.fn(() => [
+        {
+          ...parsedFile,
+          edges: [
+            duplicateEdge,
+            { ...duplicateEdge, evidence: { ...duplicateEdge.evidence, startLine: 3, endLine: 3 } },
+          ],
+        },
+      ]),
+    });
+    const store = createStore();
+
+    await expect(executeIndexJob(store, job, config, dependencies)).resolves.toBe("succeeded");
+    expect(store.completeIndexJob).toHaveBeenCalledWith(
+      job.id,
+      job.snapshotId,
+      job.repositoryId,
+      config.WORKER_ID,
+      expect.objectContaining({ stats: expect.objectContaining({ edges: 1 }) }),
+    );
+  });
+});
+
 describe("planIncrementalIndex", () => {
   it("creates a full plan with a deterministic tree hash", () => {
     const plan = planIncrementalIndex([sourceFile], null);
