@@ -4,7 +4,7 @@ import type { ParsedEdge, ParsedFile, ParsedSymbol, ScannedFile } from "@repovis
 import Parser from "tree-sitter";
 import TypeScript from "tree-sitter-typescript";
 
-export const PARSER_VERSION = "tree-sitter-ts-v1";
+export const PARSER_VERSION = "tree-sitter-ts-js-v2";
 
 const declarationKinds: Record<string, ParsedSymbol["kind"]> = {
   function_declaration: "function",
@@ -202,6 +202,8 @@ export function parseSourceFile(file: ScannedFile): ParsedFile {
             startLine: node.startPosition.row + 1,
             endLine: node.endPosition.row + 1,
             syntaxType: node.type,
+            importSource: source,
+            importedNames: importedNames(node),
           },
         });
       }
@@ -220,6 +222,7 @@ export function parseSourceFile(file: ScannedFile): ParsedFile {
             startLine: node.startPosition.row + 1,
             endLine: node.endPosition.row + 1,
             syntaxType: node.type,
+            referenceTarget: target,
           },
         });
       }

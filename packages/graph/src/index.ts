@@ -289,6 +289,8 @@ export function linkParsedImports(
             startLine: item.startLine,
             endLine: item.endLine,
             syntaxType: "import_statement",
+            importSource: item.source,
+            importedNames: item.importedNames,
           },
         },
       ];
@@ -299,8 +301,7 @@ export function linkParsedImports(
         ...parsed.edges.filter(
           (edge) =>
             edge.type !== "imports" ||
-            !edge.unresolvedTarget ||
-            !resolvedSources.has(edge.unresolvedTarget),
+            !resolvedSources.has(edge.evidence.importSource ?? edge.unresolvedTarget ?? ""),
         ),
         ...localEdges,
       ],

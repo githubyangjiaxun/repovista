@@ -773,7 +773,7 @@
       },
       "SnapshotStats": {
         "type": "object",
-        "required": ["files", "symbols", "edges", "languages", "warnings"],
+        "required": ["files", "symbols", "edges", "languages", "warnings", "indexing"],
         "properties": {
           "files": { "type": "integer", "minimum": 0 },
           "symbols": { "type": "integer", "minimum": 0 },
@@ -782,7 +782,37 @@
             "type": "object",
             "additionalProperties": { "type": "integer", "minimum": 0 }
           },
-          "warnings": { "type": "integer", "minimum": 0 }
+          "warnings": { "type": "integer", "minimum": 0 },
+          "indexing": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": [
+                  "mode",
+                  "baseSnapshotId",
+                  "baseCommitSha",
+                  "scannedFiles",
+                  "changedFiles",
+                  "reusedFiles",
+                  "parsedFiles",
+                  "deletedFiles"
+                ],
+                "properties": {
+                  "mode": { "type": "string", "enum": ["full", "incremental"] },
+                  "baseSnapshotId": {
+                    "oneOf": [{ "$ref": "#/components/schemas/Uuid" }, { "type": "null" }]
+                  },
+                  "baseCommitSha": { "type": ["string", "null"] },
+                  "scannedFiles": { "type": "integer", "minimum": 0 },
+                  "changedFiles": { "type": "integer", "minimum": 0 },
+                  "reusedFiles": { "type": "integer", "minimum": 0 },
+                  "parsedFiles": { "type": "integer", "minimum": 0 },
+                  "deletedFiles": { "type": "integer", "minimum": 0 }
+                }
+              },
+              { "type": "null" }
+            ]
+          }
         }
       },
       "Snapshot": {
@@ -794,6 +824,9 @@
           "refName",
           "status",
           "parserVersion",
+          "baseSnapshotId",
+          "indexMode",
+          "treeHash",
           "stats",
           "requestedAt",
           "readyAt",
@@ -806,6 +839,11 @@
           "refName": { "type": ["string", "null"] },
           "status": { "$ref": "#/components/schemas/SnapshotStatus" },
           "parserVersion": { "type": "string" },
+          "baseSnapshotId": {
+            "oneOf": [{ "$ref": "#/components/schemas/Uuid" }, { "type": "null" }]
+          },
+          "indexMode": { "type": "string", "enum": ["full", "incremental"] },
+          "treeHash": { "type": ["string", "null"] },
           "stats": { "$ref": "#/components/schemas/SnapshotStats" },
           "requestedAt": { "$ref": "#/components/schemas/DateTime" },
           "readyAt": {

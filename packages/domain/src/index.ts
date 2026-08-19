@@ -63,6 +63,9 @@ export interface ParsedEdge {
     startLine: number;
     endLine: number;
     syntaxType: string;
+    importSource?: string;
+    importedNames?: string[];
+    referenceTarget?: string;
   };
 }
 
@@ -82,6 +85,9 @@ export interface ParsedFile {
 export interface IndexedRepository {
   commitSha: string;
   branch: string | null;
+  baseSnapshotId: string | null;
+  indexMode: "full" | "incremental";
+  treeHash: string;
   files: ScannedFile[];
   parsedFiles: ParsedFile[];
   stats: SnapshotStats;

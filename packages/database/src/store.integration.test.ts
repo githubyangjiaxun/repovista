@@ -130,7 +130,11 @@ integration("RepoVistaStore with PostgreSQL", () => {
         edges: 1,
         languages: { typescript: 1 },
         warnings: 0,
+        indexing: null,
       },
+      baseSnapshotId: null,
+      indexMode: "full",
+      treeHash: "sha256:integration-tree",
     };
 
     await store.completeIndexJob(
@@ -153,6 +157,11 @@ integration("RepoVistaStore with PostgreSQL", () => {
         store.searchEvidence(job.snapshotId, "module-entry-marker", 10),
       ]);
     expect(snapshot).toMatchObject({ status: "ready", commitSha: indexed.commitSha });
+    expect(snapshot).toMatchObject({
+      baseSnapshotId: null,
+      indexMode: "full",
+      treeHash: "sha256:integration-tree",
+    });
     expect(completedJob).toMatchObject({ status: "succeeded", progress: 1 });
     expect(graph?.symbols).toHaveLength(2);
     expect(graph?.edges).toHaveLength(1);
@@ -217,6 +226,91 @@ integration("RepoVistaStore with PostgreSQL", () => {
       title: "Integration report 2",
       snapshot: { id: job.snapshotId },
     });
+
+    const base = await store.getIncrementalIndexBase(
+      imported.repositoryId,
+      "integration-test-v1",
+      randomUUID(),
+    );
+    expect(base).toMatchObject({
+      snapshotId: imported.snapshotId,
+      commitSha: indexed.commitSha,
+      files: [
+        {
+          path: "src/index.ts",
+          contentHash,
+          language: "typescript",
+          parseStatus: "parsed",
+        },
+      ],
+      parsedFiles: [
+        expect.objectContaining({
+          path: "src/index.ts",
+          moduleStableKey: moduleKey,
+          imports: [],
+        }),
+      ],
+    });
+    expect(base?.parsedFiles[0]?.symbols).toHaveLength(2);
+    expect(base?.parsedFiles[0]?.edges).toHaveLength(1);
+
+    const incrementalImport = await store.createRepositoryImport({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      identity: {
+        owner: "repovista-test",
+        name: suffix,
+        canonicalUrl: `https://github.com/repovista-test/${suffix}`,
+        cloneUrl: `https://github.com/repovista-test/${suffix}.git`,
+      },
+      requestedRef: "next",
+      ignore: [],
+      parserVersion: "integration-test-v1",
+    });
+    const incrementalJob = await store.claimIndexJob("integration-worker", 30);
+    expect(incrementalJob).toMatchObject({ id: incrementalImport.jobId });
+    if (!incrementalJob) throw new Error("Expected an incremental job.");
+    const incrementalIndexed: IndexedRepository = {
+      ...indexed,
+      commitSha: "1123456789abcdef0123456789abcdef01234567",
+      baseSnapshotId: imported.snapshotId,
+      indexMode: "incremental",
+      treeHash: "sha256:integration-tree-next",
+      stats: {
+        ...indexed.stats,
+        indexing: {
+          mode: "incremental",
+          baseSnapshotId: imported.snapshotId,
+          baseCommitSha: indexed.commitSha,
+          scannedFiles: 1,
+          changedFiles: 0,
+          reusedFiles: 1,
+          parsedFiles: 0,
+          deletedFiles: 0,
+        },
+      },
+    };
+    await store.completeIndexJob(
+      incrementalJob.id,
+      incrementalJob.snapshotId,
+      incrementalJob.repositoryId,
+      "integration-worker",
+      incrementalIndexed,
+    );
+    const [incrementalSnapshot, incrementalGraph, updatedRepository] = await Promise.all([
+      store.getSnapshot(incrementalJob.snapshotId),
+      store.getSnapshotGraphData(incrementalJob.snapshotId),
+      store.getRepository(imported.repositoryId),
+    ]);
+    expect(incrementalSnapshot).toMatchObject({
+      status: "ready",
+      indexMode: "incremental",
+      baseSnapshotId: imported.snapshotId,
+      treeHash: "sha256:integration-tree-next",
+      stats: { indexing: { reusedFiles: 1, parsedFiles: 0 } },
+    });
+    expect(incrementalGraph?.files).toHaveLength(1);
+    expect(incrementalGraph?.symbols).toHaveLength(2);
+    expect(updatedRepository?.latestSnapshotId).toBe(incrementalJob.snapshotId);
   });
 
   it("allows only the lease owner to fail a job and preserves retryability", async () => {

@@ -1,11 +1,6 @@
 import { createHash } from "node:crypto";
-import type {
-  Job,
-  RepositorySummary,
-  Snapshot,
-  SnapshotStats,
-  SourceFile,
-} from "@repovista/contracts";
+import type { Job, RepositorySummary, Snapshot, SourceFile } from "@repovista/contracts";
+import { snapshotStatsSchema } from "@repovista/contracts";
 import {
   createId,
   DomainError,
@@ -19,6 +14,7 @@ import type {
   ClaimedIndexJob,
   CreateImportInput,
   CreateImportResult,
+  IncrementalIndexBase,
   JobEventRecord,
   ListSnapshotFilesOptions,
   SaveAnswerInput,
@@ -52,7 +48,10 @@ interface SnapshotRow {
   ref_name: string | null;
   status: Snapshot["status"];
   parser_version: string;
-  stats_json: SnapshotStats;
+  base_snapshot_id: string | null;
+  index_mode: "full" | "incremental";
+  tree_hash: string | null;
+  stats_json: unknown;
   error_code: string | null;
   error_message: string | null;
   requested_at: Date | string;
@@ -106,13 +105,10 @@ function mapSnapshot(row: SnapshotRow): Snapshot {
     refName: row.ref_name,
     status: row.status,
     parserVersion: row.parser_version,
-    stats: row.stats_json ?? {
-      files: 0,
-      symbols: 0,
-      edges: 0,
-      languages: {},
-      warnings: 0,
-    },
+    baseSnapshotId: row.base_snapshot_id,
+    indexMode: row.index_mode,
+    treeHash: row.tree_hash,
+    stats: snapshotStatsSchema.parse(row.stats_json ?? {}),
     requestedAt: iso(row.requested_at),
     readyAt: nullableIso(row.ready_at),
     failure:
@@ -328,6 +324,7 @@ export class RepoVistaStore {
   async listSnapshots(repositoryId: string): Promise<Snapshot[]> {
     const result = await this.pool.query<SnapshotRow>(
       "SELECT id, repository_id, commit_sha, ref_name, status, parser_version, " +
+        "base_snapshot_id, index_mode, tree_hash, " +
         "stats_json, error_code, error_message, requested_at, ready_at " +
         "FROM repository_snapshots WHERE repository_id = $1 " +
         "ORDER BY requested_at DESC LIMIT 100",
@@ -339,6 +336,7 @@ export class RepoVistaStore {
   async getSnapshot(snapshotId: string): Promise<Snapshot | null> {
     const result = await this.pool.query<SnapshotRow>(
       "SELECT id, repository_id, commit_sha, ref_name, status, parser_version, " +
+        "base_snapshot_id, index_mode, tree_hash, " +
         "stats_json, error_code, error_message, requested_at, ready_at " +
         "FROM repository_snapshots WHERE id = $1",
       [snapshotId],
@@ -358,6 +356,163 @@ export class RepoVistaStore {
     );
     const row = result.rows[0];
     return row ? mapJob(row) : null;
+  }
+
+  async getIncrementalIndexBase(
+    repositoryId: string,
+    parserVersion: string,
+    currentSnapshotId: string,
+  ): Promise<IncrementalIndexBase | null> {
+    const snapshotResult = await this.pool.query<{
+      id: string;
+      commit_sha: string;
+      parser_version: string;
+    }>(
+      "SELECT id, commit_sha, parser_version FROM repository_snapshots " +
+        "WHERE repository_id = $1 AND parser_version = $2 AND id <> $3 " +
+        "AND status = 'ready' AND commit_sha IS NOT NULL " +
+        "ORDER BY ready_at DESC, requested_at DESC LIMIT 1",
+      [repositoryId, parserVersion, currentSnapshotId],
+    );
+    const snapshot = snapshotResult.rows[0];
+    if (!snapshot) return null;
+
+    const [fileResult, symbolResult, edgeResult] = await Promise.all([
+      this.pool.query<{
+        path: string;
+        blob_hash: string;
+        language: string | null;
+        parse_status: string;
+      }>(
+        "SELECT path, blob_hash, language, parse_status FROM snapshot_files " +
+          "WHERE snapshot_id = $1 ORDER BY path",
+        [snapshot.id],
+      ),
+      this.pool.query<{
+        id: string;
+        path: string;
+        stable_key: string;
+        kind: import("@repovista/contracts").SymbolKind;
+        name: string;
+        qualified_name: string | null;
+        signature: string | null;
+        start_line: number;
+        start_column: number;
+        end_line: number;
+        end_column: number;
+        doc_text: string | null;
+        content_hash: string;
+      }>(
+        "SELECT s.id, f.path, s.stable_key, s.kind, s.name, s.qualified_name, " +
+          "s.signature, s.start_line, s.start_column, s.end_line, s.end_column, " +
+          "s.doc_text, s.content_hash FROM symbols s " +
+          "JOIN snapshot_files f ON f.id = s.snapshot_file_id " +
+          "WHERE s.snapshot_id = $1 ORDER BY f.path, s.start_line, s.start_column",
+        [snapshot.id],
+      ),
+      this.pool.query<{
+        from_stable_key: string;
+        from_path: string;
+        to_stable_key: string | null;
+        unresolved_target: string | null;
+        relation_type: import("@repovista/contracts").RelationType;
+        confidence: number;
+        evidence_json: import("@repovista/domain").ParsedEdge["evidence"];
+      }>(
+        "SELECT source.stable_key AS from_stable_key, source_file.path AS from_path, " +
+          "target.stable_key AS to_stable_key, edge.unresolved_target, " +
+          "edge.relation_type, edge.confidence, edge.evidence_json " +
+          "FROM symbol_edges edge " +
+          "JOIN symbols source ON source.id = edge.from_symbol_id " +
+          "JOIN snapshot_files source_file ON source_file.id = source.snapshot_file_id " +
+          "LEFT JOIN symbols target ON target.id = edge.to_symbol_id " +
+          "WHERE edge.snapshot_id = $1 ORDER BY edge.id",
+        [snapshot.id],
+      ),
+    ]);
+
+    const symbolsByPath = new Map<string, IncrementalIndexBase["parsedFiles"][number]["symbols"]>();
+    for (const row of symbolResult.rows) {
+      const symbols = symbolsByPath.get(row.path) ?? [];
+      symbols.push({
+        stableKey: row.stable_key,
+        kind: row.kind,
+        name: row.name,
+        qualifiedName: row.qualified_name,
+        signature: row.signature,
+        startLine: row.start_line,
+        startColumn: row.start_column,
+        endLine: row.end_line,
+        endColumn: row.end_column,
+        docText: row.doc_text,
+        contentHash: row.content_hash,
+      });
+      symbolsByPath.set(row.path, symbols);
+    }
+
+    const edgesByPath = new Map<string, IncrementalIndexBase["parsedFiles"][number]["edges"]>();
+    const importsByPath = new Map<string, IncrementalIndexBase["parsedFiles"][number]["imports"]>();
+    for (const row of edgeResult.rows) {
+      const edges = edgesByPath.get(row.from_path) ?? [];
+      edges.push({
+        fromStableKey: row.from_stable_key,
+        ...(row.to_stable_key ? { targetStableKey: row.to_stable_key } : {}),
+        ...(row.unresolved_target ? { unresolvedTarget: row.unresolved_target } : {}),
+        type: row.relation_type,
+        confidence: Number(row.confidence),
+        evidence: row.evidence_json,
+      });
+      edgesByPath.set(row.from_path, edges);
+
+      if (row.relation_type === "imports") {
+        const source = row.evidence_json.importSource ?? row.unresolved_target;
+        if (source) {
+          const imports = importsByPath.get(row.from_path) ?? [];
+          if (
+            !imports.some(
+              (item) => item.source === source && item.startLine === row.evidence_json.startLine,
+            )
+          ) {
+            imports.push({
+              source,
+              importedNames: row.evidence_json.importedNames ?? [],
+              startLine: row.evidence_json.startLine,
+              endLine: row.evidence_json.endLine,
+            });
+            importsByPath.set(row.from_path, imports);
+          }
+        }
+      }
+    }
+
+    const parsedFiles = fileResult.rows.flatMap((file) => {
+      if (file.parse_status !== "parsed") return [];
+      const symbols = symbolsByPath.get(file.path) ?? [];
+      const module = symbols.find((symbol) => symbol.kind === "module");
+      if (!module) return [];
+      return [
+        {
+          path: file.path,
+          moduleStableKey: module.stableKey,
+          symbols,
+          edges: edgesByPath.get(file.path) ?? [],
+          imports: importsByPath.get(file.path) ?? [],
+        },
+      ];
+    });
+
+    return {
+      snapshotId: snapshot.id,
+      commitSha: snapshot.commit_sha,
+      parserVersion: snapshot.parser_version,
+      files: fileResult.rows.map((row) => ({
+        path: row.path,
+        contentHash: row.blob_hash,
+        language: row.language,
+        parseStatus: row.parse_status,
+      })),
+      parsedFiles,
+    };
   }
 
   async listJobEvents(jobId: string, afterId = 0): Promise<JobEventRecord[]> {
@@ -619,9 +774,18 @@ export class RepoVistaStore {
       const indexVersion = indexVersionResult.rows[0]?.next_version ?? 1;
       await client.query(
         "UPDATE repository_snapshots SET commit_sha = $2, ref_name = $3, " +
-          "index_version = $4, status = 'building_graph', error_code = NULL, error_message = NULL " +
+          "index_version = $4, base_snapshot_id = $5, index_mode = $6, tree_hash = $7, " +
+          "status = 'building_graph', error_code = NULL, error_message = NULL " +
           "WHERE id = $1",
-        [snapshotId, indexed.commitSha, indexed.branch, indexVersion],
+        [
+          snapshotId,
+          indexed.commitSha,
+          indexed.branch,
+          indexVersion,
+          indexed.baseSnapshotId,
+          indexed.indexMode,
+          indexed.treeHash,
+        ],
       );
 
       const fileIdByPath = new Map<string, string>();
@@ -714,7 +878,9 @@ export class RepoVistaStore {
           let toSymbolId = edge.targetStableKey
             ? symbolIdByStableKey.get(edge.targetStableKey)
             : undefined;
-          let unresolvedTarget = edge.unresolvedTarget;
+          let unresolvedTarget =
+            edge.unresolvedTarget ??
+            (edge.type === "calls" ? edge.evidence.referenceTarget : undefined);
           if (!toSymbolId && edge.type === "calls" && unresolvedTarget) {
             const simpleTarget = unresolvedTarget.split(".").at(-1) ?? unresolvedTarget;
             const matches = symbolCandidates.filter(
@@ -728,6 +894,7 @@ export class RepoVistaStore {
               unresolvedTarget = undefined;
             }
           }
+          if (toSymbolId) unresolvedTarget = undefined;
           if (!toSymbolId && !unresolvedTarget) continue;
           await client.query(
             "INSERT INTO symbol_edges (" +

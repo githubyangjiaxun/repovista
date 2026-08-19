@@ -15,6 +15,7 @@ import type { RepoVistaStore, SearchEvidenceRecord } from "@repovista/database";
 import { DomainError, PUBLIC_WORKSPACE_ID } from "@repovista/domain";
 import { parseGitHubUrl } from "@repovista/git";
 import { buildGraphView, type GraphView } from "@repovista/graph";
+import { PARSER_VERSION } from "@repovista/parser";
 import { reciprocalRankFusion, tokenizeQuestion } from "@repovista/retrieval";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -280,7 +281,7 @@ export function registerRoutes(
         identity,
         requestedRef: requireSafeRef(body.ref),
         ignore: body.ignore.map((item) => requireSafePath(item, "ignore pattern")),
-        parserVersion: "tree-sitter-ts-v1",
+        parserVersion: PARSER_VERSION,
       });
       reply.code(202);
       return response(request, result);

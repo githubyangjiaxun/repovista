@@ -62,6 +62,9 @@ importers:
       '@repovista/graph':
         specifier: workspace:*
         version: link:../../packages/graph
+      '@repovista/parser':
+        specifier: workspace:*
+        version: link:../../packages/parser
       '@repovista/retrieval':
         specifier: workspace:*
         version: link:../../packages/retrieval

@@ -81,6 +81,19 @@ export const snapshotStatsSchema = z.object({
   edges: z.number().int().nonnegative().default(0),
   languages: z.record(z.string(), z.number().int().nonnegative()).default({}),
   warnings: z.number().int().nonnegative().default(0),
+  indexing: z
+    .object({
+      mode: z.enum(["full", "incremental"]),
+      baseSnapshotId: idSchema.nullable(),
+      baseCommitSha: commitShaSchema.nullable(),
+      scannedFiles: z.number().int().nonnegative(),
+      changedFiles: z.number().int().nonnegative(),
+      reusedFiles: z.number().int().nonnegative(),
+      parsedFiles: z.number().int().nonnegative(),
+      deletedFiles: z.number().int().nonnegative(),
+    })
+    .nullable()
+    .default(null),
 });
 export type SnapshotStats = z.infer<typeof snapshotStatsSchema>;
 
@@ -91,6 +104,9 @@ export const snapshotSchema = z.object({
   refName: z.string().nullable(),
   status: snapshotStatusSchema,
   parserVersion: z.string(),
+  baseSnapshotId: idSchema.nullable(),
+  indexMode: z.enum(["full", "incremental"]),
+  treeHash: z.string().nullable(),
   stats: snapshotStatsSchema,
   requestedAt: z.iso.datetime(),
   readyAt: z.iso.datetime().nullable(),

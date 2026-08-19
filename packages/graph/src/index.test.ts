@@ -97,4 +97,60 @@ describe("linkParsedImports", () => {
     );
     expect(linked?.edges).toHaveLength(2);
   });
+
+  it("relinks a reused resolved import instead of preserving its stale target", () => {
+    const files = ["src/index.ts", "src/auth/index.ts"].map(
+      (filePath) =>
+        ({
+          path: filePath,
+          absolutePath: `/tmp/${filePath}`,
+          language: "typescript",
+          byteSize: 1,
+          lineCount: 1,
+          content: "x",
+          contentHash: `sha256:${filePath}`,
+          isGenerated: false,
+        }) satisfies ScannedFile,
+    );
+    const parsed: ParsedFile[] = [
+      {
+        path: "src/index.ts",
+        moduleStableKey: "module:src/index.ts",
+        symbols: [],
+        imports: [{ source: "./auth", importedNames: ["login"], startLine: 1, endLine: 1 }],
+        edges: [
+          {
+            fromStableKey: "module:src/index.ts",
+            targetStableKey: "module:src/auth.ts",
+            type: "imports",
+            confidence: 1,
+            evidence: {
+              path: "src/index.ts",
+              startLine: 1,
+              endLine: 1,
+              syntaxType: "import_statement",
+              importSource: "./auth",
+              importedNames: ["login"],
+            },
+          },
+        ],
+      },
+      {
+        path: "src/auth/index.ts",
+        moduleStableKey: "module:src/auth/index.ts",
+        symbols: [],
+        imports: [],
+        edges: [],
+      },
+    ];
+
+    const linked = linkParsedImports(files, parsed)[0];
+
+    expect(linked?.edges).toEqual([
+      expect.objectContaining({
+        targetStableKey: "module:src/auth/index.ts",
+        evidence: expect.objectContaining({ importSource: "./auth" }),
+      }),
+    ]);
+  });
 });

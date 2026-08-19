@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import type { AppConfig } from "@repovista/config";
 import type { ClaimedIndexJob, RepoVistaStore } from "@repovista/database";
@@ -10,7 +11,87 @@ import {
 } from "@repovista/domain";
 import { cloneRepository, createWorkspace, removeWorkspace, scanWorkspace } from "@repovista/git";
 import { linkParsedImports } from "@repovista/graph";
-import { parseRepository } from "@repovista/parser";
+import { PARSER_VERSION, parseRepository } from "@repovista/parser";
+
+export interface IncrementalBaseFile {
+  path: string;
+  contentHash: string;
+  language: string | null;
+  parseStatus: string;
+}
+
+export interface IncrementalBase {
+  snapshotId: string;
+  commitSha: string;
+  parserVersion: string;
+  files: IncrementalBaseFile[];
+  parsedFiles: ParsedFile[];
+}
+
+export interface IncrementalPlan {
+  mode: "full" | "incremental";
+  baseSnapshotId: string | null;
+  baseCommitSha: string | null;
+  filesToParse: ScannedFile[];
+  reusedParsedFiles: ParsedFile[];
+  changedFiles: number;
+  deletedFiles: number;
+  treeHash: string;
+}
+
+const defaultParseableLanguages = new Set(["typescript", "javascript"]);
+
+export function treeHash(files: readonly ScannedFile[]): string {
+  const canonical = [...files]
+    .sort((left, right) => left.path.localeCompare(right.path))
+    .map((file) => `${file.path}\0${file.contentHash}\n`)
+    .join("");
+  return `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
+}
+
+export function planIncrementalIndex(
+  files: readonly ScannedFile[],
+  base: IncrementalBase | null,
+  parseableLanguages: ReadonlySet<string> = defaultParseableLanguages,
+): IncrementalPlan {
+  const baseFiles = new Map((base?.files ?? []).map((file) => [file.path, file]));
+  const baseParsed = new Map((base?.parsedFiles ?? []).map((file) => [file.path, file]));
+  const currentPaths = new Set(files.map((file) => file.path));
+  const filesToParse: ScannedFile[] = [];
+  const reusedParsedFiles: ParsedFile[] = [];
+  let changedFiles = 0;
+
+  for (const file of files) {
+    const previous = baseFiles.get(file.path);
+    const unchanged =
+      previous?.contentHash === file.contentHash && previous.language === file.language;
+    if (!unchanged) changedFiles += 1;
+    if (!parseableLanguages.has(file.language ?? "")) continue;
+    if (unchanged && previous?.parseStatus === "parsed" && baseParsed.has(file.path)) {
+      reusedParsedFiles.push(baseParsed.get(file.path) as ParsedFile);
+      continue;
+    }
+    filesToParse.push(file);
+  }
+
+  let deletedFiles = 0;
+  for (const previous of baseFiles.values()) {
+    if (!currentPaths.has(previous.path)) deletedFiles += 1;
+  }
+
+  return {
+    mode: base ? "incremental" : "full",
+    baseSnapshotId: base?.snapshotId ?? null,
+    baseCommitSha: base?.commitSha ?? null,
+    filesToParse: base
+      ? filesToParse
+      : files.filter((file) => parseableLanguages.has(file.language ?? "")),
+    reusedParsedFiles: base ? reusedParsedFiles : [],
+    changedFiles: base ? changedFiles : files.length,
+    deletedFiles: base ? deletedFiles : 0,
+    treeHash: treeHash(files),
+  };
+}
 
 export type IndexerStore = Pick<
   RepoVistaStore,
@@ -18,6 +99,7 @@ export type IndexerStore = Pick<
   | "claimIndexJob"
   | "completeIndexJob"
   | "failJob"
+  | "getIncrementalIndexBase"
   | "heartbeatJob"
   | "isCancellationRequested"
   | "updateJobProgress"
@@ -169,12 +251,11 @@ async function parseInBatches(
   store: IndexerStore,
   lease: JobLeaseGuard,
   job: ClaimedIndexJob,
-  files: readonly ScannedFile[],
   dependencies: IndexerDependencies,
+  parseableFiles: readonly ScannedFile[],
+  reusedFiles: number,
 ): Promise<ParsedFile[]> {
-  const parseable = files.filter(
-    (file) => file.language === "typescript" || file.language === "javascript",
-  );
+  const parseable = parseableFiles;
   const parsedFiles: ParsedFile[] = [];
   const batchSize = 25;
 
@@ -186,7 +267,7 @@ async function parseInBatches(
       progress: 0.7,
       processed: 0,
       total: 0,
-      message: "No TypeScript or JavaScript files require parsing.",
+      message: `No changed source files require parsing; reused ${reusedFiles} unchanged files.`,
     });
     return parsedFiles;
   }
@@ -203,7 +284,7 @@ async function parseInBatches(
       progress: 0.45 + (processed / parseable.length) * 0.25,
       processed,
       total: parseable.length,
-      message: `Parsed ${processed} of ${parseable.length} source files.`,
+      message: `Parsed ${processed} of ${parseable.length} changed files; reused ${reusedFiles} unchanged files.`,
     });
   }
   return parsedFiles;
@@ -254,16 +335,34 @@ export async function executeIndexJob(
     });
 
     await lease.checkpoint();
+    const base = await store.getIncrementalIndexBase(
+      job.repositoryId,
+      PARSER_VERSION,
+      job.snapshotId,
+    );
+    const plan = planIncrementalIndex(files, base);
+
+    await lease.checkpoint();
     await store.updateJobProgress(job.id, job.snapshotId, {
       status: "running",
       snapshotStatus: "parsing",
       phase: "parsing",
       progress: 0.45,
       processed: 0,
-      total: files.length,
-      message: `Preparing to parse ${files.length} files.`,
+      total: plan.filesToParse.length,
+      message:
+        plan.mode === "incremental"
+          ? `Preparing incremental parse: ${plan.filesToParse.length} changed, ${plan.reusedParsedFiles.length} reused.`
+          : `Preparing to parse ${plan.filesToParse.length} files.`,
     });
-    const parsedFiles = await parseInBatches(store, lease, job, files, dependencies);
+    const parsedFiles = await parseInBatches(
+      store,
+      lease,
+      job,
+      dependencies,
+      plan.filesToParse,
+      plan.reusedParsedFiles.length,
+    );
 
     await lease.checkpoint();
     await store.updateJobProgress(job.id, job.snapshotId, {
@@ -273,13 +372,31 @@ export async function executeIndexJob(
       progress: 0.75,
       message: "Resolving local imports and symbol relationships.",
     });
-    const linkedFiles = dependencies.linkParsedImports(files, parsedFiles);
+    const linkedFiles = dependencies.linkParsedImports(files, [
+      ...plan.reusedParsedFiles,
+      ...parsedFiles,
+    ]);
     const indexed: IndexedRepository = {
       commitSha: clone.commitSha,
       branch: clone.branch,
+      baseSnapshotId: plan.baseSnapshotId,
+      indexMode: plan.mode,
+      treeHash: plan.treeHash,
       files: [...files],
       parsedFiles: linkedFiles,
-      stats: calculateStats(files, linkedFiles),
+      stats: {
+        ...calculateStats(files, linkedFiles),
+        indexing: {
+          mode: plan.mode,
+          baseSnapshotId: plan.baseSnapshotId,
+          baseCommitSha: plan.baseCommitSha,
+          scannedFiles: files.length,
+          changedFiles: plan.changedFiles,
+          reusedFiles: plan.reusedParsedFiles.length,
+          parsedFiles: plan.filesToParse.length,
+          deletedFiles: plan.deletedFiles,
+        },
+      },
     };
 
     await lease.checkpoint();

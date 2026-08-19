@@ -5,7 +5,7 @@ import type {
   Snapshot,
   SnapshotStats,
 } from "@repovista/contracts";
-import type { GitHubRepositoryIdentity, IndexedRepository } from "@repovista/domain";
+import type { GitHubRepositoryIdentity, IndexedRepository, ParsedFile } from "@repovista/domain";
 
 export interface CreateImportInput {
   workspaceId: string;
@@ -35,6 +35,19 @@ export interface ClaimedIndexJob {
   ignore: string[];
   attemptCount: number;
   maxAttempts: number;
+}
+
+export interface IncrementalIndexBase {
+  snapshotId: string;
+  commitSha: string;
+  parserVersion: string;
+  files: {
+    path: string;
+    contentHash: string;
+    language: string | null;
+    parseStatus: string;
+  }[];
+  parsedFiles: ParsedFile[];
 }
 
 export interface JobEventRecord {

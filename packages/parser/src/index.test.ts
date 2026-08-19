@@ -34,6 +34,13 @@ describe("parseSourceFile", () => {
     expect(parsed.symbols.some((symbol) => symbol.kind === "method")).toBe(true);
     expect(parsed.edges.some((edge) => edge.type === "imports")).toBe(true);
     expect(parsed.edges.some((edge) => edge.type === "calls")).toBe(true);
+    expect(parsed.edges.find((edge) => edge.type === "imports")?.evidence).toMatchObject({
+      importSource: "./users",
+      importedNames: ["findUser"],
+    });
+    expect(parsed.edges.find((edge) => edge.type === "calls")?.evidence).toMatchObject({
+      referenceTarget: "findUser",
+    });
   });
 
   it("assigns unique stable keys to repeated declarations in anonymous scopes", () => {
