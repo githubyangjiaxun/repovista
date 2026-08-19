@@ -82,6 +82,8 @@ export interface ParsedFile {
   }[];
 }
 
+export type SupportedParserLanguage = "typescript" | "javascript" | "python";
+
 export interface IndexedRepository {
   commitSha: string;
   branch: string | null;

@@ -235,33 +235,54 @@ export function resolveLocalImport(
   importSource: string,
   knownPaths: ReadonlySet<string>,
 ): string | null {
-  if (!importSource.startsWith(".")) return null;
-  const base = path.posix.normalize(path.posix.join(path.posix.dirname(fromPath), importSource));
-  const runtimeExtension = path.posix.extname(base);
-  const sourceBase = [".js", ".jsx", ".mjs", ".cjs"].includes(runtimeExtension)
-    ? base.slice(0, -runtimeExtension.length)
-    : base;
-  const candidates = [
-    base,
-    `${sourceBase}.ts`,
-    `${sourceBase}.tsx`,
-    `${sourceBase}.js`,
-    `${sourceBase}.jsx`,
-    `${sourceBase}.mjs`,
-    `${sourceBase}.cjs`,
-    `${base}.ts`,
-    `${base}.tsx`,
-    `${base}.js`,
-    `${base}.jsx`,
-    `${base}.mjs`,
-    `${base}.cjs`,
-    `${base}/index.ts`,
-    `${base}/index.tsx`,
-    `${base}/index.js`,
-    `${base}/index.jsx`,
-    `${base}/index.mjs`,
-    `${base}/index.cjs`,
+  const isRelative = importSource.startsWith(".");
+  if (!isRelative && !fromPath.endsWith(".py")) return null;
+  const jsBase = path.posix.normalize(path.posix.join(path.posix.dirname(fromPath), importSource));
+  const pythonDots = importSource.match(/^\.+/)?.[0].length ?? 0;
+  const pythonRemainder = importSource.replace(/^\.+/, "").replaceAll(".", "/");
+  let pythonDirectory = path.posix.dirname(fromPath);
+  for (let index = 1; index < pythonDots; index += 1) {
+    pythonDirectory = path.posix.dirname(pythonDirectory);
+  }
+  const pythonRelativeBase = path.posix.normalize(
+    path.posix.join(pythonDirectory, pythonRemainder),
+  );
+  const pythonAbsoluteBase = importSource.replaceAll(".", "/");
+  const bases = [
+    jsBase,
+    ...(fromPath.endsWith(".py") ? [pythonDots > 0 ? pythonRelativeBase : pythonAbsoluteBase] : []),
   ];
+  const candidates = bases.flatMap((base) => {
+    const runtimeExtension = path.posix.extname(base);
+    const sourceBase = [".js", ".jsx", ".mjs", ".cjs"].includes(runtimeExtension)
+      ? base.slice(0, -runtimeExtension.length)
+      : base;
+    return [
+      base,
+      `${sourceBase}.ts`,
+      `${sourceBase}.tsx`,
+      `${sourceBase}.js`,
+      `${sourceBase}.jsx`,
+      `${sourceBase}.mjs`,
+      `${sourceBase}.cjs`,
+      `${base}.ts`,
+      `${base}.tsx`,
+      `${base}.js`,
+      `${base}.jsx`,
+      `${base}.mjs`,
+      `${base}.cjs`,
+      `${base}/index.ts`,
+      `${base}/index.tsx`,
+      `${base}/index.js`,
+      `${base}/index.jsx`,
+      `${base}/index.mjs`,
+      `${base}/index.cjs`,
+      `${sourceBase}.py`,
+      `${sourceBase}/__init__.py`,
+      `${base}.py`,
+      `${base}/__init__.py`,
+    ];
+  });
   return [...new Set(candidates)].find((candidate) => knownPaths.has(candidate)) ?? null;
 }
 

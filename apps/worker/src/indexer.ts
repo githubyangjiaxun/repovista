@@ -39,7 +39,7 @@ export interface IncrementalPlan {
   treeHash: string;
 }
 
-const defaultParseableLanguages = new Set(["typescript", "javascript"]);
+const defaultParseableLanguages = new Set(["typescript", "javascript", "python"]);
 
 export function treeHash(files: readonly ScannedFile[]): string {
   const canonical = [...files]

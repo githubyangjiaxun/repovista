@@ -43,6 +43,7 @@ describe("languageForPath", () => {
   it("recognizes TypeScript variants", () => {
     expect(languageForPath("src/index.ts")).toBe("typescript");
     expect(languageForPath("src/view.tsx")).toBe("typescript");
+    expect(languageForPath("app/service.py")).toBe("python");
   });
 });
 

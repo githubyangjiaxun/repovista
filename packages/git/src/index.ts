@@ -78,6 +78,7 @@ export function languageForPath(filePath: string): string | null {
     ".jsx": "javascript",
     ".mjs": "javascript",
     ".cjs": "javascript",
+    ".py": "python",
     ".json": "json",
     ".md": "markdown",
     ".css": "css",

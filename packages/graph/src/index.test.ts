@@ -22,6 +22,15 @@ describe("resolveLocalImport", () => {
       ),
     ).toBe("src/services/auth.ts");
   });
+
+  it("resolves Python relative and absolute modules", () => {
+    expect(resolveLocalImport("app/service.py", ".models", new Set(["app/models.py"]))).toBe(
+      "app/models.py",
+    );
+    expect(
+      resolveLocalImport("app/service.py", "app.common", new Set(["app/common/__init__.py"])),
+    ).toBe("app/common/__init__.py");
+  });
 });
 
 describe("linkParsedImports", () => {
@@ -152,5 +161,74 @@ describe("linkParsedImports", () => {
         evidence: expect.objectContaining({ importSource: "./auth" }),
       }),
     ]);
+  });
+
+  it("links Python imports while leaving third-party modules unresolved", () => {
+    const files = ["app/service.py", "app/models.py"].map(
+      (filePath) =>
+        ({
+          path: filePath,
+          absolutePath: `/tmp/${filePath}`,
+          language: "python",
+          byteSize: 1,
+          lineCount: 1,
+          content: "x",
+          contentHash: `sha256:${filePath}`,
+          isGenerated: false,
+        }) satisfies ScannedFile,
+    );
+    const parsed: ParsedFile[] = [
+      {
+        path: "app/service.py",
+        moduleStableKey: "module:app/service.py",
+        symbols: [],
+        imports: [
+          { source: ".models", importedNames: ["User"], startLine: 1, endLine: 1 },
+          { source: "requests", importedNames: ["requests"], startLine: 2, endLine: 2 },
+        ],
+        edges: [
+          {
+            fromStableKey: "module:app/service.py",
+            unresolvedTarget: ".models",
+            type: "imports",
+            confidence: 1,
+            evidence: {
+              path: "app/service.py",
+              startLine: 1,
+              endLine: 1,
+              syntaxType: "import_from_statement",
+              importSource: ".models",
+            },
+          },
+          {
+            fromStableKey: "module:app/service.py",
+            unresolvedTarget: "requests",
+            type: "imports",
+            confidence: 1,
+            evidence: {
+              path: "app/service.py",
+              startLine: 2,
+              endLine: 2,
+              syntaxType: "import_statement",
+              importSource: "requests",
+            },
+          },
+        ],
+      },
+      {
+        path: "app/models.py",
+        moduleStableKey: "module:app/models.py",
+        symbols: [],
+        imports: [],
+        edges: [],
+      },
+    ];
+    const linked = linkParsedImports(files, parsed)[0];
+    expect(linked?.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ targetStableKey: "module:app/models.py", type: "imports" }),
+        expect.objectContaining({ unresolvedTarget: "requests", type: "imports" }),
+      ]),
+    );
   });
 });
