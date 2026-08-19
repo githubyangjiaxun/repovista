@@ -1,311 +1,205 @@
 # API 接口契约
 
-状态：proposal  
-版本：v1
+状态：v0.1 已实现基线
+Base path：`/v1`
+机器事实来源：`openapi/openapi.json`
 
-所有接口前缀为 /v1。除特别说明外，响应为 JSON。
+本文件解释使用方式，不复制所有 JSON Schema。字段、Required、Status Code 和示例发生冲突时，以 OpenAPI 和 `packages/contracts` 为准。
 
-## 1. 通用请求头
+## 1. 通用格式
 
-~~~http
+普通请求可发送：
+
+```http
 Content-Type: application/json
-X-Request-ID: 018f2a2e-...
-Authorization: Bearer <token>
-~~~
+X-Request-ID: client-generated-id
+```
 
-Authorization 对匿名公共读取可省略。服务端始终返回 X-Request-ID。
+服务端在响应头返回 `X-Request-ID`。成功信封使用 camelCase：
 
-## 2. 通用响应
-
-### 成功
-
-~~~json
+```json
 {
   "data": {},
-  "meta": {
-    "request_id": "018f..."
-  }
+  "meta": { "requestId": "request-id" }
 }
-~~~
+```
 
-### 失败
+失败信封：
 
-~~~json
+```json
 {
   "error": {
-    "code": "SNAPSHOT_NOT_READY",
-    "message": "该快照还没有完成索引。",
+    "code": "VALIDATION_FAILED",
+    "message": "The request contains invalid input.",
     "details": {},
-    "retryable": true
+    "retryable": false,
+    "requestId": "request-id"
   }
 }
-~~~
+```
 
-## 3. 健康检查
+Health Endpoint 直接返回 `{ "status": "ok" }`，不包信封。v0.1 没有 Authorization Header 约定。
 
-### GET /v1/health/live
+## 2. Operation 列表
 
-进程存活检查，不访问外部依赖。
+| Method | Path | 用途 |
+|---|---|---|
+| GET | `/v1/health/live` | 进程存活 |
+| GET | `/v1/health/ready` | 数据库可用 |
+| POST | `/v1/repositories` | 创建/复用仓库并排队 Snapshot |
+| GET | `/v1/repositories` | 列出 Public Workspace 仓库 |
+| GET | `/v1/repositories/{repositoryId}` | 仓库摘要和最新 Snapshot |
+| GET | `/v1/repositories/{repositoryId}/snapshots` | 列出不可变 Snapshot |
+| GET | `/v1/snapshots/{snapshotId}` | Snapshot 状态与统计 |
+| POST | `/v1/snapshots/{snapshotId}/cancel` | 请求取消活动任务 |
+| GET | `/v1/jobs/{jobId}` | 当前任务状态 |
+| GET | `/v1/jobs/{jobId}/events` | SSE 任务事件 |
+| GET | `/v1/snapshots/{snapshotId}/map` | 包/文件/符号图 |
+| GET | `/v1/snapshots/{snapshotId}/files` | 文件 Cursor 列表 |
+| GET | `/v1/snapshots/{snapshotId}/source` | 固定 Snapshot 源码 |
+| GET | `/v1/snapshots/{snapshotId}/search` | 证据搜索 |
+| POST | `/v1/repositories/{repositoryId}/ask` | 可信问答 |
+| POST | `/v1/share-reports` | 创建公开导览 |
+| GET | `/v1/share-reports/{slug}` | 读取公开导览 |
 
-### GET /v1/health/ready
+共 17 个 Operation。
 
-检查数据库和必要对象存储。
+## 3. 创建分析
 
-## 4. 创建仓库
+```http
+POST /v1/repositories
+```
 
-### POST /v1/repositories
-
-请求：
-
-~~~json
+```json
 {
-  "workspace_id": "018f...",
-  "source": {
-    "provider": "github",
-    "url": "https://github.com/owner/repo"
-  },
-  "ref": {
-    "type": "branch",
-    "value": "main"
-  },
-  "options": {
-    "local_only": false,
-    "include_history": false,
-    "ignore": ["docs/generated", "vendor"]
-  }
+  "url": "https://github.com/owner/repository",
+  "ref": "main",
+  "ignore": ["dist", "docs/generated"]
 }
-~~~
+```
+
+`ref` 和 `ignore` 可省略。URL 必须是公共 HTTPS GitHub 两段路径，不能包含凭据、Query 或 Fragment。Ignore 必须是安全的仓库相对路径。
 
 响应 202：
 
-~~~json
+```json
 {
   "data": {
-    "repository_id": "018f...",
-    "snapshot_id": "018f...",
-    "job_id": "018f...",
+    "repositoryId": "uuid",
+    "snapshotId": "uuid",
+    "jobId": "uuid",
     "status": "queued"
   },
-  "meta": { "request_id": "018f..." }
+  "meta": { "requestId": "request-id" }
 }
-~~~
+```
 
-支持 Idempotency-Key，重复请求返回同一任务。
+## 4. Job 与 SSE
 
-## 5. 仓库和快照
+`GET /v1/jobs/{jobId}` 返回：`status`、`phase`、0～1 `progress`、`processed`、`total`、`retryable` 和可选 `error`。
 
-### GET /v1/repositories/{repository_id}
+SSE 支持：
 
-返回仓库元数据、最新 Snapshot 和权限。
+- Query `after=<event-id>`。
+- Header `Last-Event-ID`。
+- `started`、`progress`、`completed`、`failed`、`cancelled` 等持久化事件。
 
-### GET /v1/repositories/{repository_id}/snapshots
-
-参数：
-
-- page_size：默认 20，最大 100。
-- cursor：游标。
-- status：queued、indexing、ready 或 failed。
-
-### GET /v1/snapshots/{snapshot_id}
-
-返回固定 Commit、索引版本、统计和状态。
-
-### POST /v1/snapshots/{snapshot_id}/cancel
-
-取消未完成的分析任务。幂等。
-
-## 6. 任务进度
-
-### GET /v1/jobs/{job_id}
-
-~~~json
-{
-  "data": {
-    "id": "018f...",
-    "type": "index_snapshot",
-    "status": "parsing",
-    "progress": 0.42,
-    "phase": "解析 TypeScript 文件",
-    "processed": 128,
-    "total": 342,
-    "retryable": false,
-    "error": null
-  }
-}
-~~~
-
-### GET /v1/jobs/{job_id}/events
-
-响应类型 text/event-stream：
-
-~~~text
+```text
 id: 42
 event: progress
-data: {"phase":"parsing","progress":0.42,"processed":128,"total":342}
+data: {"phase":"parsing","progress":0.62,"processed":120,"total":190}
+```
 
-id: 43
-event: completed
-data: {"snapshot_id":"018f...","status":"ready"}
-~~~
+客户端断线后应携带最后 Event ID 重连，并同时读取 Job 当前状态，避免错过终态。
 
-事件类型为 started、progress、warning、completed、failed、cancelled。
+## 5. 地图
 
-## 7. 架构地图
+```http
+GET /v1/snapshots/{snapshotId}/map?level=file&query=server
+```
 
-### GET /v1/snapshots/{snapshot_id}/map
+Query：
 
-参数：
+- `level=package|file|symbol`，默认 package。
+- `rootId` 限制根节点。
+- `depth=0..4`，默认 1。
+- `query` 按 Label/Path 过滤。
+- `relationTypes` 可为逗号分隔或重复参数。
 
-- level：package、file 或 symbol。
-- root_id：可选，限制子图。
-- depth：默认 1，最大 4。
-- query：节点搜索。
-- relation_types[]：关系过滤。
-- cursor：大图分页。
+响应包含 Snapshot ID/Commit/Parser Version、Level、Nodes、Edges、`truncated`。Node 的 `range` 使用 `startLine/endLine`。
 
-响应：
+## 6. 文件与源码
 
-~~~json
+文件列表参数：`cursor`、`language`、`pageSize`（1～100）、`path`、`query`。
+
+源码请求：
+
+```http
+GET /v1/snapshots/{snapshotId}/source?path=src/server.ts&startLine=10&endLine=40
+```
+
+响应包含 `id`、`path`、`language`、`content`、`lineCount`、实际 `startLine`、`commitSha`、`blobHash`、`truncated`。Path 必须属于该 Snapshot，目录穿越返回 400。
+
+## 7. 搜索
+
+```http
+GET /v1/snapshots/{snapshotId}/search?q=createRouter&mode=hybrid&limit=20
+```
+
+`mode` 接受 `text|symbol|hybrid`。当前存储层返回同一套全文/符号证据，Mode 会在响应中回显，为后续检索策略扩展保留 Contract。
+
+每条 Evidence 包含 Snapshot、Commit、File、可选 Symbol、行号、内容、Hash 和 Score。
+
+## 8. 可信问答
+
+```http
+POST /v1/repositories/{repositoryId}/ask
+```
+
+```json
 {
-  "data": {
-    "snapshot": {
-      "id": "018f...",
-      "commit_sha": "a81f2c7",
-      "parser_version": "ts-v1"
-    },
-    "nodes": [
-      {
-        "id": "symbol:src/auth.ts:login",
-        "kind": "function",
-        "label": "login",
-        "path": "src/auth.ts",
-        "range": { "start_line": 18, "end_line": 42 },
-        "importance": 0.87
-      }
-    ],
-    "edges": [
-      {
-        "id": "edge:...",
-        "from": "symbol:...",
-        "to": "symbol:...",
-        "type": "calls",
-        "confidence": 0.98
-      }
-    ],
-    "next_cursor": null
-  }
+  "question": "Where does the application start?",
+  "snapshotId": "optional-uuid",
+  "provider": "fake",
+  "model": "optional-model"
 }
-~~~
+```
 
-## 8. 文件和源码
+省略 Snapshot 时使用 Repository 最新 Ready Snapshot。Provider 可为 `fake`、`ollama`、`openai-compatible`；省略时使用服务配置。
 
-### GET /v1/snapshots/{snapshot_id}/files
+响应 `data` 包含：
 
-参数：path、language、query、page_size、cursor。
+- `messageId`。
+- `answer.summary/steps/limitations/status/citations/provider/model`。
+- 服务端实际检索的 `evidence[]`。
 
-### GET /v1/snapshots/{snapshot_id}/source
+Citation 的路径、行号和 Quote 来自服务端 Evidence，而不是模型自由输出。
 
-必填参数 path；可选 start_line 和 end_line。
+## 9. 分享报告
 
-~~~json
+```http
+POST /v1/share-reports
+```
+
+```json
 {
-  "data": {
-    "path": "src/routes/login.ts",
-    "language": "typescript",
-    "content": "export async function login...",
-    "line_count": 92,
-    "commit_sha": "a81f2c7",
-    "blob_hash": "sha256:...",
-    "truncated": false
-  }
+  "snapshotId": "uuid",
+  "title": "owner/repository architecture tour"
 }
-~~~
+```
 
-服务端必须校验 path 属于 snapshot，禁止目录穿越。
+返回 201 和 `{id, slug}`。`GET /v1/share-reports/{slug}` 公开读取创建时固定的 Repository、Snapshot、Overview、Reading Path 和 Package Map。
 
-## 9. 搜索
+## 10. 状态码
 
-### GET /v1/snapshots/{snapshot_id}/search
+- 200：读取或问答成功。
+- 201：Share Report 创建成功。
+- 202：分析或取消请求被接受。
+- 400：输入、URL、Ref 或 Path 不合法。
+- 404：资源不存在。
+- 409：Snapshot 未 Ready 等状态冲突。
+- 429：匿名业务限流。
+- 502：上游模型失败或输出不合法。
+- 503：Readiness 数据库不可用。
 
-参数：
-
-- q：必填。
-- mode：text、symbol 或 hybrid，默认 hybrid。
-- limit：默认 20，最大 100。
-
-返回结果必须包含证据位置。
-
-## 10. 对话和 AI 问答
-
-### POST /v1/conversations
-
-~~~json
-{
-  "workspace_id": "018f...",
-  "repository_id": "018f...",
-  "snapshot_id": "018f...",
-  "title": "登录流程"
-}
-~~~
-
-### POST /v1/conversations/{conversation_id}/messages
-
-~~~json
-{
-  "content": "登录请求经过哪些模块？",
-  "options": {
-    "stream": true,
-    "provider": "ollama",
-    "model": "qwen3:8b",
-    "max_tokens": 1200
-  }
-}
-~~~
-
-响应为 SSE。事件：
-
-- retrieval_started
-- evidence
-- token
-- citation
-- answer_completed
-- answer_failed
-
-answer_completed 必须包含：
-
-~~~json
-{
-  "message_id": "018f...",
-  "answer_status": "grounded",
-  "citation_count": 3,
-  "snapshot_id": "018f..."
-}
-~~~
-
-answer_status 只允许 grounded、partial、refused。
-
-## 11. 分享报告
-
-### POST /v1/share-reports
-
-~~~json
-{
-  "snapshot_id": "018f...",
-  "type": "architecture_tour",
-  "visibility": "public",
-  "sections": ["overview", "map", "reading_path", "qa"]
-}
-~~~
-
-### GET /v1/share-reports/{slug}
-
-匿名只读接口，只返回报告明确允许公开的内容。
-
-## 12. API 安全要求
-
-- 所有资源 ID 都做 workspace 权限检查。
-- 所有分页设置上限。
-- 所有用户文本设置长度上限。
-- AI 请求设置 Token、并发和超时上限。
-- 错误响应不返回堆栈。
-- OpenAPI schema 在 CI 中校验。
+调用方必须按 `error.code` 和 `retryable` 决策，不解析英文 Message。

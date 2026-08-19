@@ -2,25 +2,35 @@
 
 ## Supported versions
 
-Until v1.0, only the latest released version receives security fixes.
+Until v1.0, only the latest released RepoVista version receives security fixes.
 
 ## Reporting a vulnerability
 
-Do not open a public issue for vulnerabilities involving code execution, private source disclosure,
-authentication bypass, SSRF, path traversal, or secret leakage.
+Do not open a public issue for suspected code execution, source disclosure, authentication bypass,
+SSRF, path traversal, citation forgery, or secret leakage.
 
-Use GitHub private vulnerability reporting when the public repository is available. Until then,
-contact the repository owner privately.
+Use GitHub private vulnerability reporting after the repository is published. Before that feature
+is available, contact the repository owner through a private channel. Do not include private source
+code or live credentials unless the owner explicitly provides a secure transfer method.
 
-Please include:
+Include the affected version or commit, reproduction steps, impact, and any suggested mitigation.
 
-- affected version or commit;
-- reproduction steps;
-- impact;
-- any suggested mitigation.
+## v0.1 security boundary
 
-## Security boundaries
+RepoVista v0.1 imports public HTTPS GitHub repositories only. It has no private-repository token or
+authentication flow. Deployment operators should not expose a local instance to untrusted users
+without adding network access controls because the public workspace and share-report endpoints are
+anonymous by design.
 
-RepoVista treats imported repositories as hostile input. It must not execute repository scripts,
-follow paths outside its isolated workspace, or send private source to an external model without
-explicit configuration.
+Imported repositories are hostile input. The implementation must not:
+
+- execute repository scripts, hooks, binaries, or package-manager lifecycle commands;
+- accept credentials inside repository URLs or follow paths outside the temporary workspace;
+- follow symbolic links from the analyzed tree;
+- write secrets, model keys, or full source contents to application logs;
+- trust instructions embedded in repository text;
+- return a model citation that cannot be rebuilt from indexed evidence at the selected commit.
+
+The current scanner skips `.env*`, `.pem`, and `.key` files and enforces file, byte, and timeout
+limits. These controls reduce risk but do not turn the Worker into a hardened multi-tenant sandbox.
+Run internet-facing deployments with container, network, database, and operating-system isolation.
