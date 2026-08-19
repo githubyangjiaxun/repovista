@@ -142,6 +142,8 @@ User Message 由 Question 和带显式分隔的 Evidence 组成。v0.1 不把整
 - 缺少 OpenAI-compatible Base URL：`AI_CONFIG_INVALID`。
 - Provider 非 2xx：`AI_PROVIDER_FAILED`，5xx 可重试。
 - 无 Content 或 JSON 不符合 Draft：`AI_OUTPUT_INVALID`。
+- 网络错误和超时统一映射为可重试的 `AI_PROVIDER_FAILED`；Provider 外层响应不是 JSON 或
+  Draft Schema 不匹配时映射为不可重试的 `AI_OUTPUT_INVALID`。
 - 无检索 Evidence：Provider/Verifier 返回 Refused，不编造答案。
 - 模型失败不影响已经完成的地图、源码和搜索。
 

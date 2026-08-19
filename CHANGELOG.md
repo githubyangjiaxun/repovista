@@ -30,6 +30,22 @@ Keep a Changelog structure.
 
 - Product and engineering documentation now describes the implemented v0.1 baseline rather than
   the earlier multi-tenant/object-storage proposal.
+- The release audit now records immutable Snapshot navigation, lease-owner guarded terminal writes,
+  file-plus-symbol evidence chunks, collision-resistant share slugs, and complete-SHA fetch/
+  detached-checkout behavior.
+- External imports remain visible as unresolved graph edges; JavaScript imports can resolve back to
+  TypeScript sources. Network/timeout provider failures are retryable, while malformed provider
+  output is reported as invalid output.
+
+### Verification
+
+- `pnpm check`: OpenAPI, Biome, 15 TypeScript tasks, 25 test tasks, PostgreSQL integration (2
+  tests), and production builds passed.
+- A clean local checkout installed with `pnpm install --frozen-lockfile`; Playwright passed 3/3;
+  an independent Compose audit built all three application images, migrated an empty database, and
+  verified `unjs/defu` at commit `82632b66f5914e9946edce300e10633a3d5c0cb7`.
+- The audit exercised package/file/symbol maps, source ranges, full-text and symbol search, fake
+  and refused answers, local Ollama/OpenAI-compatible protocol mocks, and Commit-pinned sharing.
 
 ### Security
 

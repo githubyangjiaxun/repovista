@@ -1159,7 +1159,12 @@ export class RepoVistaStore {
       "-" +
       snapshot.commitSha.slice(0, 7) +
       "-" +
-      id.slice(0, 8);
+      // UUIDv7 starts with a timestamp, so its first characters are shared by
+      // reports created in the same millisecond. Keep the random tail in the
+      // public slug to make concurrent share creation collision-resistant.
+      id
+        .replaceAll("-", "")
+        .slice(-16);
     await this.pool.query(
       "INSERT INTO share_reports (" +
         "id, repository_id, snapshot_id, slug, title, visibility, generated_content_json, created_by" +

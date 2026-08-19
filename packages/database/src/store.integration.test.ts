@@ -205,6 +205,18 @@ integration("RepoVistaStore with PostgreSQL", () => {
       title: "Integration report",
       snapshot: { id: job.snapshotId },
     });
+
+    const secondShare = await store.createShareReport(
+      job.repositoryId,
+      job.snapshotId,
+      "Integration report 2",
+      { overview: answer.summary, readingPath: [], map: { nodes: [], edges: [] } },
+    );
+    expect(secondShare.slug).not.toBe(share.slug);
+    expect(await store.getShareReport(secondShare.slug)).toMatchObject({
+      title: "Integration report 2",
+      snapshot: { id: job.snapshotId },
+    });
   });
 
   it("allows only the lease owner to fail a job and preserves retryability", async () => {
