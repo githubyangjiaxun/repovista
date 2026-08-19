@@ -109,6 +109,7 @@ function createStore(): RepoVistaStore {
       language: "typescript",
       content: "export function hello() { return 1; }",
       lineCount: 1,
+      startLine: 1,
       commitSha: snapshot.commitSha,
       blobHash: "sha256:file",
       truncated: false,

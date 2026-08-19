@@ -877,6 +877,7 @@ export class RepoVistaStore {
       language: row.language,
       content: truncated ? sourceSlice(row.inline_content, from, to) : row.inline_content,
       lineCount: row.line_count,
+      startLine: from,
       commitSha: row.commit_sha,
       blobHash: row.blob_hash,
       truncated,

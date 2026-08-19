@@ -153,6 +153,7 @@ integration("RepoVistaStore with PostgreSQL", () => {
     expect(graph?.symbols).toHaveLength(2);
     expect(graph?.edges).toHaveLength(1);
     expect(source?.content).toBe(content);
+    expect(source?.startLine).toBe(1);
     expect(filePage.files).toHaveLength(1);
     expect(evidence[0]).toMatchObject({ path: "src/index.ts", symbol: "hello" });
 

@@ -168,6 +168,7 @@ export const sourceFileSchema = z.object({
   language: z.string().nullable(),
   content: z.string(),
   lineCount: z.number().int().nonnegative(),
+  startLine: z.number().int().positive(),
   commitSha: z.string(),
   blobHash: z.string(),
   truncated: z.boolean(),

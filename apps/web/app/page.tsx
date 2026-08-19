@@ -1,4 +1,5 @@
 import { ArrowRight, GitBranch, Map as MapIcon, ShieldCheck } from "lucide-react";
+import { SiteHeader } from "@/components/site-header";
 
 const features = [
   {
@@ -21,24 +22,13 @@ const features = [
 export default function HomePage() {
   return (
     <main>
-      <nav className="nav">
-        <a className="brand" href="/">
-          <span className="brand-mark">R</span>
-          RepoVista
-        </a>
-        <div className="nav-links">
-          <a href="/docs">Docs</a>
-          <a href="https://github.com" rel="noreferrer" target="_blank">
-            GitHub
-          </a>
-        </div>
-      </nav>
+      <SiteHeader />
 
       <section className="hero">
         <p className="eyebrow">Evidence-first code intelligence</p>
         <h1>
           Understand any codebase
-          <span> as a map, not a maze.</span>
+          <span className="hero-title-muted"> as a map, not a maze.</span>
         </h1>
         <p className="hero-copy">
           Paste a public GitHub repository and explore its architecture, source relationships, and
@@ -52,6 +42,7 @@ export default function HomePage() {
             id="repository-url"
             name="url"
             placeholder="https://github.com/owner/repository"
+            required
             type="url"
           />
           <button type="submit">
