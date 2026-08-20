@@ -3,6 +3,7 @@ import path from "node:path";
 import { PARSER_VERSION } from "@repovista/contracts";
 import type { ParsedEdge, ParsedFile, ParsedSymbol, ScannedFile } from "@repovista/domain";
 import Parser from "tree-sitter";
+import Go from "tree-sitter-go";
 import Python from "tree-sitter-python";
 import TypeScript from "tree-sitter-typescript";
 
@@ -506,15 +507,363 @@ export function parseSourceFile(file: ScannedFile): ParsedFile {
   };
 }
 
+function goReceiverType(node: Parser.SyntaxNode): string | null {
+  const receiver = node.namedChildren.find((child) => child.type === "parameter_list");
+  const text = receiver?.text ?? "";
+  const match = text.match(/(?:^|\s)[*]?([A-Za-z_][A-Za-z0-9_]*)\s*\)?$/);
+  return match?.[1] ?? null;
+}
+
+function goCallTarget(node: Parser.SyntaxNode): string | null {
+  const callable = node.childForFieldName("function") ?? node.namedChildren[0];
+  if (!callable || callable.type === "argument_list") return null;
+  const text = normalizeName(callable.text);
+  return text.length > 0 && text.length <= 300 ? text : null;
+}
+
+function goImportItems(node: Parser.SyntaxNode): {
+  source: string;
+  importedNames: string[];
+}[] {
+  const specs = node.descendantsOfType("import_spec");
+  if (specs.length === 0 && node.type === "import_declaration") {
+    const match = node.text.match(/(?:[A-Za-z_][A-Za-z0-9_]*\s+)?["`]([^"`]+)["`]/);
+    return match?.[1] ? [{ source: match[1], importedNames: [] }] : [];
+  }
+  return specs.flatMap((spec) => {
+    const match = spec.text.match(
+      /^(?:(?<alias>[A-Za-z_][A-Za-z0-9_]*|\.)\s+)?["`]?(?<source>[^"`\s]+)["`]?$/,
+    );
+    if (!match?.groups?.source) return [];
+    const alias = match.groups.alias;
+    return [
+      {
+        source: match.groups.source,
+        importedNames: alias ? [alias] : [],
+      },
+    ];
+  });
+}
+
+function goVariableNames(node: Parser.SyntaxNode): string[] {
+  const spec = node.type === "var_spec" || node.type === "const_spec" ? node : null;
+  if (!spec) return [];
+  return spec.namedChildren
+    .filter((child) => child.type === "identifier")
+    .map((child) => normalizeName(child.text));
+}
+
+function goTypeSpec(node: Parser.SyntaxNode): {
+  name: string;
+  kind: ParsedSymbol["kind"];
+  signature: string;
+  embedded: string[];
+  interfaceMethods: string[];
+} | null {
+  const nameNode = node.namedChildren.find(
+    (child) => child.type === "type_identifier" || child.type === "identifier",
+  );
+  if (!nameNode) return null;
+  const typeNode = node.namedChildren.find((child) => child !== nameNode);
+  if (!typeNode) return null;
+  if (typeNode.type === "struct_type") {
+    const embedded = (typeNode.descendantsOfType("field_declaration") ?? [])
+      .filter((field) => !field.namedChildren.some((child) => child.type === "field_identifier"))
+      .map((field) => normalizeName(field.text).replace(/^\*/, ""))
+      .filter(Boolean);
+    return {
+      name: normalizeName(nameNode.text),
+      kind: "class",
+      signature: normalizeName(node.text),
+      embedded,
+      interfaceMethods: [],
+    };
+  }
+  if (typeNode.type === "interface_type") {
+    const interfaceMethods = typeNode.descendantsOfType("method_elem").flatMap((method) => {
+      const field = method.namedChildren.find((child) => child.type === "field_identifier");
+      return field ? [normalizeName(field.text)] : [];
+    });
+    return {
+      name: normalizeName(nameNode.text),
+      kind: "interface",
+      signature: normalizeName(node.text),
+      embedded: [],
+      interfaceMethods,
+    };
+  }
+  return {
+    name: normalizeName(nameNode.text),
+    kind: "type",
+    signature: normalizeName(node.text),
+    embedded: [],
+    interfaceMethods: [],
+  };
+}
+
+/** Parse a Go source file into the same evidence graph contract as TS/JS/Python. */
+export function parseGoSourceFile(file: ScannedFile): ParsedFile {
+  const parser = new Parser();
+  parser.setLanguage(Go);
+  const tree = parser.parse(file.content);
+  const root = tree.rootNode;
+  const rootStableKey = moduleKey(file.path);
+  const moduleSymbol: ParsedSymbol = {
+    stableKey: rootStableKey,
+    kind: "module",
+    name: path.posix.basename(file.path),
+    qualifiedName: file.path,
+    signature: null,
+    startLine: 1,
+    startColumn: 0,
+    endLine: Math.max(1, file.lineCount),
+    endColumn: 0,
+    docText: null,
+    contentHash: file.contentHash,
+  };
+  const symbols: ParsedSymbol[] = [moduleSymbol];
+  const edges: ParsedEdge[] = [];
+  const imports: ParsedFile["imports"] = [];
+  const reserved = new Set([rootStableKey]);
+  const symbolByName = new Map<string, ParsedSymbol>();
+  const interfaceMethods = new Map<string, string[]>();
+  const structMethods = new Map<string, string[]>();
+
+  const addSymbol = (
+    node: Parser.SyntaxNode,
+    kind: ParsedSymbol["kind"],
+    name: string,
+    qualifiedName: string,
+    signature: string | null,
+    parentStableKey = rootStableKey,
+  ): ParsedSymbol => {
+    const startLine = node.startPosition.row + 1;
+    const endLine = Math.max(startLine, node.endPosition.row + 1);
+    const declarationHash = digest(sourceLines(file.content, startLine, endLine));
+    const stableKey = reserveSymbolKey(
+      symbolKey(file.path, kind, qualifiedName, signature),
+      declarationHash,
+      reserved,
+    );
+    const symbol: ParsedSymbol = {
+      stableKey,
+      kind,
+      name,
+      qualifiedName,
+      signature,
+      startLine,
+      startColumn: node.startPosition.column,
+      endLine,
+      endColumn: node.endPosition.column,
+      docText: null,
+      contentHash: `sha256:${declarationHash}`,
+    };
+    symbols.push(symbol);
+    symbolByName.set(name, symbol);
+    edges.push({
+      fromStableKey: parentStableKey,
+      targetStableKey: stableKey,
+      type: "contains",
+      confidence: 1,
+      evidence: {
+        path: file.path,
+        startLine,
+        endLine,
+        syntaxType: node.type,
+      },
+    });
+    return symbol;
+  };
+
+  for (const declaration of root.namedChildren) {
+    if (declaration.type === "import_declaration") {
+      for (const item of goImportItems(declaration)) {
+        const startLine = declaration.startPosition.row + 1;
+        const endLine = declaration.endPosition.row + 1;
+        imports.push({
+          source: item.source,
+          importedNames: item.importedNames,
+          startLine,
+          endLine,
+        });
+        edges.push({
+          fromStableKey: rootStableKey,
+          unresolvedTarget: item.source,
+          type: "imports",
+          confidence: 1,
+          evidence: {
+            path: file.path,
+            startLine,
+            endLine,
+            syntaxType: declaration.type,
+            importSource: item.source,
+            importedNames: item.importedNames,
+          },
+        });
+      }
+      continue;
+    }
+    if (declaration.type === "type_declaration") {
+      for (const spec of declaration.namedChildren.filter(
+        (child) => child.type === "type_spec" || child.type === "type_alias",
+      )) {
+        const type = goTypeSpec(spec);
+        if (!type) continue;
+        const symbol = addSymbol(spec, type.kind, type.name, type.name, type.signature);
+        if (type.kind === "interface") interfaceMethods.set(type.name, type.interfaceMethods);
+        for (const embedded of type.embedded) {
+          edges.push({
+            fromStableKey: symbol.stableKey,
+            unresolvedTarget: embedded,
+            type: "extends",
+            confidence: 0.85,
+            evidence: {
+              path: file.path,
+              startLine: spec.startPosition.row + 1,
+              endLine: spec.endPosition.row + 1,
+              syntaxType: "struct_type",
+              referenceTarget: embedded,
+            },
+          });
+        }
+        if (type.kind === "interface") {
+          for (const methodNode of spec.descendantsOfType("method_elem")) {
+            const methodName = methodNode.namedChildren.find(
+              (child) => child.type === "field_identifier",
+            )?.text;
+            if (!methodName) continue;
+            addSymbol(
+              methodNode,
+              "method",
+              methodName,
+              `${type.name}.${methodName}`,
+              normalizeName(methodNode.text),
+              symbol.stableKey,
+            );
+          }
+        }
+      }
+      continue;
+    }
+    if (declaration.type === "function_declaration") {
+      const name = declaration.namedChildren.find((child) => child.type === "identifier")?.text;
+      if (name) addSymbol(declaration, "function", name, name, normalizeName(declaration.text));
+      continue;
+    }
+    if (declaration.type === "method_declaration") {
+      const receiver = goReceiverType(declaration);
+      const name = declaration.namedChildren.find(
+        (child) => child.type === "field_identifier",
+      )?.text;
+      if (!name) continue;
+      const qualifiedName = receiver ? `${receiver}.${name}` : name;
+      const method = addSymbol(
+        declaration,
+        "method",
+        name,
+        qualifiedName,
+        normalizeName(declaration.text),
+        receiver ? (symbolByName.get(receiver)?.stableKey ?? rootStableKey) : rootStableKey,
+      );
+      if (receiver) structMethods.set(receiver, [...(structMethods.get(receiver) ?? []), name]);
+      void method;
+      continue;
+    }
+    if (declaration.type === "var_declaration" || declaration.type === "const_declaration") {
+      for (const spec of declaration.descendantsOfType(["var_spec", "const_spec"])) {
+        for (const name of goVariableNames(spec)) addSymbol(spec, "variable", name, name, name);
+      }
+    }
+  }
+
+  // A method declaration may appear before its receiver type in source order.
+  for (const edge of edges) {
+    if (edge.type !== "contains" || !edge.targetStableKey) continue;
+    const method = symbols.find((symbol) => symbol.stableKey === edge.targetStableKey);
+    const receiver = method?.qualifiedName?.split(".")[0];
+    const receiverSymbol = receiver ? symbolByName.get(receiver) : undefined;
+    if (method?.kind === "method" && receiverSymbol && edge.fromStableKey === rootStableKey) {
+      edge.fromStableKey = receiverSymbol.stableKey;
+    }
+  }
+
+  const visitCalls = (node: Parser.SyntaxNode, currentStableKey: string): void => {
+    if (node.type === "call_expression") {
+      const target = goCallTarget(node);
+      if (target) {
+        edges.push({
+          fromStableKey: currentStableKey,
+          unresolvedTarget: target,
+          type: "calls",
+          confidence: 0.7,
+          evidence: {
+            path: file.path,
+            startLine: node.startPosition.row + 1,
+            endLine: node.endPosition.row + 1,
+            syntaxType: node.type,
+            referenceTarget: target,
+          },
+        });
+      }
+    }
+    for (const child of node.namedChildren) visitCalls(child, currentStableKey);
+  };
+  for (const declaration of root.namedChildren) {
+    const name =
+      declaration.type === "function_declaration"
+        ? declaration.namedChildren.find((child) => child.type === "identifier")?.text
+        : declaration.type === "method_declaration"
+          ? declaration.namedChildren.find((child) => child.type === "field_identifier")?.text
+          : undefined;
+    if (!name) continue;
+    const symbol = symbols.find(
+      (candidate) =>
+        candidate.name === name && candidate.startLine === declaration.startPosition.row + 1,
+    );
+    if (symbol) visitCalls(declaration, symbol.stableKey);
+  }
+
+  for (const [structName, methods] of structMethods) {
+    const struct = symbolByName.get(structName);
+    if (!struct) continue;
+    for (const [interfaceName, required] of interfaceMethods) {
+      if (required.length > 0 && required.every((method) => methods.includes(method))) {
+        const target = symbolByName.get(interfaceName);
+        if (!target) continue;
+        edges.push({
+          fromStableKey: struct.stableKey,
+          targetStableKey: target.stableKey,
+          type: "implements",
+          confidence: 0.8,
+          evidence: {
+            path: file.path,
+            startLine: struct.startLine,
+            endLine: struct.endLine,
+            syntaxType: "interface_implementation",
+            referenceTarget: interfaceName,
+          },
+        });
+      }
+    }
+  }
+
+  return { path: file.path, moduleStableKey: rootStableKey, symbols, edges, imports };
+}
+
 export function parseRepository(files: readonly ScannedFile[]): ParsedFile[] {
   return files
     .filter(
       (file) =>
         file.language === "typescript" ||
         file.language === "javascript" ||
-        file.language === "python",
+        file.language === "python" ||
+        file.language === "go",
     )
     .map((file) =>
-      file.language === "python" ? parsePythonSourceFile(file) : parseSourceFile(file),
+      file.language === "python"
+        ? parsePythonSourceFile(file)
+        : file.language === "go"
+          ? parseGoSourceFile(file)
+          : parseSourceFile(file),
     );
 }

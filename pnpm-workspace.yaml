@@ -11,3 +11,4 @@ onlyBuiltDependencies:
   - "tree-sitter-javascript"
   - "tree-sitter-python"
   - "tree-sitter-typescript"
+  - "tree-sitter-go"

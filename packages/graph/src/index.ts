@@ -234,9 +234,11 @@ export function resolveLocalImport(
   fromPath: string,
   importSource: string,
   knownPaths: ReadonlySet<string>,
+  goModulePath?: string | null,
 ): string | null {
   const isRelative = importSource.startsWith(".");
-  if (!isRelative && !fromPath.endsWith(".py")) return null;
+  const isGo = fromPath.endsWith(".go");
+  if (!isRelative && !fromPath.endsWith(".py") && !isGo) return null;
   const jsBase = path.posix.normalize(path.posix.join(path.posix.dirname(fromPath), importSource));
   const pythonDots = importSource.match(/^\.+/)?.[0].length ?? 0;
   const pythonRemainder = importSource.replace(/^\.+/, "").replaceAll(".", "/");
@@ -252,6 +254,10 @@ export function resolveLocalImport(
     jsBase,
     ...(fromPath.endsWith(".py") ? [pythonDots > 0 ? pythonRelativeBase : pythonAbsoluteBase] : []),
   ];
+  if (isGo && goModulePath && importSource.startsWith(`${goModulePath}/`)) {
+    const moduleRelative = importSource.slice(goModulePath.length + 1).replaceAll("\\", "/");
+    bases.push(moduleRelative);
+  }
   const candidates = bases.flatMap((base) => {
     const runtimeExtension = path.posix.extname(base);
     const sourceBase = [".js", ".jsx", ".mjs", ".cjs"].includes(runtimeExtension)
@@ -283,7 +289,28 @@ export function resolveLocalImport(
       `${base}/__init__.py`,
     ];
   });
-  return [...new Set(candidates)].find((candidate) => knownPaths.has(candidate)) ?? null;
+  const direct = [...new Set(candidates)].find((candidate) => knownPaths.has(candidate));
+  if (direct) return direct;
+  if (isGo) {
+    const directory = path.posix.normalize(
+      goModulePath && importSource.startsWith(`${goModulePath}/`)
+        ? importSource.slice(goModulePath.length + 1)
+        : jsBase,
+    );
+    return (
+      [...knownPaths]
+        .filter((candidate) => candidate.endsWith(".go"))
+        .filter((candidate) => path.posix.dirname(candidate) === directory)
+        .sort((left, right) => left.localeCompare(right))[0] ?? null
+    );
+  }
+  return null;
+}
+
+export function goModulePath(files: readonly ScannedFile[]): string | null {
+  const moduleFile = files.find((file) => file.path === "go.mod" && file.language === "go-mod");
+  const match = moduleFile?.content.match(/^\s*module\s+([^\s]+)\s*$/m);
+  return match?.[1] ?? null;
 }
 
 export function linkParsedImports(
@@ -292,10 +319,11 @@ export function linkParsedImports(
 ): ParsedFile[] {
   const knownPaths = new Set(files.map((file) => file.path));
   const moduleByPath = new Map(parsedFiles.map((file) => [file.path, file.moduleStableKey]));
+  const modulePath = goModulePath(files);
   return parsedFiles.map((parsed) => {
     const resolvedSources = new Set<string>();
     const localEdges = parsed.imports.flatMap((item) => {
-      const resolved = resolveLocalImport(parsed.path, item.source, knownPaths);
+      const resolved = resolveLocalImport(parsed.path, item.source, knownPaths, modulePath);
       const target = resolved ? moduleByPath.get(resolved) : undefined;
       if (!target) return [];
       resolvedSources.add(item.source);

@@ -244,7 +244,7 @@ describe("RepoVista API", () => {
           installationId: 456,
         }),
       }),
-      "tree-sitter-ts-js-py-v1",
+      "tree-sitter-ts-js-py-go-v1",
     );
   });
 
@@ -278,7 +278,7 @@ describe("RepoVista API", () => {
         eventName: "issues",
         push: null,
       }),
-      "tree-sitter-ts-js-py-v1",
+      "tree-sitter-ts-js-py-go-v1",
     );
   });
 
@@ -305,7 +305,7 @@ describe("RepoVista API", () => {
     expect(result.json().data).toMatchObject({ status: "ignored", reason: "ping" });
     expect(store.processGitHubWebhook).toHaveBeenCalledWith(
       expect.objectContaining({ eventName: "ping", push: null }),
-      "tree-sitter-ts-js-py-v1",
+      "tree-sitter-ts-js-py-go-v1",
     );
   });
 

@@ -44,6 +44,8 @@ describe("languageForPath", () => {
     expect(languageForPath("src/index.ts")).toBe("typescript");
     expect(languageForPath("src/view.tsx")).toBe("typescript");
     expect(languageForPath("app/service.py")).toBe("python");
+    expect(languageForPath("internal/service/service.go")).toBe("go");
+    expect(languageForPath("go.mod")).toBe("go-mod");
   });
 });
 

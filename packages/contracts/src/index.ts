@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const PARSER_VERSION = "tree-sitter-ts-js-py-v1";
+export const PARSER_VERSION = "tree-sitter-ts-js-py-go-v1";
 
 export const idSchema = z.string().uuid();
 export const commitShaSchema = z.string().regex(/^[a-f0-9]{7,64}$/i);
@@ -47,6 +47,9 @@ export const relationTypeSchema = z.enum([
   "writes",
 ]);
 export type RelationType = z.infer<typeof relationTypeSchema>;
+
+export const supportedParserLanguageSchema = z.enum(["typescript", "javascript", "python", "go"]);
+export type SupportedParserLanguage = z.infer<typeof supportedParserLanguageSchema>;
 
 export const createRepositoryRequestSchema = z.object({
   url: z.url(),

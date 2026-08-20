@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { parsePythonSourceFile, parseRepository, parseSourceFile } from "./index.js";
+import {
+  parseGoSourceFile,
+  parsePythonSourceFile,
+  parseRepository,
+  parseSourceFile,
+} from "./index.js";
 
 function fixture(content: string) {
   return {
@@ -20,6 +25,19 @@ function pythonFixture(content: string) {
     path: "app/service.py",
     absolutePath: "/tmp/app/service.py",
     language: "python",
+    byteSize: Buffer.byteLength(content),
+    lineCount: content.split(/\r?\n/).length,
+    content,
+    contentHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
+    isGenerated: false,
+  } as const;
+}
+
+function goFixture(content: string) {
+  return {
+    path: "internal/service/service.go",
+    absolutePath: "/tmp/internal/service/service.go",
+    language: "go",
     byteSize: Buffer.byteLength(content),
     lineCount: content.split(/\r?\n/).length,
     content,
@@ -136,5 +154,53 @@ describe("parseSourceFile", () => {
 
     expect(parsed.map((file) => file.path)).toEqual(["src/auth.ts", "app/service.py"]);
     expect(parsed.find((file) => file.path.endsWith(".py"))?.symbols[0]?.kind).toBe("module");
+  });
+
+  it("extracts Go structs, interfaces, methods, imports, calls, and implementations", () => {
+    const parsed = parseGoSourceFile(
+      goFixture(
+        [
+          "package service",
+          "",
+          'import ("fmt"; "example.com/acme/store")',
+          "",
+          "type Runner interface { Run(User) error }",
+          "type User struct { ID int }",
+          "type Service struct { store Store }",
+          "func (s *Service) Run(user User) error { return store.Save(user) }",
+          'func main() { s := &Service{}; s.Run(User{}); fmt.Println("ok") }',
+          'const Version = "v1"',
+        ].join("\n"),
+      ),
+    );
+
+    expect(parsed.symbols).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "class", name: "Service" }),
+        expect.objectContaining({ kind: "interface", name: "Runner" }),
+        expect.objectContaining({ kind: "method", qualifiedName: "Service.Run" }),
+        expect.objectContaining({ kind: "function", name: "main" }),
+        expect.objectContaining({ kind: "variable", name: "Version" }),
+      ]),
+    );
+    expect(parsed.imports).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: "fmt" }),
+        expect.objectContaining({ source: "example.com/acme/store" }),
+      ]),
+    );
+    expect(parsed.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "calls", unresolvedTarget: "store.Save" }),
+        expect.objectContaining({ type: "calls", unresolvedTarget: "s.Run" }),
+        expect.objectContaining({ type: "implements", targetStableKey: expect.any(String) }),
+      ]),
+    );
+  });
+
+  it("dispatches Go through the repository adapter", () => {
+    const parsed = parseRepository([goFixture("package service\nfunc Run() {}")]);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]?.symbols.some((symbol) => symbol.name === "Run")).toBe(true);
   });
 });

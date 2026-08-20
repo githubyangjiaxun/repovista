@@ -72,6 +72,8 @@ export interface ParsedEdge {
 export interface ParsedFile {
   path: string;
   moduleStableKey: string;
+  /** Optional Go module path used for repository-local import linking. */
+  modulePath?: string;
   symbols: ParsedSymbol[];
   edges: ParsedEdge[];
   imports: {
@@ -82,7 +84,7 @@ export interface ParsedFile {
   }[];
 }
 
-export type SupportedParserLanguage = "typescript" | "javascript" | "python";
+export type SupportedParserLanguage = "typescript" | "javascript" | "python" | "go";
 
 export interface IndexedRepository {
   commitSha: string;

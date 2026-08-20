@@ -1,8 +1,37 @@
 import type { ParsedFile, ScannedFile } from "@repovista/domain";
 import { describe, expect, it } from "vitest";
-import { linkParsedImports, resolveLocalImport } from "./index.js";
+import { goModulePath, linkParsedImports, resolveLocalImport } from "./index.js";
 
 describe("resolveLocalImport", () => {
+  it("resolves Go module imports to repository-local packages", () => {
+    const known = new Set(["internal/service/service.go", "internal/store/store.go"]);
+    expect(
+      resolveLocalImport(
+        "internal/service/service.go",
+        "example.com/acme/app/internal/store",
+        known,
+        "example.com/acme/app",
+      ),
+    ).toBe("internal/store/store.go");
+  });
+
+  it("reads a Go module declaration deterministically", () => {
+    expect(
+      goModulePath([
+        {
+          path: "go.mod",
+          absolutePath: "/tmp/go.mod",
+          language: "go-mod",
+          byteSize: 30,
+          lineCount: 2,
+          content: "module example.com/acme/app\n\ngo 1.22\n",
+          contentHash: "sha256:go-mod",
+          isGenerated: false,
+        },
+      ]),
+    ).toBe("example.com/acme/app");
+  });
+
   it("resolves extensionless TypeScript imports", () => {
     expect(
       resolveLocalImport(
