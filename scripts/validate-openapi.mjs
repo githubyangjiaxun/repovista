@@ -24,6 +24,12 @@ function resolveParameter(specification, candidate) {
   return specification.components?.parameters?.[candidate.$ref.slice(prefix.length)];
 }
 
+function resolveSchema(specification, candidate) {
+  const prefix = "#/components/schemas/";
+  if (typeof candidate?.$ref !== "string" || !candidate.$ref.startsWith(prefix)) return candidate;
+  return specification.components?.schemas?.[candidate.$ref.slice(prefix.length)];
+}
+
 const specification = JSON.parse(await readFile(specificationPath, "utf8"));
 
 if (specification.openapi !== "3.1.0") {
@@ -83,6 +89,34 @@ for (const route of implemented) {
 }
 for (const route of documented) {
   if (!implemented.has(route)) fail(`documented route is not implemented: ${route}`);
+}
+
+const shareContent = specification.components?.schemas?.ShareReportContent;
+const shareVariants = shareContent?.oneOf?.map((candidate) =>
+  resolveSchema(specification, candidate),
+);
+if (!Array.isArray(shareVariants) || shareVariants.length !== 2) {
+  fail("ShareReportContent must document Architecture Story v2 and legacy Tour v1");
+} else {
+  const story = shareVariants.find((variant) => variant?.properties?.version?.const === 2);
+  const legacy = shareVariants.find(
+    (variant) =>
+      variant?.properties?.version?.const === 1 && !variant?.required?.includes("version"),
+  );
+  if (!story || !legacy) {
+    fail("ShareReportContent must retain an unversioned legacy variant and version 2 Story");
+  }
+  for (const field of [
+    "headline",
+    "metrics",
+    "map",
+    "keyModules",
+    "readingPath",
+    "evidenceHighlights",
+    "provenance",
+  ]) {
+    if (!story?.required?.includes(field)) fail(`ArchitectureStoryV2 must require ${field}`);
+  }
 }
 
 if (process.exitCode) process.exit();

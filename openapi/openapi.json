@@ -1851,6 +1851,183 @@
           "slug": { "type": "string" }
         }
       },
+      "StoryReadingPathItem": {
+        "type": "object",
+        "required": ["path", "reason"],
+        "properties": {
+          "path": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      },
+      "StoryGraph": {
+        "type": "object",
+        "required": ["nodes", "edges", "truncated"],
+        "properties": {
+          "nodes": { "type": "array", "items": { "$ref": "#/components/schemas/GraphNode" } },
+          "edges": { "type": "array", "items": { "$ref": "#/components/schemas/GraphEdge" } },
+          "truncated": { "type": "boolean" }
+        }
+      },
+      "ArchitectureTourV1": {
+        "type": "object",
+        "required": ["overview", "readingPath", "map"],
+        "properties": {
+          "version": { "type": "integer", "const": 1 },
+          "overview": { "type": "string" },
+          "readingPath": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/StoryReadingPathItem" }
+          },
+          "map": {}
+        }
+      },
+      "StoryRetrievalProfile": {
+        "type": "object",
+        "required": ["id", "provider", "model", "dimensions"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "provider": { "type": "string", "enum": ["ollama", "openai-compatible"] },
+          "model": { "type": "string" },
+          "dimensions": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "ArchitectureStoryV2": {
+        "type": "object",
+        "required": [
+          "version",
+          "algorithmVersion",
+          "headline",
+          "overview",
+          "metrics",
+          "map",
+          "keyModules",
+          "readingPath",
+          "evidenceHighlights",
+          "provenance"
+        ],
+        "properties": {
+          "version": { "type": "integer", "const": 2 },
+          "algorithmVersion": { "type": "string" },
+          "headline": { "type": "string" },
+          "overview": { "type": "string" },
+          "metrics": {
+            "type": "object",
+            "required": ["files", "symbols", "edges", "languages"],
+            "properties": {
+              "files": { "type": "integer", "minimum": 0 },
+              "symbols": { "type": "integer", "minimum": 0 },
+              "edges": { "type": "integer", "minimum": 0 },
+              "languages": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["name", "files"],
+                  "properties": {
+                    "name": { "type": "string" },
+                    "files": { "type": "integer", "minimum": 0 }
+                  }
+                }
+              }
+            }
+          },
+          "map": { "$ref": "#/components/schemas/StoryGraph" },
+          "keyModules": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "label",
+                "path",
+                "importance",
+                "inDegree",
+                "outDegree",
+                "score",
+                "representativePath",
+                "reason"
+              ],
+              "properties": {
+                "id": { "type": "string" },
+                "label": { "type": "string" },
+                "path": { "type": ["string", "null"] },
+                "importance": { "type": "number", "minimum": 0, "maximum": 1 },
+                "inDegree": { "type": "integer", "minimum": 0 },
+                "outDegree": { "type": "integer", "minimum": 0 },
+                "score": { "type": "number", "minimum": 0, "maximum": 1 },
+                "representativePath": { "type": ["string", "null"] },
+                "reason": { "type": "string" }
+              }
+            }
+          },
+          "readingPath": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/StoryReadingPathItem" }
+          },
+          "evidenceHighlights": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "fileId",
+                "symbolId",
+                "path",
+                "symbol",
+                "startLine",
+                "endLine",
+                "quote",
+                "contentHash"
+              ],
+              "properties": {
+                "id": { "type": "string" },
+                "fileId": { "$ref": "#/components/schemas/Uuid" },
+                "symbolId": {
+                  "oneOf": [{ "$ref": "#/components/schemas/Uuid" }, { "type": "null" }]
+                },
+                "path": { "type": "string" },
+                "symbol": { "type": ["string", "null"] },
+                "startLine": { "type": "integer", "minimum": 1 },
+                "endLine": { "type": "integer", "minimum": 1 },
+                "quote": { "type": "string" },
+                "contentHash": { "type": "string" }
+              }
+            }
+          },
+          "provenance": {
+            "type": "object",
+            "required": [
+              "snapshotId",
+              "commitSha",
+              "parserVersion",
+              "generatedAt",
+              "generatedAtSource",
+              "retrievalProfile"
+            ],
+            "properties": {
+              "snapshotId": { "$ref": "#/components/schemas/Uuid" },
+              "commitSha": { "type": "string", "pattern": "^[a-fA-F0-9]{7,64}$" },
+              "parserVersion": { "type": "string" },
+              "generatedAt": { "$ref": "#/components/schemas/DateTime" },
+              "generatedAtSource": {
+                "type": "string",
+                "enum": ["snapshot_ready_at", "snapshot_requested_at"]
+              },
+              "retrievalProfile": {
+                "oneOf": [
+                  { "$ref": "#/components/schemas/StoryRetrievalProfile" },
+                  { "type": "null" }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "ShareReportContent": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/ArchitectureStoryV2" },
+          { "$ref": "#/components/schemas/ArchitectureTourV1" }
+        ]
+      },
       "ShareReport": {
         "type": "object",
         "required": ["id", "slug", "title", "repository", "snapshot", "content", "createdAt"],
@@ -1860,39 +2037,7 @@
           "title": { "type": "string" },
           "repository": { "$ref": "#/components/schemas/RepositorySummary" },
           "snapshot": { "$ref": "#/components/schemas/Snapshot" },
-          "content": {
-            "type": "object",
-            "required": ["overview", "readingPath", "map"],
-            "properties": {
-              "overview": { "type": "string" },
-              "readingPath": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "required": ["path", "reason"],
-                  "properties": {
-                    "path": { "type": "string" },
-                    "reason": { "type": "string" }
-                  }
-                }
-              },
-              "map": {
-                "type": "object",
-                "required": ["nodes", "edges", "truncated"],
-                "properties": {
-                  "nodes": {
-                    "type": "array",
-                    "items": { "$ref": "#/components/schemas/GraphNode" }
-                  },
-                  "edges": {
-                    "type": "array",
-                    "items": { "$ref": "#/components/schemas/GraphEdge" }
-                  },
-                  "truncated": { "type": "boolean" }
-                }
-              }
-            }
-          },
+          "content": { "$ref": "#/components/schemas/ShareReportContent" },
           "createdAt": { "$ref": "#/components/schemas/DateTime" }
         }
       }

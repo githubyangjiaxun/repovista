@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { type BrowserContext, expect, type Locator, type Route, test } from "@playwright/test";
+import type { EmbeddingIndex, RetrievalMode, SearchResult } from "@repovista/contracts";
 
 const apiOrigin = "http://localhost:4000";
 const webOrigin = process.env.PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:3100";
@@ -113,7 +114,110 @@ const sourceLines = [
   "void start();",
 ];
 
+function embeddingIndex(status: "queued" | "running" | "ready"): EmbeddingIndex {
+  const embeddedChunks = status === "queued" ? 0 : status === "running" ? 7 : 12;
+  return {
+    id: "01900000-0000-7000-8000-000000000015",
+    snapshotId,
+    provider: "ollama",
+    model: "nomic-embed-text",
+    inputVersion: "code-chunk-v1",
+    status,
+    dimensions: status === "ready" ? 768 : null,
+    totalChunks: 12,
+    embeddedChunks,
+    revision: 1,
+    jobId,
+    failure: null,
+    createdAt: "2026-01-01T00:00:03.000Z",
+    updatedAt: "2026-01-01T00:00:04.000Z",
+    readyAt: status === "ready" ? "2026-01-01T00:00:05.000Z" : null,
+  };
+}
+
+function retrievalStatus(status: "missing" | "queued" | "running" | "ready") {
+  const index = status === "missing" ? null : embeddingIndex(status);
+  return {
+    snapshotId,
+    text: { ready: true, reason: null },
+    symbol: { ready: true, reason: null },
+    semantic: {
+      configured: true,
+      queryable: status === "ready",
+      reason: status === "missing" ? "index_missing" : status === "ready" ? null : "index_building",
+      currentIndex: index,
+      latestIndex: index,
+    },
+  };
+}
+
+function searchResult(query: string, mode: RetrievalMode): SearchResult {
+  const semanticUsed = mode === "semantic" || mode === "hybrid";
+  const channels: SearchResult["trace"]["usedChannels"] =
+    mode === "text"
+      ? ["text"]
+      : mode === "semantic"
+        ? ["semantic"]
+        : ["text", "symbol", "semantic"];
+  return {
+    query,
+    trace: {
+      requestedMode: mode,
+      usedChannels: channels,
+      degraded: false,
+      degradationReason: null,
+      channels: [
+        {
+          channel: "text",
+          status: channels.includes("text") ? "used" : "skipped",
+          candidateCount: channels.includes("text") ? 2 : 0,
+          reason: null,
+          latencyMs: channels.includes("text") ? 2 : null,
+        },
+        {
+          channel: "symbol",
+          status: channels.includes("symbol") ? "used" : "skipped",
+          candidateCount: channels.includes("symbol") ? 1 : 0,
+          reason: null,
+          latencyMs: channels.includes("symbol") ? 1 : null,
+        },
+        {
+          channel: "semantic",
+          status: semanticUsed ? "used" : "skipped",
+          candidateCount: semanticUsed ? 3 : 0,
+          reason: null,
+          latencyMs: semanticUsed ? 8 : null,
+        },
+      ],
+      embeddingIndex: semanticUsed ? embeddingIndex("ready") : null,
+    },
+    results: [
+      {
+        id: "evidence-search-1",
+        snapshotId,
+        commitSha: repository.latestCommitSha,
+        fileId,
+        path: "src/server.ts",
+        symbolId,
+        symbol: "start",
+        startLine: 3,
+        endLine: 10,
+        content: sourceLines.slice(2, 10).join("\n"),
+        contentHash: "sha256:search-evidence",
+        score: 0.0322,
+        signals: channels.map((channel, index) => ({
+          channel,
+          rank: index + 1,
+          rawScore: 0.93 - index * 0.1,
+        })),
+      },
+    ],
+  };
+}
+
 interface MockState {
+  embeddingRequests: number;
+  embeddingStatusReads: number;
   exportRequests: string[];
   importRequests: unknown[];
   jobRequests: number;
@@ -121,6 +225,8 @@ interface MockState {
   prAnalysisPolls: number;
   prAnalysisRequests: unknown[];
   questions: unknown[];
+  retrievalStatusRequests: number;
+  searchRequests: URLSearchParams[];
   shareRequests: unknown[];
 }
 
@@ -357,9 +463,11 @@ async function json(route: Route, data: unknown, status = 200): Promise<void> {
 
 async function installMockApi(
   context: BrowserContext,
-  options: { importFailure?: boolean } = {},
+  options: { importFailure?: boolean; semanticUnavailable?: boolean } = {},
 ): Promise<MockState> {
   const state: MockState = {
+    embeddingRequests: 0,
+    embeddingStatusReads: 0,
     exportRequests: [],
     importRequests: [],
     jobRequests: 0,
@@ -367,6 +475,8 @@ async function installMockApi(
     prAnalysisPolls: 0,
     prAnalysisRequests: [],
     questions: [],
+    retrievalStatusRequests: 0,
+    searchRequests: [],
     shareRequests: [],
   };
 
@@ -536,6 +646,71 @@ async function installMockApi(
       return;
     }
 
+    if (request.method() === "GET" && url.pathname === `/v1/snapshots/${snapshotId}/retrieval`) {
+      state.retrievalStatusRequests += 1;
+      if (options.semanticUnavailable) {
+        await json(route, retrievalStatus("ready"));
+        return;
+      }
+      if (state.embeddingRequests > 0) state.embeddingStatusReads += 1;
+      const status =
+        state.embeddingRequests === 0
+          ? "missing"
+          : state.embeddingStatusReads < 3
+            ? "running"
+            : "ready";
+      await json(route, retrievalStatus(status));
+      return;
+    }
+
+    if (request.method() === "POST" && url.pathname === `/v1/snapshots/${snapshotId}/embeddings`) {
+      state.embeddingRequests += 1;
+      state.embeddingStatusReads = 0;
+      await json(route, { embeddingIndex: embeddingIndex("queued"), jobId, reused: false }, 202);
+      return;
+    }
+
+    if (request.method() === "GET" && url.pathname === `/v1/snapshots/${snapshotId}/search`) {
+      state.searchRequests.push(new URLSearchParams(url.searchParams));
+      const query = url.searchParams.get("q") ?? "";
+      const mode = (url.searchParams.get("mode") ?? "hybrid") as RetrievalMode;
+      if (options.semanticUnavailable && mode === "semantic") {
+        await route.fulfill({
+          body: JSON.stringify({
+            error: {
+              code: "EMBEDDING_PROVIDER_UNAVAILABLE",
+              message: "The embedding provider is temporarily unavailable.",
+              requestId: "e2e-semantic-unavailable",
+              retryable: true,
+            },
+          }),
+          headers: corsHeaders(),
+          status: 503,
+          contentType: "application/json",
+        });
+        return;
+      }
+      const result = searchResult(query, mode);
+      if (options.semanticUnavailable && mode === "hybrid") {
+        result.trace.usedChannels = ["text", "symbol"];
+        result.trace.degraded = true;
+        result.trace.degradationReason = "provider_unavailable";
+        result.trace.channels[2] = {
+          channel: "semantic",
+          status: "failed",
+          candidateCount: 0,
+          reason: "provider_unavailable",
+          latencyMs: 12,
+        };
+        const hit = result.results[0];
+        if (hit) {
+          hit.signals = hit.signals.filter((signal) => signal.channel !== "semantic");
+        }
+      }
+      await json(route, result);
+      return;
+    }
+
     if (request.method() === "GET" && url.pathname === `/v1/snapshots/${snapshotId}/source`) {
       const startLine = Number.parseInt(url.searchParams.get("startLine") ?? "1", 10);
       const endLine = Number.parseInt(url.searchParams.get("endLine") ?? "14", 10);
@@ -599,8 +774,33 @@ async function installMockApi(
             content: sourceLines.slice(2, 10).join("\n"),
             contentHash: "sha256:evidence",
             score: 1,
+            signals: [{ channel: "text", rank: 1, rawScore: 1 }],
           },
         ],
+        trace: {
+          requestedMode: "hybrid",
+          usedChannels: ["text", "symbol", "semantic"],
+          degraded: false,
+          degradationReason: null,
+          channels: [
+            { channel: "text", status: "used", candidateCount: 2, reason: null, latencyMs: 2 },
+            {
+              channel: "symbol",
+              status: "used",
+              candidateCount: 1,
+              reason: null,
+              latencyMs: 1,
+            },
+            {
+              channel: "semantic",
+              status: "used",
+              candidateCount: 3,
+              reason: null,
+              latencyMs: 8,
+            },
+          ],
+          embeddingIndex: embeddingIndex("ready"),
+        },
       });
       return;
     }
@@ -615,16 +815,71 @@ async function installMockApi(
       await json(route, {
         id: messageId,
         slug: "acme-signal-hub-tour",
-        title: "acme/signal-hub architecture tour",
+        title: "acme/signal-hub architecture story",
         repository,
         snapshot,
         content: {
-          overview: "A small TypeScript service with a clear server and router boundary.",
+          version: 2,
+          algorithmVersion: "architecture-story-v2",
+          headline: "A small TypeScript service with a clear server and router boundary.",
+          overview: "Requests enter through the server and flow into a compact routing core.",
+          metrics: {
+            files: 3,
+            symbols: 6,
+            edges: 5,
+            languages: [
+              { name: "typescript", files: 2 },
+              { name: "python", files: 1 },
+            ],
+          },
+          keyModules: [
+            {
+              id: "package:src",
+              label: "src",
+              path: null,
+              importance: 1,
+              inDegree: 2,
+              outDegree: 3,
+              score: 0.96,
+              representativePath: "src/server.ts",
+              reason: "Connects startup, routing, configuration, and persistence.",
+            },
+          ],
           readingPath: [
             { path: "src/server.ts", reason: "Start with the process entry point." },
             { path: "src/router.ts", reason: "Then inspect request routing." },
           ],
-          map: graph("package"),
+          evidenceHighlights: [
+            {
+              id: "story-evidence-1",
+              fileId,
+              symbolId,
+              path: "src/server.ts",
+              symbol: "start",
+              startLine: 3,
+              endLine: 10,
+              quote: sourceLines.slice(2, 10).join("\n"),
+              contentHash: "sha256:story-evidence",
+            },
+          ],
+          map: {
+            nodes: graph("package").nodes,
+            edges: graph("package").edges,
+            truncated: false,
+          },
+          provenance: {
+            snapshotId,
+            commitSha: repository.latestCommitSha,
+            parserVersion: snapshot.parserVersion,
+            generatedAt: "2026-01-01T00:00:03.000Z",
+            generatedAtSource: "snapshot_ready_at",
+            retrievalProfile: {
+              id: embeddingIndex("ready").id,
+              provider: "ollama",
+              model: "nomic-embed-text",
+              dimensions: 768,
+            },
+          },
         },
         createdAt: "2026-01-01T00:00:04.000Z",
       });
@@ -664,6 +919,7 @@ async function expandAnalysisOptions(toggle: Locator): Promise<void> {
 }
 
 test("analyzes a repository and explores its evidence-backed result", async ({ context, page }) => {
+  test.setTimeout(90_000);
   const state = await installMockApi(context);
 
   await page.goto("/");
@@ -731,6 +987,50 @@ test("analyzes a repository and explores its evidence-backed result", async ({ c
   ]);
   await page.getByRole("button", { name: /src\/server\.ts:3-10/ }).click();
   await expect(page.getByText("Evidence lines 3-10")).toBeVisible();
+  await page.getByRole("button", { name: "Close source" }).click();
+  await expect(page.getByRole("region", { name: "Retrieval used" })).toContainText(
+    "text + symbol + semantic",
+  );
+  await expect(page.getByRole("region", { name: "Retrieval used" })).toContainText(
+    "nomic-embed-text · 768d",
+  );
+
+  await page.getByRole("button", { name: "Search evidence" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Search evidence without hiding the ranking." }),
+  ).toBeVisible();
+  await page.getByLabel("Search query").fill("Where is startup configured?");
+  await page.getByRole("tab", { name: "Text" }).click();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page).toHaveURL(/tab=search.*q=Where(?:\+|%20)is(?:\+|%20)startup/);
+  await expect(page.getByText("Text #1 · 0.9300")).toBeVisible();
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Search evidence without hiding the ranking." }),
+  ).toBeVisible();
+  await expect(page.getByText("Text #1 · 0.9300")).toBeVisible();
+  await page.getByRole("button", { name: "Open source" }).click();
+  await expect(page.getByText("Evidence lines 3-10")).toBeVisible();
+  await page.getByRole("button", { name: "Close source" }).click();
+
+  await page.getByRole("button", { name: "Build index" }).click();
+  await expect(page.getByRole("progressbar", { name: "Semantic index progress" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "View job" })).toHaveAttribute(
+    "href",
+    `/jobs/${jobId}`,
+  );
+  await expect(page.getByText("Ready", { exact: true })).toBeVisible({ timeout: 8_000 });
+  await page.getByRole("tab", { name: "Hybrid" }).click();
+  await page.getByLabel("Search query").fill("How does the process begin?");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByText("Complete channel trace")).toBeVisible();
+  await expect(page.getByText("Semantic #3 · 0.7300")).toBeVisible();
+  expect(state.embeddingRequests).toBe(1);
+  expect(state.searchRequests.map((request) => request.get("mode"))).toEqual([
+    "text",
+    "text",
+    "hybrid",
+  ]);
 
   if (process.env.REPOVISTA_CAPTURE_README === "1") {
     await page.screenshot({
@@ -740,14 +1040,46 @@ test("analyzes a repository and explores its evidence-backed result", async ({ c
   }
 
   const popupPromise = page.waitForEvent("popup");
-  await page.getByRole("button", { name: "Share tour" }).click();
+  await page.getByRole("button", { name: "Share story" }).click();
   const popup = await popupPromise;
   await expect(popup).toHaveURL(`${webOrigin}/share/acme-signal-hub-tour`);
   await expect(
-    popup.getByRole("heading", { name: "acme/signal-hub architecture tour" }),
+    popup.getByRole("heading", {
+      name: "A small TypeScript service with a clear server and router boundary.",
+    }),
   ).toBeVisible();
-  await expect(popup.getByText("Read the repository in this order.")).toBeVisible();
-  expect(state.shareRequests).toEqual([{ snapshotId, title: "acme/signal-hub architecture tour" }]);
+  await expect(popup.getByRole("region", { name: "Architecture metrics" })).toContainText("6");
+  await expect(popup.getByText("Where the architecture concentrates.")).toBeVisible();
+  await expect(popup.getByText("Highlights from the snapshot.")).toBeVisible();
+  await expect(popup.getByText("Profile ollama · nomic-embed-text · 768d")).toBeVisible();
+  await expect(popup.getByText("A deterministic reading path.")).toBeVisible();
+  expect(state.shareRequests).toEqual([
+    { snapshotId, title: "acme/signal-hub architecture story" },
+  ]);
+});
+
+test("keeps hybrid useful and makes semantic-only failure explicit when Ollama stops", async ({
+  context,
+  page,
+}) => {
+  const state = await installMockApi(context, { semanticUnavailable: true });
+  await page.goto(`/repositories/${repositoryId}?snapshotId=${snapshotId}&tab=search`);
+
+  await expect(page.getByText("Ready", { exact: true })).toBeVisible();
+  await page.getByLabel("Search query").fill("Where does the server begin?");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByText("Hybrid degraded: provider unavailable")).toBeVisible();
+  await expect(page.getByText("Text #1 · 0.9300")).toBeVisible();
+
+  await page.getByRole("tab", { name: "Semantic" }).click();
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  const retrievalAlert = page.locator(".retrieval-alert");
+  await expect(retrievalAlert).toContainText("The embedding provider is temporarily unavailable.");
+  await expect(retrievalAlert).toContainText("Request ID: e2e-semantic-unavailable");
+  expect(state.searchRequests.map((request) => request.get("mode"))).toEqual([
+    "hybrid",
+    "semantic",
+  ]);
 });
 
 test("analyzes pull request impact and opens immutable evidence", async ({ context, page }) => {

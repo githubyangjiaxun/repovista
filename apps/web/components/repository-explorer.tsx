@@ -1,6 +1,6 @@
 "use client";
 
-import type { GraphLevel } from "@repovista/contracts";
+import type { GraphLevel, RetrievalMode } from "@repovista/contracts";
 import {
   ArrowRight,
   BookOpen,
@@ -32,6 +32,7 @@ import { useRouter } from "next/navigation";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { ArchitectureMap } from "@/components/architecture-map";
 import { AutomationStatus } from "@/components/automation-status";
+import { RetrievalLab } from "@/components/retrieval-lab";
 import { SnapshotDelta } from "@/components/snapshot-delta";
 import {
   ApiError,
@@ -49,7 +50,7 @@ import {
   snapshotExportUrl,
 } from "@/lib/api";
 
-type WorkspaceTab = "ask" | "map" | "overview";
+type WorkspaceTab = "ask" | "map" | "overview" | "search";
 
 const exampleQuestions = [
   "Where does this application start?",
@@ -78,9 +79,17 @@ function sourceUrl(snapshotId: string, filePath: string, startLine?: number, end
 export function RepositoryExplorer({
   repositoryId,
   snapshotId: requestedSnapshotId,
+  initialTab = "overview",
+  initialSearchQuery = "",
+  initialSearchMode = "hybrid",
+  initialSearchLimit = 20,
 }: {
   repositoryId: string;
   snapshotId?: string;
+  initialTab?: WorkspaceTab;
+  initialSearchQuery?: string;
+  initialSearchMode?: RetrievalMode;
+  initialSearchLimit?: number;
 }) {
   const router = useRouter();
   const [repository, setRepository] = useState<RepositorySummary | null>(null);
@@ -90,7 +99,7 @@ export function RepositoryExplorer({
   const [graph, setGraph] = useState<GraphResponse | null>(null);
   const [level, setLevel] = useState<GraphLevel>("package");
   const [mapQuery, setMapQuery] = useState("");
-  const [tab, setTab] = useState<WorkspaceTab>("overview");
+  const [tab, setTab] = useState<WorkspaceTab>(initialTab);
   const [source, setSource] = useState<SourceFile | null>(null);
   const [sourceRange, setSourceRange] = useState<{ startLine?: number; endLine?: number }>({});
   const [question, setQuestion] = useState("");
@@ -105,6 +114,32 @@ export function RepositoryExplorer({
   const [integration, setIntegration] = useState<GitHubIntegrationStatus | null>(null);
   const [integrationUnavailable, setIntegrationUnavailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setTab(initialTab);
+  }, [initialTab]);
+
+  function selectTab(nextTab: WorkspaceTab) {
+    setTab(nextTab);
+    const url = new URL(window.location.href);
+    if (nextTab === "overview") url.searchParams.delete("tab");
+    else url.searchParams.set("tab", nextTab);
+    if (nextTab !== "search") {
+      url.searchParams.delete("q");
+      url.searchParams.delete("mode");
+      url.searchParams.delete("limit");
+    }
+    window.history.pushState(null, "", `${url.pathname}${url.search}`);
+  }
+
+  function updateSearchUrl(input: { query: string; mode: RetrievalMode; limit: number }) {
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", "search");
+    url.searchParams.set("q", input.query);
+    url.searchParams.set("mode", input.mode);
+    url.searchParams.set("limit", String(input.limit));
+    window.history.pushState(null, "", `${url.pathname}${url.search}`);
+  }
 
   const loadGraph = useCallback(async (snapshotId: string, nextLevel: GraphLevel, query = "") => {
     setGraphLoading(true);
@@ -225,7 +260,7 @@ export function RepositoryExplorer({
         method: "POST",
         body: JSON.stringify({
           snapshotId: snapshot.id,
-          title: `${repository.owner}/${repository.name} architecture tour`,
+          title: `${repository.owner}/${repository.name} architecture story`,
         }),
       });
       const destination = `/share/${report.slug}`;
@@ -353,7 +388,7 @@ export function RepositoryExplorer({
             type="button"
           >
             {sharing ? <LoaderCircle className="spin" size={15} /> : <Share2 size={15} />}
-            Share tour
+            Share story
           </button>
         </div>
       </header>
@@ -365,24 +400,31 @@ export function RepositoryExplorer({
         <nav className="workspace-nav" aria-label="Repository views">
           <button
             className={tab === "overview" ? "active" : ""}
-            onClick={() => setTab("overview")}
+            onClick={() => selectTab("overview")}
             type="button"
           >
             <Layers3 size={17} /> Overview
           </button>
           <button
             className={tab === "map" ? "active" : ""}
-            onClick={() => setTab("map")}
+            onClick={() => selectTab("map")}
             type="button"
           >
             <MapIcon size={17} /> Architecture map
           </button>
           <button
             className={tab === "ask" ? "active" : ""}
-            onClick={() => setTab("ask")}
+            onClick={() => selectTab("ask")}
             type="button"
           >
             <Bot size={17} /> Ask repository
+          </button>
+          <button
+            className={tab === "search" ? "active" : ""}
+            onClick={() => selectTab("search")}
+            type="button"
+          >
+            <Search size={17} /> Search evidence
           </button>
           <form className="sidebar-impact-form" onSubmit={analyzePullRequest}>
             <label htmlFor="sidebar-pr-number">Pull request impact</label>
@@ -527,7 +569,7 @@ export function RepositoryExplorer({
                     <span>Package topology</span>
                     <small>Click a node to inspect its source</small>
                   </div>
-                  <button onClick={() => setTab("map")} type="button">
+                  <button onClick={() => selectTab("map")} type="button">
                     Explore <ArrowRight size={14} />
                   </button>
                 </div>
@@ -575,7 +617,7 @@ export function RepositoryExplorer({
                 Maps, files, symbols, edges, search, and source navigation work without a model.
                 Answers only cite evidence saved for this commit.
               </p>
-              <button className="secondary-button" onClick={() => setTab("ask")} type="button">
+              <button className="secondary-button" onClick={() => selectTab("ask")} type="button">
                 Ask with evidence <ArrowRight size={15} />
               </button>
             </article>
@@ -654,10 +696,28 @@ export function RepositoryExplorer({
                     <Sparkles size={15} /> {answer.answer.status}
                   </span>
                   <span>
-                    {answer.answer.provider} · {answer.answer.model}
+                    {answer.answer.provider === "fake"
+                      ? "deterministic evidence summarizer"
+                      : `${answer.answer.provider} · ${answer.answer.model}`}
                   </span>
                   <span>{answer.answer.citations.length} citations</span>
                 </div>
+                <section className="answer-retrieval-trace" aria-labelledby="retrieval-used-title">
+                  <strong id="retrieval-used-title">Retrieval used</strong>
+                  <span>{answer.trace.usedChannels.map((item) => item).join(" + ") || "none"}</span>
+                  <span>
+                    {answer.trace.degraded
+                      ? `degraded · ${answer.trace.degradationReason?.replaceAll("_", " ")}`
+                      : "complete"}
+                  </span>
+                  <span>{answer.evidence.length} evidence hits</span>
+                  {answer.trace.embeddingIndex ? (
+                    <span>
+                      {answer.trace.embeddingIndex.model} ·{" "}
+                      {answer.trace.embeddingIndex.dimensions ?? "?"}d
+                    </span>
+                  ) : null}
+                </section>
                 <h2>{answer.answer.summary}</h2>
                 {answer.answer.steps.length > 0 ? (
                   <ol>
@@ -718,6 +778,17 @@ export function RepositoryExplorer({
               </div>
             </form>
           </section>
+        ) : null}
+
+        {tab === "search" ? (
+          <RetrievalLab
+            initialLimit={initialSearchLimit}
+            initialMode={initialSearchMode}
+            initialQuery={initialSearchQuery}
+            onOpenSource={openSource}
+            onSearchSubmitted={updateSearchUrl}
+            snapshotId={snapshot.id}
+          />
         ) : null}
       </main>
 

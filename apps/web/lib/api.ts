@@ -1,8 +1,8 @@
 import type {
-  Evidence,
+  AskResult as ContractAskResult,
+  CreateEmbeddingIndexResponse,
   GitHubIntegrationStatus,
   GraphResponse,
-  GroundedAnswer,
   Job,
   PullRequestAnalysis,
   PullRequestFileChange,
@@ -10,6 +10,9 @@ import type {
   PullRequestImpactResponse,
   PullRequestSymbolChange,
   RepositorySummary,
+  RetrievalStatus,
+  SearchResult,
+  ShareReportContent,
   Snapshot,
   SnapshotSymbolEvidence,
   SourceFile,
@@ -148,11 +151,9 @@ export interface SnapshotFilePage {
   nextCursor: string | null;
 }
 
-export interface AskResult {
-  messageId: string;
-  answer: GroundedAnswer;
-  evidence: Evidence[];
-}
+export type AskResult = ContractAskResult;
+
+export type { CreateEmbeddingIndexResponse, RetrievalStatus, SearchResult };
 
 export interface ShareReport {
   id: string;
@@ -160,11 +161,7 @@ export interface ShareReport {
   title: string;
   repository: RepositorySummary;
   snapshot: Snapshot;
-  content: {
-    overview: string;
-    readingPath: { path: string; reason: string }[];
-    map: unknown;
-  };
+  content: ShareReportContent;
   createdAt: string;
 }
 
