@@ -24,15 +24,29 @@ export async function withTransaction<T>(
   callback: (client: DatabaseClient) => Promise<T>,
 ): Promise<T> {
   const client = await pool.connect();
+  let connectionError: Error | undefined;
+  const handleConnectionError = (error: Error) => {
+    connectionError = error;
+  };
+  client.on("error", handleConnectionError);
   try {
     await client.query("BEGIN");
     const result = await callback(client);
     await client.query("COMMIT");
     return result;
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (!connectionError) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        if (rollbackError instanceof Error) {
+          connectionError = rollbackError;
+        }
+      }
+    }
     throw error;
   } finally {
-    client.release();
+    client.release(connectionError);
+    client.off("error", handleConnectionError);
   }
 }

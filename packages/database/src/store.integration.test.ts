@@ -4,7 +4,7 @@ import { PUBLIC_WORKSPACE_ID } from "@repovista/domain";
 import { computePullRequestImpact } from "@repovista/impact";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDatabase } from "./migrate.js";
-import { createDatabasePool, type DatabasePool } from "./pool.js";
+import { createDatabasePool, type DatabasePool, withTransaction } from "./pool.js";
 import { RepoVistaStore } from "./store.js";
 import type { CreatePullRequestAnalysisInput } from "./types.js";
 
@@ -507,6 +507,28 @@ integration("RepoVistaStore with PostgreSQL", () => {
       status: "queued",
       retryable: true,
       error: { code: "REPOSITORY_CLONE_FAILED" },
+    });
+  });
+
+  it("survives a checked-out transaction connection being terminated", async () => {
+    await expect(
+      withTransaction(pool, async (client) => {
+        const backend = await client.query<{ pid: number }>(
+          "SELECT pg_backend_pid()::integer AS pid",
+        );
+        const pid = backend.rows[0]?.pid;
+        if (!pid) throw new Error("Expected a PostgreSQL backend PID.");
+        const terminated = await pool.query<{ terminated: boolean }>(
+          "SELECT pg_terminate_backend($1)::boolean AS terminated",
+          [pid],
+        );
+        expect(terminated.rows[0]?.terminated).toBe(true);
+        await client.query("SELECT 1");
+      }),
+    ).rejects.toThrow();
+
+    await expect(pool.query("SELECT 1 AS healthy")).resolves.toMatchObject({
+      rows: [{ healthy: 1 }],
     });
   });
 
