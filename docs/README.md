@@ -29,6 +29,18 @@
 | [v0.2 数据库设计](./database/v0.2数据库设计.md) | Snapshot 基线、Repository 自动更新和 Delivery 幂等表 |
 | [v0.2 测试与发布计划](./operations/v0.2测试与发布计划.md) | 自动化、真实仓库、Compose 和发布门禁 |
 
+## v0.3 实施计划（开发中）
+
+| 文档 | 内容 |
+|---|---|
+| [版本开发计划](./releases/v0.3-开发计划.md) | Go Parser、PR 影响分析、Web 工作台与 VS Code 扩展的共同链路和完成标准 |
+| [ADR 0003](./decisions/0003-pr-impact-and-editor.md) | 双快照、确定性影响图、固定 Commit 证据与编辑器边界 |
+| [v0.3 后端开发文档](./backend/v0.3后端开发文档.md) | Parser、GitHub client、Worker、影响算法和 API 实施纪律 |
+| [v0.3 数据库设计](./database/v0.3数据库设计.md) | PR Analysis、Impact、Path、Evidence 表与事务不变量 |
+| [v0.3 前端开发文档](./frontend/v0.3前端开发文档.md) | Impact Workspace、证据抽屉、分页和可访问性 |
+| [VS Code 扩展开发文档](./extensions/vscode扩展开发文档.md) | 固定快照导航、Repository Mapping、安全和打包 |
+| [v0.3 测试与发布计划](./operations/v0.3测试与发布计划.md) | 自动化、真实仓库、PR fixture、扩展和 Compose 发布门禁 |
+
 ## 前端
 
 | 文档 | 内容 |

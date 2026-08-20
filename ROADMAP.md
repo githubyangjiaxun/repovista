@@ -19,8 +19,8 @@
 
 ## v0.3
 
-- Go parser adapter.
-- Pull request impact analysis.
-- VS Code extension.
+- [In progress](./docs/releases/v0.3-开发计划.md) Go parser adapter.
+- [In progress](./docs/releases/v0.3-开发计划.md) Pull request impact analysis.
+- [In progress](./docs/releases/v0.3-开发计划.md) VS Code extension.
 
 Roadmap ordering may change based on measured usage and contributor feedback.
