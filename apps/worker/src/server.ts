@@ -1,6 +1,7 @@
 import { getConfig } from "@repovista/config";
 import { createDatabasePool, migrateDatabase, RepoVistaStore } from "@repovista/database";
 import { executeNextIndexJob } from "./indexer.js";
+import { executeNextPullRequestAnalysisJob } from "./pull-request-analyzer.js";
 
 let stopping = false;
 
@@ -28,7 +29,8 @@ async function main(): Promise<void> {
   while (!stopping) {
     try {
       const processed = await executeNextIndexJob(store, config);
-      if (!processed) {
+      const analyzed = processed ? false : await executeNextPullRequestAnalysisJob(store, config);
+      if (!processed && !analyzed) {
         await wait(config.JOB_POLL_INTERVAL_MS);
       }
     } catch (error) {

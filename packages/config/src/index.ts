@@ -40,6 +40,8 @@ const envSchema = z.object({
   ANONYMOUS_QUESTIONS_PER_HOUR: z.coerce.number().int().positive().default(10),
   SHARE_REPORTS_PER_HOUR: z.coerce.number().int().positive().default(10),
   GITHUB_WEBHOOK_SECRET: optionalSecret,
+  GITHUB_API_TOKEN: optionalSecret,
+  GITHUB_API_ORIGIN: z.url().default("https://api.github.com"),
   GITHUB_APP_SLUG: z.string().trim().min(1).max(100).default("repovista-local"),
   GITHUB_WEBHOOK_BODY_MAX_BYTES: z.coerce
     .number()

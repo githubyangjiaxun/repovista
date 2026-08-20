@@ -289,6 +289,124 @@
         }
       }
     },
+    "/v1/repositories/{repositoryId}/pull-requests": {
+      "parameters": [{ "$ref": "#/components/parameters/RepositoryId" }],
+      "post": {
+        "operationId": "createPullRequestAnalysis",
+        "summary": "Queue a deterministic analysis for a public GitHub pull request",
+        "tags": ["Repositories"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["number"],
+                "properties": { "number": { "type": "integer", "minimum": 1, "maximum": 1000000 } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Analysis queued",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/SuccessEnvelope" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": { "$ref": "#/components/responses/UpstreamFailure" }
+        }
+      }
+    },
+    "/v1/pull-request-analyses/{analysisId}": {
+      "parameters": [{ "$ref": "#/components/parameters/AnalysisId" }],
+      "get": {
+        "operationId": "getPullRequestAnalysis",
+        "summary": "Get immutable pull request analysis status and provenance",
+        "tags": ["Repositories"],
+        "responses": {
+          "200": {
+            "description": "Analysis status",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/SuccessEnvelope" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/pull-request-analyses/{analysisId}/impact": {
+      "parameters": [{ "$ref": "#/components/parameters/AnalysisId" }],
+      "get": {
+        "operationId": "getPullRequestImpact",
+        "summary": "Read changed files, symbols, impact paths, risk and fixed evidence",
+        "tags": ["Repositories"],
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": { "type": "string", "minLength": 1, "maxLength": 1000 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Impact workspace data",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/SuccessEnvelope" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/pull-request-analyses/{analysisId}/events": {
+      "parameters": [{ "$ref": "#/components/parameters/AnalysisId" }],
+      "get": {
+        "operationId": "streamPullRequestAnalysisEvents",
+        "summary": "Stream pull request analysis progress as SSE",
+        "tags": ["Jobs"],
+        "parameters": [
+          {
+            "name": "after",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 0, "default": 0 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Server-sent progress events",
+            "content": { "text/event-stream": { "schema": { "type": "string" } } }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/pull-request-analyses/{analysisId}/rerun": {
+      "parameters": [{ "$ref": "#/components/parameters/AnalysisId" }],
+      "post": {
+        "operationId": "rerunPullRequestAnalysis",
+        "summary": "Create a new immutable analysis revision",
+        "tags": ["Repositories"],
+        "responses": {
+          "202": {
+            "description": "Analysis revision queued",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/SuccessEnvelope" } }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
     "/v1/snapshots/{snapshotId}": {
       "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
       "get": {
@@ -599,6 +717,43 @@
         }
       }
     },
+    "/v1/snapshots/{snapshotId}/symbols/{symbolId}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/SnapshotId" },
+        {
+          "name": "symbolId",
+          "in": "path",
+          "required": true,
+          "schema": { "$ref": "#/components/schemas/Uuid" }
+        }
+      ],
+      "get": {
+        "operationId": "getSnapshotSymbolEvidence",
+        "summary": "Read fixed symbol evidence pinned to a snapshot commit",
+        "tags": ["Snapshots"],
+        "responses": {
+          "200": {
+            "description": "Commit-pinned symbol and source range",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/SnapshotSymbolEvidence" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
     "/v1/snapshots/{snapshotId}/search": {
       "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
       "get": {
@@ -759,6 +914,12 @@
       },
       "JobId": {
         "name": "jobId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "AnalysisId": {
+        "name": "analysisId",
         "in": "path",
         "required": true,
         "schema": { "$ref": "#/components/schemas/Uuid" }
@@ -1102,6 +1263,7 @@
         "required": [
           "id",
           "snapshotId",
+          "analysisId",
           "type",
           "status",
           "phase",
@@ -1113,7 +1275,12 @@
         ],
         "properties": {
           "id": { "$ref": "#/components/schemas/Uuid" },
-          "snapshotId": { "$ref": "#/components/schemas/Uuid" },
+          "snapshotId": {
+            "oneOf": [{ "$ref": "#/components/schemas/Uuid" }, { "type": "null" }]
+          },
+          "analysisId": {
+            "oneOf": [{ "$ref": "#/components/schemas/Uuid" }, { "type": "null" }]
+          },
           "type": { "type": "string" },
           "status": { "$ref": "#/components/schemas/JobStatus" },
           "phase": { "type": ["string", "null"] },
@@ -1245,6 +1412,59 @@
           "commitSha": { "type": "string" },
           "blobHash": { "type": "string" },
           "truncated": { "type": "boolean" }
+        }
+      },
+      "SnapshotSymbolEvidence": {
+        "type": "object",
+        "required": [
+          "id",
+          "snapshotId",
+          "commitSha",
+          "parserVersion",
+          "fileId",
+          "path",
+          "language",
+          "blobHash",
+          "stableKey",
+          "kind",
+          "name",
+          "qualifiedName",
+          "signature",
+          "startLine",
+          "endLine",
+          "content",
+          "contentHash"
+        ],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "snapshotId": { "$ref": "#/components/schemas/Uuid" },
+          "commitSha": { "type": "string", "pattern": "^[a-fA-F0-9]{7,64}$" },
+          "parserVersion": { "type": "string" },
+          "fileId": { "$ref": "#/components/schemas/Uuid" },
+          "path": { "type": "string" },
+          "language": { "type": ["string", "null"] },
+          "blobHash": { "type": "string" },
+          "stableKey": { "type": "string" },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "module",
+              "function",
+              "class",
+              "method",
+              "interface",
+              "type",
+              "variable",
+              "enum"
+            ]
+          },
+          "name": { "type": "string" },
+          "qualifiedName": { "type": ["string", "null"] },
+          "signature": { "type": ["string", "null"] },
+          "startLine": { "type": "integer", "minimum": 1 },
+          "endLine": { "type": "integer", "minimum": 1 },
+          "content": { "type": "string" },
+          "contentHash": { "type": "string" }
         }
       },
       "Evidence": {

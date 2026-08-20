@@ -20,6 +20,7 @@
     "@repovista/domain": "workspace:*",
     "@repovista/git": "workspace:*",
     "@repovista/graph": "workspace:*",
+    "@repovista/impact": "workspace:*",
     "@repovista/parser": "workspace:*"
   }
 }

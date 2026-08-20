@@ -1,10 +1,27 @@
 import { createHash } from "node:crypto";
-import type { Job, RepositorySummary, Snapshot, SourceFile } from "@repovista/contracts";
-import { snapshotStatsSchema } from "@repovista/contracts";
+import type {
+  Job,
+  PullRequestAnalysis,
+  PullRequestAnalysisStatus,
+  PullRequestFileChange,
+  PullRequestImpact,
+  PullRequestSymbolChange,
+  RepositorySummary,
+  Snapshot,
+  SnapshotSymbolEvidence,
+  SourceFile,
+} from "@repovista/contracts";
+import {
+  idSchema,
+  pullRequestAnalysisSchema,
+  pullRequestImpactSchema,
+  snapshotStatsSchema,
+} from "@repovista/contracts";
 import {
   createId,
   DomainError,
   type IndexedRepository,
+  isDomainError,
   type JobProgress,
   PUBLIC_USER_ID,
   PUBLIC_WORKSPACE_ID,
@@ -13,13 +30,19 @@ import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import type {
   ClaimedIndexJob,
+  CompletePullRequestAnalysisInput,
   CreateImportInput,
   CreateImportResult,
+  CreatePullRequestAnalysisInput,
+  CreatePullRequestAnalysisResult,
   GitHubWebhookInput,
   GitHubWebhookProcessResult,
   IncrementalIndexBase,
   JobEventRecord,
   ListSnapshotFilesOptions,
+  PullRequestAnalysisCursor,
+  PullRequestAnalysisJob,
+  PullRequestAnalysisPage,
   SaveAnswerInput,
   SearchEvidenceRecord,
   ShareReportContent,
@@ -65,7 +88,8 @@ interface SnapshotRow {
 
 interface JobRow {
   id: string;
-  snapshot_id: string;
+  snapshot_id: string | null;
+  analysis_id: string | null;
   job_type: string;
   status: Job["status"];
   phase: string | null;
@@ -79,12 +103,116 @@ interface JobRow {
   error_retryable: boolean;
 }
 
+interface PullRequestAnalysisRow {
+  id: string;
+  repository_id: string;
+  pr_number: number;
+  title: string;
+  canonical_url: string;
+  base_sha: string;
+  head_sha: string;
+  base_snapshot_id: string | null;
+  head_snapshot_id: string | null;
+  parser_version: string;
+  algorithm_version: string;
+  revision: number;
+  status: PullRequestAnalysisStatus;
+  progress: number;
+  stats_json: unknown;
+  error_code: string | null;
+  error_message: string | null;
+  error_retryable: boolean;
+  created_at: Date | string;
+  updated_at: Date | string;
+  completed_at: Date | string | null;
+}
+
+function mapPullRequestAnalysis(row: PullRequestAnalysisRow): PullRequestAnalysis {
+  return pullRequestAnalysisSchema.parse({
+    id: row.id,
+    repositoryId: row.repository_id,
+    prNumber: row.pr_number,
+    title: row.title,
+    url: row.canonical_url,
+    baseSha: row.base_sha,
+    headSha: row.head_sha,
+    baseSnapshotId: row.base_snapshot_id,
+    headSnapshotId: row.head_snapshot_id,
+    parserVersion: row.parser_version,
+    algorithmVersion: row.algorithm_version,
+    revision: row.revision,
+    status: row.status,
+    progress: Number(row.progress),
+    stats: row.stats_json ?? {
+      changedFiles: 0,
+      changedSymbols: 0,
+      directImpacts: 0,
+      transitiveImpacts: 0,
+      unknownImpacts: 0,
+      truncated: false,
+    },
+    failure:
+      row.error_code === null
+        ? null
+        : {
+            code: row.error_code,
+            message: row.error_message ?? "Pull request analysis failed.",
+            retryable: row.error_retryable,
+          },
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+    completedAt: nullableIso(row.completed_at),
+  });
+}
+
 function iso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
 function nullableIso(value: Date | string | null): string | null {
   return value === null ? null : iso(value);
+}
+
+function invalidImpactCursor(): never {
+  throw new DomainError("PAGINATION_CURSOR_INVALID", "The impact pagination cursor is invalid.");
+}
+
+function decodeImpactCursor(value: string): PullRequestAnalysisCursor {
+  if (value.length > 1_000 || !/^[A-Za-z0-9_-]+$/.test(value)) invalidImpactCursor();
+  try {
+    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as unknown;
+    if (typeof decoded !== "object" || decoded === null) invalidImpactCursor();
+    const cursor = decoded as Record<string, unknown>;
+    if (
+      cursor.v !== 1 ||
+      typeof cursor.riskScore !== "number" ||
+      !Number.isFinite(cursor.riskScore) ||
+      cursor.riskScore < 0 ||
+      cursor.riskScore > 1 ||
+      typeof cursor.path !== "string" ||
+      cursor.path.length === 0 ||
+      cursor.path.length > 1_000 ||
+      typeof cursor.startLine !== "number" ||
+      !Number.isInteger(cursor.startLine) ||
+      cursor.startLine < 1 ||
+      !idSchema.safeParse(cursor.id).success
+    ) {
+      invalidImpactCursor();
+    }
+    return {
+      riskScore: cursor.riskScore,
+      path: cursor.path,
+      startLine: cursor.startLine,
+      id: cursor.id as string,
+    };
+  } catch (error) {
+    if (isDomainError(error)) throw error;
+    return invalidImpactCursor();
+  }
+}
+
+function encodeImpactCursor(cursor: PullRequestAnalysisCursor): string {
+  return Buffer.from(JSON.stringify({ v: 1, ...cursor }), "utf8").toString("base64url");
 }
 
 function mapRepository(row: RepositoryRow): RepositorySummary {
@@ -132,6 +260,7 @@ function mapJob(row: JobRow): Job {
   return {
     id: row.id,
     snapshotId: row.snapshot_id,
+    analysisId: row.analysis_id,
     type: row.job_type,
     status: row.status,
     phase: row.phase,
@@ -298,6 +427,1051 @@ export class RepoVistaStore {
       });
 
       return { repositoryId, snapshotId, jobId, status: "queued" as const };
+    });
+  }
+
+  async createPullRequestAnalysis(
+    input: CreatePullRequestAnalysisInput,
+  ): Promise<CreatePullRequestAnalysisResult> {
+    if (!/^[a-f0-9]{40}$/i.test(input.baseSha) || !/^[a-f0-9]{40}$/i.test(input.headSha)) {
+      throw new DomainError(
+        "PULL_REQUEST_SHA_INVALID",
+        "Pull request commits must be full SHA-1 values.",
+      );
+    }
+    return withTransaction(this.pool, async (client) => {
+      const repository = await client.query<{
+        id: string;
+        owner_name: string;
+        repo_name: string;
+      }>("SELECT id, owner_name, repo_name FROM repositories WHERE id = $1 AND workspace_id = $2", [
+        input.repositoryId,
+        input.workspaceId,
+      ]);
+      if (!repository.rows[0]) {
+        throw new DomainError("REPOSITORY_NOT_FOUND", "The requested repository does not exist.");
+      }
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+        `pr-analysis:${input.repositoryId}:${input.prNumber}`,
+      ]);
+      const baseIdempotencyKey = [
+        input.repositoryId,
+        input.prNumber,
+        input.baseSha.toLowerCase(),
+        input.headSha.toLowerCase(),
+        input.parserVersion,
+        input.algorithmVersion,
+      ].join(":");
+      if (input.forceRevision === undefined) {
+        const existing = await client.query<{
+          id: string;
+          revision: number;
+          status: Job["status"];
+        }>(
+          "SELECT a.id, a.revision, COALESCE(j.status, a.status) AS status " +
+            "FROM pull_request_analyses a LEFT JOIN analysis_jobs j ON j.analysis_id = a.id " +
+            "WHERE a.idempotency_key = $1 ORDER BY a.revision DESC LIMIT 1",
+          [baseIdempotencyKey],
+        );
+        if (existing.rows[0]) {
+          const old = existing.rows[0];
+          const job = await client.query<{ id: string }>(
+            "SELECT id FROM analysis_jobs WHERE analysis_id = $1 ORDER BY created_at DESC LIMIT 1",
+            [old.id],
+          );
+          return {
+            analysisId: old.id,
+            jobId: job.rows[0]?.id ?? old.id,
+            revision: old.revision,
+            status: old.status,
+          };
+        }
+      }
+      const revisionResult = await client.query<{ revision: number }>(
+        "SELECT COALESCE(MAX(revision), 0) + 1 AS revision FROM pull_request_analyses " +
+          "WHERE repository_id = $1 AND pr_number = $2",
+        [input.repositoryId, input.prNumber],
+      );
+      const nextRevision = revisionResult.rows[0]?.revision ?? 1;
+      const revision = input.forceRevision ?? nextRevision;
+      if (revision !== nextRevision) {
+        throw new DomainError(
+          "PR_ANALYSIS_REVISION_CONFLICT",
+          "The pull request analysis revision is no longer current.",
+          { retryable: true },
+        );
+      }
+      const idempotencyKey =
+        input.forceRevision === undefined
+          ? baseIdempotencyKey
+          : `${baseIdempotencyKey}:revision:${revision}`;
+      const analysisId = createId();
+      const jobId = createId();
+      await client.query(
+        "INSERT INTO pull_request_analyses (" +
+          "id, workspace_id, repository_id, pr_number, title, canonical_url, base_sha, head_sha, " +
+          "parser_version, algorithm_version, provider_files_json, revision, status, idempotency_key" +
+          ") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, 'queued', $13)",
+        [
+          analysisId,
+          input.workspaceId,
+          input.repositoryId,
+          input.prNumber,
+          input.title,
+          input.canonicalUrl,
+          input.baseSha.toLowerCase(),
+          input.headSha.toLowerCase(),
+          input.parserVersion,
+          input.algorithmVersion,
+          JSON.stringify(input.providerFiles),
+          revision,
+          idempotencyKey,
+        ],
+      );
+      await client.query(
+        "INSERT INTO analysis_jobs (" +
+          "id, workspace_id, repository_id, job_type, status, idempotency_key, analysis_id" +
+          ") VALUES ($1, $2, $3, 'pull_request_analysis', 'queued', $4, $5)",
+        [jobId, input.workspaceId, input.repositoryId, `pr-analysis:${idempotencyKey}`, analysisId],
+      );
+      await this.appendJobEvent(client, jobId, "queued", {
+        phase: "queued",
+        progress: 0,
+        analysisId,
+        revision,
+      });
+      return { analysisId, jobId, revision, status: "queued" as const };
+    });
+  }
+
+  async getPullRequestAnalysis(analysisId: string): Promise<PullRequestAnalysis | null> {
+    const result = await this.pool.query<PullRequestAnalysisRow>(
+      "SELECT id, repository_id, pr_number, title, canonical_url, base_sha, head_sha, " +
+        "base_snapshot_id, head_snapshot_id, parser_version, algorithm_version, revision, status, " +
+        "progress, stats_json, error_code, error_message, error_retryable, created_at, updated_at, completed_at " +
+        "FROM pull_request_analyses WHERE id = $1",
+      [analysisId],
+    );
+    const row = result.rows[0];
+    return row ? mapPullRequestAnalysis(row) : null;
+  }
+
+  async getPullRequestAnalysisJobId(analysisId: string): Promise<string | null> {
+    const result = await this.pool.query<{ id: string }>(
+      "SELECT id FROM analysis_jobs WHERE analysis_id = $1 ORDER BY created_at DESC LIMIT 1",
+      [analysisId],
+    );
+    return result.rows[0]?.id ?? null;
+  }
+
+  async ensureSnapshotForCommit(input: {
+    repositoryId: string;
+    workspaceId: string;
+    commitSha: string;
+    parserVersion: string;
+  }): Promise<{
+    snapshotId: string;
+    jobId: string | null;
+    status: "ready" | "queued" | "running";
+  }> {
+    const commitSha = input.commitSha.toLowerCase();
+    if (!/^[a-f0-9]{40}$/.test(commitSha)) {
+      throw new DomainError(
+        "PULL_REQUEST_SHA_INVALID",
+        "A snapshot commit must be a full SHA-1 value.",
+      );
+    }
+    return withTransaction(this.pool, async (client) => {
+      const repository = await client.query<{ id: string; clone_url: string }>(
+        "SELECT id, clone_url FROM repositories WHERE id = $1 AND workspace_id = $2",
+        [input.repositoryId, input.workspaceId],
+      );
+      if (!repository.rows[0]) {
+        throw new DomainError("REPOSITORY_NOT_FOUND", "The requested repository does not exist.");
+      }
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+        `commit-snapshot:${input.repositoryId}:${commitSha}:${input.parserVersion}`,
+      ]);
+      const ready = await client.query<{ id: string }>(
+        "SELECT id FROM repository_snapshots WHERE repository_id = $1 AND commit_sha = $2 " +
+          "AND parser_version = $3 AND status = 'ready' ORDER BY ready_at DESC LIMIT 1",
+        [input.repositoryId, commitSha, input.parserVersion],
+      );
+      if (ready.rows[0])
+        return { snapshotId: ready.rows[0].id, jobId: null, status: "ready" as const };
+      const active = await client.query<{
+        snapshot_id: string;
+        job_id: string;
+        status: "queued" | "running";
+      }>(
+        "SELECT s.id AS snapshot_id, j.id AS job_id, j.status FROM repository_snapshots s " +
+          "JOIN analysis_jobs j ON j.snapshot_id = s.id " +
+          "WHERE s.repository_id = $1 AND s.requested_ref = $2 AND s.parser_version = $3 " +
+          "AND j.job_type = 'index_snapshot' AND j.status IN ('queued', 'running') " +
+          "ORDER BY j.created_at DESC LIMIT 1",
+        [input.repositoryId, commitSha, input.parserVersion],
+      );
+      if (active.rows[0]) {
+        return {
+          snapshotId: active.rows[0].snapshot_id,
+          jobId: active.rows[0].job_id,
+          status: active.rows[0].status,
+        };
+      }
+      const snapshotId = createId();
+      const jobId = createId();
+      await client.query(
+        "INSERT INTO repository_snapshots (id, repository_id, requested_ref, status, parser_version, promote_latest) " +
+          "VALUES ($1, $2, $3, 'requested', $4, false)",
+        [snapshotId, input.repositoryId, commitSha, input.parserVersion],
+      );
+      await client.query(
+        "INSERT INTO analysis_jobs (id, workspace_id, repository_id, snapshot_id, job_type, status, idempotency_key) " +
+          "VALUES ($1, $2, $3, $4, 'index_snapshot', 'queued', $5)",
+        [
+          jobId,
+          input.workspaceId,
+          input.repositoryId,
+          snapshotId,
+          `commit:${input.repositoryId}:${commitSha}:${input.parserVersion}:${snapshotId}`,
+        ],
+      );
+      await this.appendJobEvent(client, jobId, "queued", {
+        phase: "queued",
+        progress: 0,
+        snapshotId,
+        source: "pull_request_analysis",
+      });
+      return { snapshotId, jobId, status: "queued" as const };
+    });
+  }
+
+  async attachPullRequestSnapshots(
+    analysisId: string,
+    baseSnapshotId: string,
+    headSnapshotId: string,
+  ): Promise<void> {
+    await this.pool.query(
+      "UPDATE pull_request_analyses SET base_snapshot_id = $2, head_snapshot_id = $3, updated_at = now() " +
+        "WHERE id = $1 AND status IN ('queued', 'running')",
+      [analysisId, baseSnapshotId, headSnapshotId],
+    );
+  }
+
+  async updatePullRequestAnalysisProgress(
+    jobId: string,
+    analysisId: string,
+    workerId: string,
+    progress: { phase: string; value: number; message: string },
+  ): Promise<void> {
+    await withTransaction(this.pool, async (client) => {
+      const updated = await client.query(
+        "UPDATE analysis_jobs SET phase = $2, progress = $3 WHERE id = $1 AND analysis_id = $4 " +
+          "AND lease_owner = $5 AND status = 'running'",
+        [jobId, progress.phase, progress.value, analysisId, workerId],
+      );
+      if (updated.rowCount !== 1) {
+        throw new DomainError(
+          "JOB_LEASE_LOST",
+          "The pull request analysis lease is no longer owned.",
+          {
+            retryable: true,
+          },
+        );
+      }
+      await client.query(
+        "UPDATE pull_request_analyses SET status = 'running', progress = $2, updated_at = now() WHERE id = $1",
+        [analysisId, progress.value],
+      );
+      await this.appendJobEvent(client, jobId, "progress", {
+        phase: progress.phase,
+        progress: progress.value,
+        message: progress.message,
+        analysisId,
+      });
+    });
+  }
+
+  async completePullRequestAnalysis(input: CompletePullRequestAnalysisInput): Promise<void> {
+    const computation = input.computation;
+    const expectedStats = {
+      changedFiles: computation.files.length,
+      changedSymbols: computation.symbols.length,
+      directImpacts: computation.impacts.filter((impact) => impact.impactType === "direct").length,
+      transitiveImpacts: computation.impacts.filter((impact) => impact.impactType === "transitive")
+        .length,
+      unknownImpacts: computation.impacts.filter((impact) => impact.impactType === "unknown")
+        .length,
+    };
+    if (
+      computation.stats.changedFiles !== expectedStats.changedFiles ||
+      computation.stats.changedSymbols !== expectedStats.changedSymbols ||
+      computation.stats.directImpacts !== expectedStats.directImpacts ||
+      computation.stats.transitiveImpacts !== expectedStats.transitiveImpacts ||
+      computation.stats.unknownImpacts !== expectedStats.unknownImpacts
+    ) {
+      throw new DomainError(
+        "PR_IMPACT_STATS_INVALID",
+        "The pull request impact statistics do not match the persisted result.",
+      );
+    }
+    await withTransaction(this.pool, async (client) => {
+      const lease = await client.query<{ id: string }>(
+        "SELECT id FROM analysis_jobs WHERE id = $1 AND analysis_id = $2 AND lease_owner = $3 " +
+          "AND status = 'running' FOR UPDATE",
+        [input.jobId, input.analysisId, input.workerId],
+      );
+      if (!lease.rows[0]) {
+        throw new DomainError(
+          "JOB_LEASE_LOST",
+          "The pull request analysis lease is no longer owned.",
+          {
+            retryable: true,
+          },
+        );
+      }
+      const analysis = await client.query<{
+        repository_id: string;
+        base_sha: string;
+        head_sha: string;
+        base_snapshot_id: string | null;
+        head_snapshot_id: string | null;
+        parser_version: string;
+        algorithm_version: string;
+        status: PullRequestAnalysisStatus;
+      }>(
+        "SELECT repository_id, base_sha, head_sha, base_snapshot_id, head_snapshot_id, " +
+          "parser_version, algorithm_version, status FROM pull_request_analyses WHERE id = $1 FOR UPDATE",
+        [input.analysisId],
+      );
+      const analysisRow = analysis.rows[0];
+      if (!analysisRow)
+        throw new DomainError("PR_ANALYSIS_NOT_FOUND", "The analysis does not exist.");
+      if (
+        analysisRow.status !== "running" ||
+        (analysisRow.base_snapshot_id !== null &&
+          analysisRow.base_snapshot_id !== input.baseSnapshotId) ||
+        (analysisRow.head_snapshot_id !== null &&
+          analysisRow.head_snapshot_id !== input.headSnapshotId)
+      ) {
+        throw new DomainError(
+          "PR_ANALYSIS_INVARIANT_FAILED",
+          "The analysis no longer owns the selected immutable snapshots.",
+        );
+      }
+
+      const snapshotIds = [...new Set([input.baseSnapshotId, input.headSnapshotId])];
+      const snapshots = await client.query<{
+        id: string;
+        repository_id: string;
+        commit_sha: string | null;
+        parser_version: string;
+        status: Snapshot["status"];
+      }>(
+        "SELECT id, repository_id, commit_sha, parser_version, status " +
+          "FROM repository_snapshots WHERE id = ANY($1::uuid[]) FOR SHARE",
+        [snapshotIds],
+      );
+      const snapshotById = new Map(snapshots.rows.map((snapshot) => [snapshot.id, snapshot]));
+      const assertSnapshot = (snapshotId: string, commitSha: string): void => {
+        const snapshot = snapshotById.get(snapshotId);
+        if (
+          !snapshot ||
+          snapshot.repository_id !== analysisRow.repository_id ||
+          snapshot.status !== "ready" ||
+          snapshot.commit_sha !== commitSha ||
+          snapshot.parser_version !== analysisRow.parser_version
+        ) {
+          throw new DomainError(
+            "PR_SNAPSHOT_INVARIANT_FAILED",
+            "A pull request snapshot does not match the fixed repository, commit, and parser version.",
+          );
+        }
+      };
+      assertSnapshot(input.baseSnapshotId, analysisRow.base_sha);
+      assertSnapshot(input.headSnapshotId, analysisRow.head_sha);
+
+      const evidenceEntries = computation.impacts.flatMap((impact) =>
+        impact.evidence.map((evidence) => ({ impact, evidence })),
+      );
+      const stableEvidenceIds = new Set<string>();
+      for (const { impact, evidence } of evidenceEntries) {
+        const expectedSnapshotId =
+          impact.side === "base" ? input.baseSnapshotId : input.headSnapshotId;
+        const expectedCommitSha =
+          impact.side === "base" ? analysisRow.base_sha : analysisRow.head_sha;
+        if (
+          evidence.id.length === 0 ||
+          evidence.id.length > 1_000 ||
+          stableEvidenceIds.has(evidence.id) ||
+          evidence.snapshotId !== expectedSnapshotId ||
+          evidence.commitSha !== expectedCommitSha ||
+          evidence.algorithmVersion !== analysisRow.algorithm_version
+        ) {
+          throw new DomainError(
+            "PR_EVIDENCE_INVARIANT_FAILED",
+            "Impact evidence is duplicated or does not belong to its fixed snapshot.",
+          );
+        }
+        stableEvidenceIds.add(evidence.id);
+      }
+
+      const evidenceFileIds = [...new Set(evidenceEntries.map(({ evidence }) => evidence.fileId))];
+      const evidenceSymbolIds = [
+        ...new Set(
+          evidenceEntries
+            .map(({ evidence }) => evidence.symbolId)
+            .filter((symbolId): symbolId is string => symbolId !== null),
+        ),
+      ];
+      const evidenceFiles = evidenceFileIds.length
+        ? (
+            await client.query<{
+              id: string;
+              snapshot_id: string;
+              path: string;
+              line_count: number;
+              inline_content: string;
+            }>(
+              "SELECT f.id, f.snapshot_id, f.path, f.line_count, b.inline_content " +
+                "FROM snapshot_files f JOIN content_blobs b ON b.hash = f.blob_hash " +
+                "WHERE f.id = ANY($1::uuid[])",
+              [evidenceFileIds],
+            )
+          ).rows
+        : [];
+      const evidenceSymbols = evidenceSymbolIds.length
+        ? (
+            await client.query<{
+              id: string;
+              snapshot_id: string;
+              snapshot_file_id: string;
+              start_line: number;
+              end_line: number;
+            }>(
+              "SELECT id, snapshot_id, snapshot_file_id, start_line, end_line " +
+                "FROM symbols WHERE id = ANY($1::uuid[])",
+              [evidenceSymbolIds],
+            )
+          ).rows
+        : [];
+      const evidenceFileById = new Map(evidenceFiles.map((file) => [file.id, file]));
+      const evidenceSymbolById = new Map(evidenceSymbols.map((symbol) => [symbol.id, symbol]));
+      for (const { evidence } of evidenceEntries) {
+        const file = evidenceFileById.get(evidence.fileId);
+        const symbol = evidence.symbolId ? evidenceSymbolById.get(evidence.symbolId) : null;
+        const storedQuote = file?.inline_content
+          .split(/\r?\n/)
+          .slice(
+            Math.max(0, evidence.startLine - 1),
+            Math.max(evidence.startLine, evidence.endLine),
+          )
+          .join("\n")
+          .slice(0, 8_000);
+        const storedHash =
+          storedQuote === undefined
+            ? null
+            : `sha256:${createHash("sha256").update(storedQuote).digest("hex")}`;
+        if (
+          !file ||
+          file.snapshot_id !== evidence.snapshotId ||
+          file.path !== evidence.path ||
+          evidence.startLine < 1 ||
+          evidence.endLine < evidence.startLine ||
+          evidence.endLine > file.line_count ||
+          storedQuote !== evidence.quote ||
+          storedHash !== evidence.contentHash ||
+          (evidence.symbolId !== null &&
+            (!symbol ||
+              symbol.snapshot_id !== evidence.snapshotId ||
+              symbol.snapshot_file_id !== evidence.fileId ||
+              evidence.startLine < symbol.start_line ||
+              evidence.endLine > symbol.end_line))
+        ) {
+          throw new DomainError(
+            "PR_EVIDENCE_INVARIANT_FAILED",
+            "Impact evidence does not match persisted source, symbols, and line ranges.",
+          );
+        }
+      }
+
+      for (const file of computation.files) {
+        const id = createId();
+        await client.query(
+          "INSERT INTO pull_request_files (id, analysis_id, path, old_path, change_type, base_blob_hash, head_blob_hash, additions, deletions, is_binary) " +
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+          [
+            id,
+            input.analysisId,
+            file.path,
+            file.oldPath,
+            file.changeType,
+            file.baseBlobHash,
+            file.headBlobHash,
+            file.additions,
+            file.deletions,
+            file.binary,
+          ],
+        );
+      }
+      for (const change of computation.symbols) {
+        const id = createId();
+        const snapshotId = change.side === "base" ? input.baseSnapshotId : input.headSnapshotId;
+        await client.query(
+          "INSERT INTO pull_request_symbol_changes (id, analysis_id, snapshot_id, snapshot_side, symbol_id, stable_key, path, name, kind, start_line, end_line, change_type) " +
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+          [
+            id,
+            input.analysisId,
+            snapshotId,
+            change.side,
+            change.symbolId,
+            change.stableKey,
+            change.path,
+            change.name,
+            change.kind,
+            change.startLine,
+            change.endLine,
+            change.changeType,
+          ],
+        );
+      }
+      const impactIds = new Map<string, string>();
+      for (const impact of computation.impacts) {
+        if (impactIds.has(impact.id)) {
+          throw new DomainError("PR_IMPACT_DUPLICATE", "Impact identifiers must be unique.");
+        }
+        const id = createId();
+        impactIds.set(impact.id, id);
+        const snapshotId = impact.side === "base" ? input.baseSnapshotId : input.headSnapshotId;
+        await client.query(
+          "INSERT INTO pull_request_impacts (id, analysis_id, snapshot_id, snapshot_side, symbol_id, stable_key, path, name, kind, start_line, end_line, impact_type, distance, risk_score, risk_level, risk_breakdown_json, truncated) " +
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17)",
+          [
+            id,
+            input.analysisId,
+            snapshotId,
+            impact.side,
+            impact.symbolId,
+            impact.stableKey,
+            impact.path,
+            impact.name,
+            impact.kind,
+            impact.startLine,
+            impact.endLine,
+            impact.impactType,
+            impact.distance,
+            impact.riskScore,
+            impact.riskLevel,
+            JSON.stringify(impact.riskBreakdown),
+            impact.truncated,
+          ],
+        );
+      }
+
+      const persistedEvidence = new Map<string, { id: string; impactId: string }>();
+      for (const impact of computation.impacts) {
+        const impactId = impactIds.get(impact.id);
+        if (!impactId) throw new DomainError("PR_IMPACT_DUPLICATE", "An impact ID is missing.");
+        for (const evidence of impact.evidence) {
+          const evidenceId = createId();
+          persistedEvidence.set(evidence.id, { id: evidenceId, impactId: impact.id });
+          await client.query(
+            "INSERT INTO pull_request_evidence (id, stable_id, analysis_id, impact_id, snapshot_id, commit_sha, file_id, symbol_id, path, start_line, end_line, quote, content_hash, relation_type, algorithm_version) " +
+              "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+            [
+              evidenceId,
+              evidence.id,
+              input.analysisId,
+              impactId,
+              evidence.snapshotId,
+              evidence.commitSha,
+              evidence.fileId,
+              evidence.symbolId,
+              evidence.path,
+              evidence.startLine,
+              evidence.endLine,
+              evidence.quote,
+              evidence.contentHash,
+              evidence.relationType,
+              evidence.algorithmVersion,
+            ],
+          );
+        }
+      }
+      for (const impact of computation.impacts) {
+        const impactId = impactIds.get(impact.id);
+        if (!impactId) throw new DomainError("PR_IMPACT_DUPLICATE", "An impact ID is missing.");
+        const snapshotId = impact.side === "base" ? input.baseSnapshotId : input.headSnapshotId;
+        for (const item of impact.paths) {
+          const linkedEvidence = item.evidenceId
+            ? persistedEvidence.get(item.evidenceId)
+            : undefined;
+          if (item.evidenceId && (!linkedEvidence || linkedEvidence.impactId !== impact.id)) {
+            throw new DomainError(
+              "PR_EVIDENCE_INVARIANT_FAILED",
+              "An impact path references evidence outside its own impact.",
+            );
+          }
+          await client.query(
+            "INSERT INTO pull_request_impact_paths (id, impact_id, snapshot_id, ordinal, from_symbol_id, to_symbol_id, from_stable_key, to_stable_key, from_path, to_path, relation_type, confidence, evidence_id, edge_id) " +
+              "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+            [
+              createId(),
+              impactId,
+              snapshotId,
+              item.ordinal,
+              item.fromSymbolId,
+              item.toSymbolId,
+              item.fromStableKey,
+              item.toStableKey,
+              item.fromPath,
+              item.toPath,
+              item.relationType,
+              item.confidence,
+              linkedEvidence?.id ?? null,
+              item.edgeId,
+            ],
+          );
+        }
+      }
+      await client.query(
+        "UPDATE pull_request_analyses SET status = 'ready', progress = 1, base_snapshot_id = $2, head_snapshot_id = $3, " +
+          "stats_json = $4::jsonb, result_json = $5::jsonb, updated_at = now(), completed_at = now(), " +
+          "error_code = NULL, error_message = NULL, error_retryable = false " +
+          "WHERE id = $1 AND status = 'running'",
+        [
+          input.analysisId,
+          input.baseSnapshotId,
+          input.headSnapshotId,
+          JSON.stringify(computation.stats),
+          JSON.stringify(computation),
+        ],
+      );
+      await client.query(
+        "UPDATE analysis_jobs SET status = 'succeeded', phase = 'completed', progress = 1, lease_owner = NULL, " +
+          "lease_expires_at = NULL, finished_at = now(), error_code = NULL, error_message = NULL, error_details_json = NULL " +
+          "WHERE id = $1",
+        [input.jobId],
+      );
+      await this.appendJobEvent(client, input.jobId, "completed", {
+        phase: "completed",
+        progress: 1,
+        analysisId: input.analysisId,
+        stats: computation.stats,
+      });
+    });
+  }
+
+  async failPullRequestAnalysis(
+    jobId: string,
+    analysisId: string,
+    workerId: string,
+    code: string,
+    message: string,
+    retryable: boolean,
+  ): Promise<void> {
+    await withTransaction(this.pool, async (client) => {
+      const jobResult = await client.query<{ attempt_count: number; max_attempts: number }>(
+        "SELECT attempt_count, max_attempts FROM analysis_jobs WHERE id = $1 AND analysis_id = $2 " +
+          "AND lease_owner = $3 AND status = 'running' FOR UPDATE",
+        [jobId, analysisId, workerId],
+      );
+      const job = jobResult.rows[0];
+      if (!job)
+        throw new DomainError("JOB_LEASE_LOST", "The pull request analysis lease was lost.", {
+          retryable: true,
+        });
+      const shouldRetry = retryable && job.attempt_count < job.max_attempts;
+      await client.query(
+        "UPDATE analysis_jobs SET status = $2, error_code = $3, error_message = $4, error_details_json = jsonb_build_object('retryable', $5::boolean), " +
+          "lease_owner = NULL, lease_expires_at = NULL, " +
+          "available_at = CASE WHEN $2 = 'queued' THEN now() + (LEAST(30, GREATEST(1, attempt_count * attempt_count)) * interval '1 second') ELSE now() END, " +
+          "finished_at = CASE WHEN $2 = 'failed' THEN now() ELSE NULL END WHERE id = $1",
+        [jobId, shouldRetry ? "queued" : "failed", code, message, retryable],
+      );
+      await client.query(
+        "UPDATE pull_request_analyses SET status = $2, error_code = $3, error_message = $4, error_retryable = $5, updated_at = now() WHERE id = $1",
+        [analysisId, shouldRetry ? "queued" : "failed", code, message, retryable],
+      );
+      await this.appendJobEvent(client, jobId, shouldRetry ? "warning" : "failed", {
+        phase: shouldRetry ? "retrying" : "failed",
+        progress: 1,
+        analysisId,
+        code,
+        message,
+        retryable: shouldRetry,
+      });
+    });
+  }
+
+  async deferPullRequestAnalysis(
+    jobId: string,
+    analysisId: string,
+    workerId: string,
+    message: string,
+  ): Promise<void> {
+    await withTransaction(this.pool, async (client) => {
+      const deferred = await client.query(
+        "UPDATE analysis_jobs SET status = 'queued', phase = 'waiting_for_snapshots', progress = 0.3, " +
+          "attempt_count = GREATEST(0, attempt_count - 1), lease_owner = NULL, lease_expires_at = NULL, " +
+          "available_at = now() + interval '5 seconds' " +
+          "WHERE id = $1 AND analysis_id = $2 AND lease_owner = $3 AND status = 'running' RETURNING id",
+        [jobId, analysisId, workerId],
+      );
+      if (deferred.rowCount !== 1) {
+        throw new DomainError("JOB_LEASE_LOST", "The pull request analysis lease was lost.", {
+          retryable: true,
+        });
+      }
+      await client.query(
+        "UPDATE pull_request_analyses SET status = 'queued', progress = 0.3, updated_at = now() WHERE id = $1",
+        [analysisId],
+      );
+      await this.appendJobEvent(client, jobId, "waiting", {
+        phase: "waiting_for_snapshots",
+        progress: 0.3,
+        analysisId,
+        message,
+      });
+    });
+  }
+
+  async cancelPullRequestAnalysis(
+    jobId: string,
+    analysisId: string,
+    workerId: string,
+  ): Promise<void> {
+    await withTransaction(this.pool, async (client) => {
+      const cancelled = await client.query(
+        "UPDATE analysis_jobs SET status = 'cancelled', phase = 'cancelled', progress = 1, " +
+          "lease_owner = NULL, lease_expires_at = NULL, finished_at = now() " +
+          "WHERE id = $1 AND analysis_id = $2 AND lease_owner = $3 AND status = 'running' RETURNING id",
+        [jobId, analysisId, workerId],
+      );
+      if (cancelled.rowCount !== 1) {
+        throw new DomainError("JOB_LEASE_LOST", "The pull request analysis lease was lost.", {
+          retryable: true,
+        });
+      }
+      await client.query(
+        "UPDATE pull_request_analyses SET status = 'cancelled', progress = 1, updated_at = now(), completed_at = now() WHERE id = $1",
+        [analysisId],
+      );
+      await this.appendJobEvent(client, jobId, "cancelled", {
+        phase: "cancelled",
+        progress: 1,
+        analysisId,
+      });
+    });
+  }
+
+  async getPullRequestImpactPage(
+    analysisId: string,
+    limit = 50,
+    cursor?: string,
+  ): Promise<PullRequestAnalysisPage | null> {
+    const analysis = await this.getPullRequestAnalysis(analysisId);
+    if (!analysis) return null;
+    const boundedLimit = Math.min(100, Math.max(1, limit));
+    const decodedCursor = cursor ? decodeImpactCursor(cursor) : null;
+    const impactParams: unknown[] = [analysisId];
+    let impactCursorClause = "";
+    if (decodedCursor) {
+      impactParams.push(
+        decodedCursor.riskScore,
+        decodedCursor.path,
+        decodedCursor.startLine,
+        decodedCursor.id,
+      );
+      impactCursorClause =
+        "AND (risk_score < $2::real " +
+        "OR (risk_score = $2::real AND path > $3) " +
+        "OR (risk_score = $2::real AND path = $3 AND start_line > $4) " +
+        "OR (risk_score = $2::real AND path = $3 AND start_line = $4 AND id > $5::uuid)) ";
+    }
+    impactParams.push(boundedLimit + 1);
+    const impactLimitParameter = `$${impactParams.length}`;
+    const [fileResult, symbolResult, impactResult] = await Promise.all([
+      this.pool.query<{
+        path: string;
+        old_path: string | null;
+        change_type: PullRequestFileChange["changeType"];
+        base_blob_hash: string | null;
+        head_blob_hash: string | null;
+        additions: number | null;
+        deletions: number | null;
+        is_binary: boolean;
+      }>(
+        "SELECT path, old_path, change_type, base_blob_hash, head_blob_hash, additions, deletions, is_binary " +
+          "FROM pull_request_files WHERE analysis_id = $1 ORDER BY path",
+        [analysisId],
+      ),
+      this.pool.query<{
+        id: string;
+        snapshot_side: PullRequestSymbolChange["side"];
+        symbol_id: string | null;
+        stable_key: string;
+        path: string;
+        name: string;
+        kind: string;
+        start_line: number;
+        end_line: number;
+        change_type: PullRequestSymbolChange["changeType"];
+      }>(
+        "SELECT id, snapshot_side, symbol_id, stable_key, path, name, kind, start_line, end_line, change_type " +
+          "FROM pull_request_symbol_changes WHERE analysis_id = $1 ORDER BY path, start_line, id",
+        [analysisId],
+      ),
+      this.pool.query<{
+        id: string;
+        snapshot_side: PullRequestImpact["side"];
+        symbol_id: string | null;
+        stable_key: string;
+        path: string;
+        name: string;
+        kind: string;
+        start_line: number;
+        end_line: number;
+        impact_type: PullRequestImpact["impactType"];
+        distance: number;
+        risk_score: number;
+        risk_level: PullRequestImpact["riskLevel"];
+        risk_breakdown_json: PullRequestImpact["riskBreakdown"];
+        truncated: boolean;
+      }>(
+        "SELECT id, snapshot_side, symbol_id, stable_key, path, name, kind, start_line, end_line, " +
+          "impact_type, distance, risk_score, risk_level, risk_breakdown_json, truncated " +
+          "FROM pull_request_impacts WHERE analysis_id = $1 " +
+          impactCursorClause +
+          `ORDER BY risk_score DESC, path ASC, start_line ASC, id ASC LIMIT ${impactLimitParameter}`,
+        impactParams,
+      ),
+    ]);
+    const hasMore = impactResult.rows.length > boundedLimit;
+    const impactRows = impactResult.rows.slice(0, boundedLimit);
+    const impactIds = impactRows.map((row) => row.id);
+    const [pathResult, evidenceResult] = impactIds.length
+      ? await Promise.all([
+          this.pool.query<{
+            impact_id: string;
+            ordinal: number;
+            from_symbol_id: string | null;
+            to_symbol_id: string | null;
+            from_stable_key: string | null;
+            to_stable_key: string | null;
+            from_path: string | null;
+            to_path: string | null;
+            relation_type: PullRequestImpact["paths"][number]["relationType"];
+            confidence: number;
+            evidence_stable_id: string | null;
+          }>(
+            "SELECT p.impact_id, p.ordinal, p.from_symbol_id, p.to_symbol_id, p.from_stable_key, " +
+              "p.to_stable_key, p.from_path, p.to_path, p.relation_type, p.confidence, " +
+              "e.stable_id AS evidence_stable_id FROM pull_request_impact_paths p " +
+              "LEFT JOIN pull_request_evidence e ON e.id = p.evidence_id " +
+              "WHERE p.impact_id = ANY($1::uuid[]) ORDER BY p.impact_id, p.ordinal",
+            [impactIds],
+          ),
+          this.pool.query<{
+            id: string;
+            impact_id: string;
+            snapshot_id: string;
+            commit_sha: string;
+            file_id: string;
+            symbol_id: string | null;
+            path: string;
+            start_line: number;
+            end_line: number;
+            quote: string;
+            content_hash: string;
+            relation_type: PullRequestImpact["evidence"][number]["relationType"];
+            algorithm_version: string;
+          }>(
+            "SELECT stable_id AS id, impact_id, snapshot_id, commit_sha, file_id, symbol_id, path, start_line, end_line, " +
+              "quote, content_hash, relation_type, algorithm_version FROM pull_request_evidence " +
+              "WHERE impact_id = ANY($1::uuid[]) ORDER BY impact_id, path, start_line, id",
+            [impactIds],
+          ),
+        ])
+      : [{ rows: [] }, { rows: [] }];
+    const pathsByImpact = new Map<string, PullRequestImpact["paths"]>();
+    for (const row of pathResult.rows) {
+      const paths = pathsByImpact.get(row.impact_id) ?? [];
+      paths.push({
+        ordinal: row.ordinal,
+        fromSymbolId: row.from_symbol_id,
+        toSymbolId: row.to_symbol_id,
+        fromPath: row.from_path,
+        toPath: row.to_path,
+        relationType: row.relation_type,
+        confidence: Number(row.confidence),
+        evidenceId: row.evidence_stable_id,
+      });
+      pathsByImpact.set(row.impact_id, paths);
+    }
+    const evidenceByImpact = new Map<string, PullRequestImpact["evidence"]>();
+    for (const row of evidenceResult.rows) {
+      const evidence = evidenceByImpact.get(row.impact_id) ?? [];
+      evidence.push({
+        id: row.id,
+        snapshotId: row.snapshot_id,
+        commitSha: row.commit_sha,
+        fileId: row.file_id,
+        symbolId: row.symbol_id,
+        path: row.path,
+        startLine: row.start_line,
+        endLine: row.end_line,
+        quote: row.quote,
+        contentHash: row.content_hash,
+        relationType: row.relation_type,
+        algorithmVersion: row.algorithm_version,
+      });
+      evidenceByImpact.set(row.impact_id, evidence);
+    }
+    const impacts = impactRows.map((row) =>
+      pullRequestImpactSchema.parse({
+        id: row.id,
+        analysisId,
+        side: row.snapshot_side,
+        symbolId: row.symbol_id,
+        stableKey: row.stable_key,
+        path: row.path,
+        name: row.name,
+        kind: row.kind,
+        startLine: row.start_line,
+        endLine: row.end_line,
+        impactType: row.impact_type,
+        distance: row.distance,
+        riskScore: Number(row.risk_score),
+        riskLevel: row.risk_level,
+        riskBreakdown: row.risk_breakdown_json,
+        truncated: row.truncated,
+        paths: pathsByImpact.get(row.id) ?? [],
+        evidence: evidenceByImpact.get(row.id) ?? [],
+      }),
+    );
+    return {
+      analysis,
+      files: fileResult.rows.map((row) => ({
+        path: row.path,
+        oldPath: row.old_path,
+        changeType: row.change_type,
+        baseBlobHash: row.base_blob_hash,
+        headBlobHash: row.head_blob_hash,
+        additions: row.additions,
+        deletions: row.deletions,
+        binary: row.is_binary,
+      })),
+      symbols: symbolResult.rows.map((row) => ({
+        id: row.id,
+        side: row.snapshot_side,
+        symbolId: row.symbol_id,
+        stableKey: row.stable_key,
+        path: row.path,
+        name: row.name,
+        kind: row.kind,
+        startLine: row.start_line,
+        endLine: row.end_line,
+        changeType: row.change_type,
+      })),
+      impacts,
+      nextCursor:
+        hasMore && impactRows.length > 0
+          ? encodeImpactCursor({
+              riskScore: Number(impactRows.at(-1)?.risk_score),
+              path: impactRows.at(-1)?.path ?? "",
+              startLine: impactRows.at(-1)?.start_line ?? 1,
+              id: impactRows.at(-1)?.id ?? "",
+            })
+          : null,
+    };
+  }
+
+  async claimPullRequestAnalysisJob(
+    workerId: string,
+    leaseSeconds: number,
+  ): Promise<PullRequestAnalysisJob | null> {
+    return withTransaction(this.pool, async (client) => {
+      const claimed = await client.query<{
+        id: string;
+        analysis_id: string;
+        repository_id: string;
+        workspace_id: string;
+        attempt_count: number;
+        max_attempts: number;
+      }>(
+        "WITH candidate AS (" +
+          "SELECT id FROM analysis_jobs WHERE job_type = 'pull_request_analysis' " +
+          "AND ((status = 'queued' AND available_at <= now()) " +
+          "OR (status = 'running' AND lease_expires_at < now())) " +
+          "AND attempt_count < max_attempts ORDER BY priority ASC, created_at ASC " +
+          "FOR UPDATE SKIP LOCKED LIMIT 1" +
+          ") UPDATE analysis_jobs jobs SET status = 'running', lease_owner = $1, " +
+          "lease_expires_at = now() + ($2 * interval '1 second'), attempt_count = attempt_count + 1, " +
+          "available_at = now(), " +
+          "started_at = COALESCE(started_at, now()), phase = 'starting', progress = 0, " +
+          "error_code = NULL, error_message = NULL, error_details_json = NULL, finished_at = NULL " +
+          "FROM candidate WHERE jobs.id = candidate.id RETURNING jobs.id, jobs.analysis_id, " +
+          "jobs.repository_id, jobs.workspace_id, jobs.attempt_count, jobs.max_attempts",
+        [workerId, leaseSeconds],
+      );
+      const row = claimed.rows[0];
+      if (!row) return null;
+      const detail = await client.query<{
+        owner_name: string;
+        repo_name: string;
+        clone_url: string;
+        pr_number: number;
+        title: string;
+        canonical_url: string;
+        base_sha: string;
+        head_sha: string;
+        parser_version: string;
+        algorithm_version: string;
+        provider_files_json: PullRequestFileChange[];
+      }>(
+        "SELECT r.owner_name, r.repo_name, r.clone_url, a.pr_number, a.title, a.canonical_url, " +
+          "a.base_sha, a.head_sha, a.parser_version, a.algorithm_version, a.provider_files_json " +
+          "FROM pull_request_analyses a JOIN repositories r ON r.id = a.repository_id " +
+          "WHERE a.id = $1",
+        [row.analysis_id],
+      );
+      const info = detail.rows[0];
+      if (!info)
+        throw new DomainError(
+          "PR_ANALYSIS_RESOURCE_MISSING",
+          "The PR analysis resource is missing.",
+        );
+      await client.query(
+        "UPDATE pull_request_analyses SET status = 'running', progress = 0, error_code = NULL, " +
+          "error_message = NULL, error_retryable = false, updated_at = now() WHERE id = $1",
+        [row.analysis_id],
+      );
+      await this.appendJobEvent(client, row.id, "started", {
+        phase: "starting",
+        progress: 0,
+        analysisId: row.analysis_id,
+      });
+      return {
+        id: row.id,
+        analysisId: row.analysis_id,
+        repositoryId: row.repository_id,
+        workspaceId: row.workspace_id,
+        owner: info.owner_name,
+        name: info.repo_name,
+        cloneUrl: info.clone_url,
+        prNumber: info.pr_number,
+        title: info.title,
+        canonicalUrl: info.canonical_url,
+        baseSha: info.base_sha,
+        headSha: info.head_sha,
+        parserVersion: info.parser_version,
+        algorithmVersion: info.algorithm_version,
+        providerFiles: info.provider_files_json ?? [],
+        attemptCount: row.attempt_count,
+        maxAttempts: row.max_attempts,
+      };
     });
   }
 
@@ -525,7 +1699,7 @@ export class RepoVistaStore {
 
   async getJob(jobId: string): Promise<Job | null> {
     const result = await this.pool.query<JobRow>(
-      "SELECT id, snapshot_id, job_type, status, phase, progress, processed, total, " +
+      "SELECT id, snapshot_id, analysis_id, job_type, status, phase, progress, processed, total, " +
         "attempt_count, max_attempts, error_code, error_message, " +
         "COALESCE((error_details_json->>'retryable')::boolean, false) " +
         "AND status IN ('queued', 'failed') AS error_retryable " +
@@ -725,13 +1899,15 @@ export class RepoVistaStore {
         "WITH candidate AS (" +
           "SELECT id FROM analysis_jobs " +
           "WHERE job_type = 'index_snapshot' " +
-          "AND (status = 'queued' OR (status = 'running' AND lease_expires_at < now())) " +
+          "AND ((status = 'queued' AND available_at <= now()) " +
+          "OR (status = 'running' AND lease_expires_at < now())) " +
           "AND attempt_count < max_attempts " +
           "ORDER BY priority ASC, created_at ASC " +
           "FOR UPDATE SKIP LOCKED LIMIT 1" +
           ") UPDATE analysis_jobs jobs SET " +
           "status = 'running', lease_owner = $1, " +
           "lease_expires_at = now() + ($2 * interval '1 second'), " +
+          "available_at = now(), " +
           "attempt_count = attempt_count + 1, started_at = COALESCE(started_at, now()), " +
           "phase = 'starting', progress = 0, processed = NULL, total = NULL, " +
           "error_code = NULL, error_message = NULL, error_details_json = NULL, finished_at = NULL " +
@@ -899,6 +2075,7 @@ export class RepoVistaStore {
         "UPDATE analysis_jobs SET status = $2, error_code = $3, error_message = $4, " +
           "error_details_json = jsonb_build_object('retryable', $5::boolean), " +
           "lease_owner = NULL, lease_expires_at = NULL, " +
+          "available_at = CASE WHEN $2 = 'queued' THEN now() + (LEAST(30, GREATEST(1, attempt_count * attempt_count)) * interval '1 second') ELSE now() END, " +
           "finished_at = CASE WHEN $2 = 'failed' THEN now() ELSE NULL END " +
           "WHERE id = $1",
         [jobId, shouldRetry ? "queued" : "failed", code, message, retryable],
@@ -1149,8 +2326,9 @@ export class RepoVistaStore {
         [snapshotId, JSON.stringify(indexed.stats)],
       );
       await client.query(
-        "UPDATE repositories SET latest_ready_snapshot_id = $2, " +
-          "default_branch = COALESCE(default_branch, $3), updated_at = now() WHERE id = $1",
+        "UPDATE repositories r SET latest_ready_snapshot_id = $2, " +
+          "default_branch = COALESCE(r.default_branch, $3), updated_at = now() " +
+          "FROM repository_snapshots s WHERE r.id = $1 AND s.id = $2 AND s.promote_latest = true",
         [repositoryId, snapshotId, indexed.branch],
       );
       await client.query(
@@ -1296,6 +2474,63 @@ export class RepoVistaStore {
       commitSha: row.commit_sha,
       blobHash: row.blob_hash,
       truncated,
+    };
+  }
+
+  async getSnapshotSymbolEvidence(
+    snapshotId: string,
+    symbolId: string,
+  ): Promise<SnapshotSymbolEvidence | null> {
+    const result = await this.pool.query<{
+      id: string;
+      snapshot_id: string;
+      commit_sha: string;
+      parser_version: string;
+      snapshot_file_id: string;
+      path: string;
+      language: string | null;
+      blob_hash: string;
+      inline_content: string;
+      stable_key: string;
+      kind: SnapshotSymbolEvidence["kind"];
+      name: string;
+      qualified_name: string | null;
+      signature: string | null;
+      start_line: number;
+      end_line: number;
+    }>(
+      "SELECT symbol.id, symbol.snapshot_id, snapshot.commit_sha, snapshot.parser_version, " +
+        "symbol.snapshot_file_id, file.path, file.language, file.blob_hash, blob.inline_content, " +
+        "symbol.stable_key, symbol.kind, symbol.name, symbol.qualified_name, symbol.signature, " +
+        "symbol.start_line, symbol.end_line FROM symbols symbol " +
+        "JOIN repository_snapshots snapshot ON snapshot.id = symbol.snapshot_id " +
+        "JOIN snapshot_files file ON file.id = symbol.snapshot_file_id " +
+        "JOIN content_blobs blob ON blob.hash = file.blob_hash " +
+        "WHERE symbol.snapshot_id = $1 AND symbol.id = $2 " +
+        "AND snapshot.status = 'ready' AND snapshot.commit_sha IS NOT NULL",
+      [snapshotId, symbolId],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    const content = sourceSlice(row.inline_content, row.start_line, row.end_line);
+    return {
+      id: row.id,
+      snapshotId: row.snapshot_id,
+      commitSha: row.commit_sha,
+      parserVersion: row.parser_version,
+      fileId: row.snapshot_file_id,
+      path: row.path,
+      language: row.language,
+      blobHash: row.blob_hash,
+      stableKey: row.stable_key,
+      kind: row.kind,
+      name: row.name,
+      qualifiedName: row.qualified_name,
+      signature: row.signature,
+      startLine: row.start_line,
+      endLine: row.end_line,
+      content,
+      contentHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
     };
   }
 

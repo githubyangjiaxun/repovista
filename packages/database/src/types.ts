@@ -7,6 +7,7 @@ import type {
   SnapshotStats,
 } from "@repovista/contracts";
 import type { GitHubRepositoryIdentity, IndexedRepository, ParsedFile } from "@repovista/domain";
+import type { ImpactComputation } from "@repovista/impact";
 
 export interface CreateImportInput {
   workspaceId: string;
@@ -21,6 +22,107 @@ export interface CreateImportResult {
   snapshotId: string;
   jobId: string;
   status: "queued";
+}
+
+export interface CreatePullRequestAnalysisInput {
+  workspaceId: string;
+  repositoryId: string;
+  prNumber: number;
+  title: string;
+  canonicalUrl: string;
+  baseSha: string;
+  headSha: string;
+  parserVersion: string;
+  algorithmVersion: string;
+  providerFiles: import("@repovista/contracts").PullRequestFileChange[];
+  requestedBaseSha?: string;
+  requestedHeadSha?: string;
+  forceRevision?: number;
+}
+
+export interface CreatePullRequestAnalysisResult {
+  analysisId: string;
+  jobId: string;
+  revision: number;
+  status: Job["status"];
+}
+
+export interface PullRequestAnalysisJob {
+  id: string;
+  analysisId: string;
+  repositoryId: string;
+  workspaceId: string;
+  owner: string;
+  name: string;
+  cloneUrl: string;
+  prNumber: number;
+  title: string;
+  canonicalUrl: string;
+  baseSha: string;
+  headSha: string;
+  parserVersion: string;
+  algorithmVersion: string;
+  providerFiles: import("@repovista/contracts").PullRequestFileChange[];
+  attemptCount: number;
+  maxAttempts: number;
+}
+
+export interface EnsureSnapshotForCommitInput {
+  repositoryId: string;
+  workspaceId: string;
+  commitSha: string;
+  parserVersion: string;
+  cloneRef?: string;
+}
+
+export interface EnsureSnapshotForCommitResult {
+  snapshotId: string;
+  jobId: string | null;
+  status: "ready" | "queued" | "running";
+}
+
+export interface PullRequestAnalysisMetadata {
+  id: string;
+  repositoryId: string;
+  workspaceId: string;
+  prNumber: number;
+  title: string;
+  canonicalUrl: string;
+  baseSha: string;
+  headSha: string;
+  parserVersion: string;
+  algorithmVersion: string;
+  revision: number;
+}
+
+export interface PullRequestAnalysisPage {
+  analysis: import("@repovista/contracts").PullRequestAnalysis;
+  files: import("@repovista/contracts").PullRequestFileChange[];
+  symbols: import("@repovista/contracts").PullRequestSymbolChange[];
+  impacts: import("@repovista/contracts").PullRequestImpact[];
+  nextCursor: string | null;
+}
+
+export interface CompletePullRequestAnalysisInput {
+  jobId: string;
+  analysisId: string;
+  workerId: string;
+  computation: ImpactComputation;
+  baseSnapshotId: string;
+  headSnapshotId: string;
+}
+
+export interface PullRequestAnalysisProgress {
+  phase: string;
+  progress: number;
+  message: string;
+}
+
+export interface PullRequestAnalysisCursor {
+  riskScore: number;
+  path: string;
+  startLine: number;
+  id: string;
 }
 
 export interface ClaimedIndexJob {

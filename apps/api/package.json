@@ -25,6 +25,7 @@
     "@repovista/exporter": "workspace:*",
     "@repovista/git": "workspace:*",
     "@repovista/graph": "workspace:*",
+    "@repovista/impact": "workspace:*",
     "@repovista/retrieval": "workspace:*",
     "fastify": "^5.0.0",
     "fastify-plugin": "^5.0.0",

@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { IndexedRepository } from "@repovista/domain";
 import { PUBLIC_WORKSPACE_ID } from "@repovista/domain";
+import { computePullRequestImpact } from "@repovista/impact";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDatabase } from "./migrate.js";
 import { createDatabasePool, type DatabasePool } from "./pool.js";
 import { RepoVistaStore } from "./store.js";
+import type { CreatePullRequestAnalysisInput } from "./types.js";
 
 const databaseUrl = process.env.DATABASE_TEST_URL;
 const integration = describe.runIf(databaseUrl !== undefined);
@@ -171,6 +173,19 @@ integration("RepoVistaStore with PostgreSQL", () => {
     expect(filePage.files).toHaveLength(1);
     expect(evidence[0]).toMatchObject({ path: "src/index.ts", symbol: "hello" });
     expect(fileEvidence[0]).toMatchObject({ path: "src/index.ts", symbol: null, startLine: 1 });
+    const functionSymbolId = graph?.symbols.find((symbol) => symbol.stableKey === functionKey)?.id;
+    if (!functionSymbolId) throw new Error("Expected the indexed function symbol.");
+    const symbolEvidence = await store.getSnapshotSymbolEvidence(job.snapshotId, functionSymbolId);
+    expect(symbolEvidence).toMatchObject({
+      id: functionSymbolId,
+      snapshotId: job.snapshotId,
+      commitSha: indexed.commitSha,
+      path: "src/index.ts",
+      name: "hello",
+      startLine: 2,
+      endLine: 4,
+    });
+    expect(symbolEvidence?.content).toContain("export function hello");
 
     const firstEvidence = evidence[0];
     if (!firstEvidence) throw new Error("Expected searchable evidence.");
@@ -500,5 +515,353 @@ integration("RepoVistaStore with PostgreSQL", () => {
       reason: "event_not_supported",
       repositoryId: null,
     });
+  });
+
+  it("persists PR impact evidence transactionally and paginates by a stable cursor", async () => {
+    const suffix = randomUUID();
+    const parserVersion = "integration-pr-impact-v1";
+    const algorithmVersion = "reverse-bfs-risk-v1";
+    const imported = await store.createRepositoryImport({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      identity: {
+        owner: "repovista-pr-test",
+        name: suffix,
+        canonicalUrl: `https://github.com/repovista-pr-test/${suffix}`,
+        cloneUrl: `https://github.com/repovista-pr-test/${suffix}.git`,
+      },
+      requestedRef: "base",
+      ignore: [],
+      parserVersion,
+    });
+    repositoryIds.add(imported.repositoryId);
+
+    const baseContent = [
+      "export function changed() {",
+      "  return 1;",
+      "}",
+      "",
+      "export function direct() {",
+      "  return changed();",
+      "}",
+    ].join("\n");
+    const headContent = [
+      "export function changed() {",
+      "  return 2;",
+      "}",
+      "",
+      "export function direct() {",
+      "  return changed();",
+      "}",
+    ].join("\n");
+    const indexSnapshot = async (requestedRef: string, commitSha: string, content: string) => {
+      const created =
+        requestedRef === "base"
+          ? imported
+          : await store.createRepositoryImport({
+              workspaceId: PUBLIC_WORKSPACE_ID,
+              identity: {
+                owner: "repovista-pr-test",
+                name: suffix,
+                canonicalUrl: `https://github.com/repovista-pr-test/${suffix}`,
+                cloneUrl: `https://github.com/repovista-pr-test/${suffix}.git`,
+              },
+              requestedRef,
+              ignore: [],
+              parserVersion,
+            });
+      const job = await store.claimIndexJob("pr-impact-indexer", 30);
+      expect(job?.id).toBe(created.jobId);
+      if (!job) throw new Error("Expected an index job.");
+      const contentHash = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+      const moduleKey = "module:src/index.ts";
+      const changedKey = "function:src/index.ts:changed:integration";
+      const directKey = "function:src/index.ts:direct:integration";
+      await store.completeIndexJob(job.id, job.snapshotId, job.repositoryId, "pr-impact-indexer", {
+        commitSha,
+        branch: requestedRef,
+        baseSnapshotId: null,
+        indexMode: "full",
+        treeHash: `sha256:${requestedRef}`,
+        files: [
+          {
+            path: "src/index.ts",
+            absolutePath: `/tmp/${suffix}/src/index.ts`,
+            language: "typescript",
+            byteSize: Buffer.byteLength(content),
+            lineCount: content.split("\n").length,
+            content,
+            contentHash,
+            isGenerated: false,
+          },
+        ],
+        parsedFiles: [
+          {
+            path: "src/index.ts",
+            moduleStableKey: moduleKey,
+            imports: [],
+            symbols: [
+              {
+                stableKey: moduleKey,
+                kind: "module",
+                name: "index.ts",
+                qualifiedName: "src/index.ts",
+                signature: null,
+                startLine: 1,
+                startColumn: 0,
+                endLine: 6,
+                endColumn: 0,
+                docText: null,
+                contentHash: `sha256:module-${requestedRef}`,
+              },
+              {
+                stableKey: changedKey,
+                kind: "function",
+                name: "changed",
+                qualifiedName: "changed",
+                signature: "changed()",
+                startLine: 1,
+                startColumn: 0,
+                endLine: 3,
+                endColumn: 1,
+                docText: null,
+                contentHash: `sha256:changed-${requestedRef}`,
+              },
+              {
+                stableKey: directKey,
+                kind: "function",
+                name: "direct",
+                qualifiedName: "direct",
+                signature: "direct()",
+                startLine: 5,
+                startColumn: 0,
+                endLine: 7,
+                endColumn: 1,
+                docText: null,
+                contentHash: "sha256:direct-stable",
+              },
+            ],
+            edges: [
+              {
+                fromStableKey: moduleKey,
+                targetStableKey: changedKey,
+                type: "contains",
+                confidence: 1,
+                evidence: {
+                  path: "src/index.ts",
+                  startLine: 1,
+                  endLine: 3,
+                  syntaxType: "contains",
+                },
+              },
+              {
+                fromStableKey: moduleKey,
+                targetStableKey: directKey,
+                type: "contains",
+                confidence: 1,
+                evidence: {
+                  path: "src/index.ts",
+                  startLine: 5,
+                  endLine: 7,
+                  syntaxType: "contains",
+                },
+              },
+              {
+                fromStableKey: directKey,
+                targetStableKey: changedKey,
+                type: "calls",
+                confidence: 1,
+                evidence: {
+                  path: "src/index.ts",
+                  startLine: 6,
+                  endLine: 6,
+                  syntaxType: "call",
+                },
+              },
+            ],
+          },
+        ],
+        stats: {
+          files: 1,
+          symbols: 3,
+          edges: 3,
+          languages: { typescript: 1 },
+          warnings: 0,
+          indexing: null,
+        },
+      });
+      return job.snapshotId;
+    };
+
+    const baseSnapshot = await indexSnapshot(
+      "base",
+      "1111111111111111111111111111111111111111",
+      baseContent,
+    );
+    const headSnapshot = await indexSnapshot(
+      "head",
+      "2222222222222222222222222222222222222222",
+      headContent,
+    );
+    const [baseGraph, headGraph] = await Promise.all([
+      store.getSnapshotGraphData(baseSnapshot),
+      store.getSnapshotGraphData(headSnapshot),
+    ]);
+    if (!baseGraph || !headGraph) throw new Error("Expected PR graphs.");
+    const analysisInput: CreatePullRequestAnalysisInput = {
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      repositoryId: imported.repositoryId,
+      prNumber: 42,
+      title: "Change changed result",
+      canonicalUrl: `https://github.com/repovista-pr-test/${suffix}/pull/42`,
+      baseSha: baseGraph.snapshot.commitSha ?? "",
+      headSha: headGraph.snapshot.commitSha ?? "",
+      parserVersion,
+      algorithmVersion,
+      providerFiles: [
+        {
+          path: "src/index.ts",
+          oldPath: null,
+          changeType: "modified",
+          baseBlobHash: null,
+          headBlobHash: null,
+          additions: 1,
+          deletions: 1,
+          binary: false,
+        },
+      ],
+    };
+    const [created, replay] = await Promise.all([
+      store.createPullRequestAnalysis(analysisInput),
+      store.createPullRequestAnalysis(analysisInput),
+    ]);
+    expect(replay).toMatchObject({ analysisId: created.analysisId, revision: created.revision });
+    expect(await store.getJob(created.jobId)).toMatchObject({
+      snapshotId: null,
+      analysisId: created.analysisId,
+      type: "pull_request_analysis",
+    });
+    const analysisJob = await store.claimPullRequestAnalysisJob("pr-impact-worker", 30);
+    expect(analysisJob).toMatchObject({ analysisId: created.analysisId });
+    if (!analysisJob) throw new Error("Expected a PR analysis job.");
+    const computation = computePullRequestImpact(
+      {
+        side: "base",
+        snapshotId: baseSnapshot,
+        commitSha: baseGraph.snapshot.commitSha ?? "",
+        files: baseGraph.files,
+        symbols: baseGraph.symbols,
+        edges: baseGraph.edges,
+      },
+      {
+        side: "head",
+        snapshotId: headSnapshot,
+        commitSha: headGraph.snapshot.commitSha ?? "",
+        files: headGraph.files,
+        symbols: headGraph.symbols,
+        edges: headGraph.edges,
+      },
+    );
+    await store.completePullRequestAnalysis({
+      jobId: analysisJob.id,
+      analysisId: created.analysisId,
+      workerId: "pr-impact-worker",
+      computation,
+      baseSnapshotId: baseSnapshot,
+      headSnapshotId: headSnapshot,
+    });
+    const ready = await store.getPullRequestAnalysis(created.analysisId);
+    expect(ready).toMatchObject({ status: "ready", stats: computation.stats });
+    const firstPage = await store.getPullRequestImpactPage(created.analysisId, 1);
+    expect(firstPage?.impacts).toHaveLength(1);
+    expect(firstPage?.nextCursor).toEqual(expect.any(String));
+    expect(firstPage?.impacts[0]?.evidence[0]?.id).toMatch(/^impact-evidence:/);
+    const impactWithPath =
+      firstPage?.impacts.find((impact) => impact.paths.length > 0) ??
+      (await store.getPullRequestImpactPage(created.analysisId, 100))?.impacts.find(
+        (impact) => impact.paths.length > 0,
+      );
+    expect(impactWithPath?.paths[0]?.evidenceId).toMatch(/^impact-evidence:/);
+    const secondPage = await store.getPullRequestImpactPage(
+      created.analysisId,
+      10,
+      firstPage?.nextCursor ?? undefined,
+    );
+    expect(secondPage?.impacts.length).toBeGreaterThan(0);
+    expect(new Set(secondPage?.impacts.map((impact) => impact.id)).size).toBe(
+      secondPage?.impacts.length,
+    );
+
+    const invalidRevision = await store.createPullRequestAnalysis({
+      ...analysisInput,
+      forceRevision: 2,
+    });
+    const invalidJob = await store.claimPullRequestAnalysisJob("pr-impact-worker", 30);
+    expect(invalidJob).toMatchObject({ analysisId: invalidRevision.analysisId });
+    if (!invalidJob) throw new Error("Expected the invalid revision job.");
+    const corruptedComputation = structuredClone(computation);
+    const corruptedEvidence = corruptedComputation.impacts
+      .flatMap((impact) => impact.evidence)
+      .at(0);
+    if (!corruptedEvidence) throw new Error("Expected fixed evidence.");
+    corruptedEvidence.quote = `${corruptedEvidence.quote}\ncorrupted`;
+    await expect(
+      store.completePullRequestAnalysis({
+        jobId: invalidJob.id,
+        analysisId: invalidRevision.analysisId,
+        workerId: "pr-impact-worker",
+        computation: corruptedComputation,
+        baseSnapshotId: baseSnapshot,
+        headSnapshotId: headSnapshot,
+      }),
+    ).rejects.toMatchObject({ code: "PR_EVIDENCE_INVARIANT_FAILED" });
+    const rolledBack = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM pull_request_impacts WHERE analysis_id = $1",
+      [invalidRevision.analysisId],
+    );
+    expect(rolledBack.rows[0]?.count).toBe("0");
+    await store.failPullRequestAnalysis(
+      invalidJob.id,
+      invalidRevision.analysisId,
+      "pr-impact-worker",
+      "PR_EVIDENCE_INVARIANT_FAILED",
+      "Corrupted evidence was rejected.",
+      false,
+    );
+
+    const deferredRevision = await store.createPullRequestAnalysis({
+      ...analysisInput,
+      forceRevision: 3,
+    });
+    const deferredJob = await store.claimPullRequestAnalysisJob("pr-impact-worker", 30);
+    expect(deferredJob).toMatchObject({ analysisId: deferredRevision.analysisId });
+    if (!deferredJob) throw new Error("Expected the deferred revision job.");
+    await store.deferPullRequestAnalysis(
+      deferredJob.id,
+      deferredRevision.analysisId,
+      "pr-impact-worker",
+      "Waiting for immutable snapshots.",
+    );
+    expect(await store.claimPullRequestAnalysisJob("pr-impact-worker", 30)).toBeNull();
+    const deferredAvailability = await pool.query<{ delayed: boolean }>(
+      "SELECT available_at > now() AS delayed FROM analysis_jobs WHERE id = $1",
+      [deferredJob.id],
+    );
+    expect(deferredAvailability.rows[0]?.delayed).toBe(true);
+
+    const ensured = await Promise.all([
+      store.ensureSnapshotForCommit({
+        repositoryId: imported.repositoryId,
+        workspaceId: PUBLIC_WORKSPACE_ID,
+        commitSha: "3333333333333333333333333333333333333333",
+        parserVersion,
+      }),
+      store.ensureSnapshotForCommit({
+        repositoryId: imported.repositoryId,
+        workspaceId: PUBLIC_WORKSPACE_ID,
+        commitSha: "3333333333333333333333333333333333333333",
+        parserVersion,
+      }),
+    ]);
+    expect(ensured[0]).toEqual(ensured[1]);
   });
 });

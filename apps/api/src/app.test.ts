@@ -11,6 +11,40 @@ const jobId = "01900000-0000-7000-8000-000000000003";
 const fileId = "01900000-0000-7000-8000-000000000004";
 const symbolId = "01900000-0000-7000-8000-000000000005";
 const messageId = "01900000-0000-7000-8000-000000000006";
+const analysisId = "01900000-0000-7000-8000-000000000007";
+const baseSnapshotId = "01900000-0000-7000-8000-000000000008";
+const headSnapshotId = "01900000-0000-7000-8000-000000000009";
+const baseSha = "1111111111111111111111111111111111111111";
+const headSha = "2222222222222222222222222222222222222222";
+
+const pullRequestAnalysis = {
+  id: analysisId,
+  repositoryId,
+  prNumber: 42,
+  title: "Change greeting",
+  url: "https://github.com/acme/demo/pull/42",
+  baseSha,
+  headSha,
+  baseSnapshotId,
+  headSnapshotId,
+  parserVersion: "tree-sitter-ts-js-py-go-v1",
+  algorithmVersion: "reverse-bfs-risk-v1",
+  revision: 1,
+  status: "ready" as const,
+  progress: 1,
+  stats: {
+    changedFiles: 1,
+    changedSymbols: 1,
+    directImpacts: 1,
+    transitiveImpacts: 0,
+    unknownImpacts: 0,
+    truncated: false,
+  },
+  failure: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:01:00.000Z",
+  completedAt: "2026-01-01T00:01:00.000Z",
+};
 
 const repository = {
   id: repositoryId,
@@ -59,14 +93,30 @@ function createStore(): RepoVistaStore {
       jobId,
       status: "queued" as const,
     })),
+    createPullRequestAnalysis: vi.fn(async () => ({
+      analysisId,
+      jobId,
+      revision: 1,
+      status: "queued" as const,
+    })),
     listRepositories: vi.fn(async () => [repository]),
     getRepository: vi.fn(async () => repository),
     listSnapshots: vi.fn(async () => [snapshot]),
     getSnapshot: vi.fn(async () => snapshot),
+    getPullRequestAnalysis: vi.fn(async () => pullRequestAnalysis),
+    getPullRequestAnalysisJobId: vi.fn(async () => jobId),
+    getPullRequestImpactPage: vi.fn(async () => ({
+      analysis: pullRequestAnalysis,
+      files: [],
+      symbols: [],
+      impacts: [],
+      nextCursor: null,
+    })),
     requestCancellation: vi.fn(async () => undefined),
     getJob: vi.fn(async () => ({
       id: jobId,
       snapshotId,
+      analysisId: null,
       type: "index_snapshot",
       status: "succeeded" as const,
       phase: "completed",
@@ -126,6 +176,25 @@ function createStore(): RepoVistaStore {
       commitSha: snapshot.commitSha,
       blobHash: "sha256:file",
       truncated: false,
+    })),
+    getSnapshotSymbolEvidence: vi.fn(async () => ({
+      id: symbolId,
+      snapshotId,
+      commitSha: snapshot.commitSha,
+      parserVersion: snapshot.parserVersion,
+      fileId,
+      path: "src/index.ts",
+      language: "typescript",
+      blobHash: "sha256:file",
+      stableKey: "module:src/index.ts",
+      kind: "module" as const,
+      name: "index.ts",
+      qualifiedName: "src/index.ts",
+      signature: null,
+      startLine: 1,
+      endLine: 1,
+      content: "export function hello() { return 1; }",
+      contentHash: "sha256:symbol-evidence",
     })),
     searchEvidence: vi.fn(async () => [
       {
@@ -416,6 +485,103 @@ describe("RepoVista API", () => {
     expect(result.headers["x-request-id"]).toBeTruthy();
   });
 
+  it("fetches public PR metadata/files and queues an immutable impact analysis", async () => {
+    const store = createStore();
+    const { app } = createTestApp(store, { GITHUB_API_ORIGIN: "https://api.github.test" });
+    openApps.push(app);
+    const fetcher = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith("/pulls/42")) {
+        return new Response(
+          JSON.stringify({
+            number: 42,
+            title: "Change greeting",
+            html_url: "https://github.com/acme/demo/pull/42",
+            base: { sha: baseSha, repo: { full_name: "acme/demo", private: false } },
+            head: { sha: headSha },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      expect(url).toContain("/pulls/42/files?");
+      return new Response(
+        JSON.stringify([
+          {
+            filename: "src/index.ts",
+            status: "modified",
+            additions: 2,
+            deletions: 1,
+            patch: "@@ -1 +1 @@",
+          },
+        ]),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetcher);
+
+    const result = await app.inject({
+      method: "POST",
+      url: `/v1/repositories/${repositoryId}/pull-requests`,
+      payload: { number: 42 },
+    });
+
+    expect(result.statusCode).toBe(202);
+    expect(result.json().data).toMatchObject({ analysisId, jobId, revision: 1, status: "queued" });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(store.createPullRequestAnalysis).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repositoryId,
+        prNumber: 42,
+        baseSha,
+        headSha,
+        providerFiles: [expect.objectContaining({ path: "src/index.ts", additions: 2 })],
+      }),
+    );
+  });
+
+  it("serves analysis status and cursor-aware impact data", async () => {
+    const store = createStore();
+    const { app } = createTestApp(store);
+    openApps.push(app);
+
+    const status = await app.inject({
+      method: "GET",
+      url: `/v1/pull-request-analyses/${analysisId}`,
+    });
+    expect(status.statusCode).toBe(200);
+    expect(status.json().data).toMatchObject({ id: analysisId, status: "ready" });
+
+    const impact = await app.inject({
+      method: "GET",
+      url: `/v1/pull-request-analyses/${analysisId}/impact?limit=10&cursor=next_page_token`,
+    });
+    expect(impact.statusCode).toBe(200);
+    expect(store.getPullRequestImpactPage).toHaveBeenCalledWith(analysisId, 10, "next_page_token");
+  });
+
+  it("maps GitHub rate limits and malformed PR responses to stable errors", async () => {
+    const { app } = createTestApp(createStore(), { GITHUB_API_ORIGIN: "https://api.github.test" });
+    openApps.push(app);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ message: "rate limit" }), {
+            status: 403,
+            headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": "2000000000" },
+          }),
+      ),
+    );
+
+    const result = await app.inject({
+      method: "POST",
+      url: `/v1/repositories/${repositoryId}/pull-requests`,
+      payload: { number: 42 },
+    });
+    expect(result.statusCode).toBe(429);
+    expect(result.json().error).toMatchObject({ code: "GITHUB_RATE_LIMITED", retryable: true });
+  });
+
   it.each([
     ["a ref that starts with an option", "--upload-pack=malicious"],
     ["a ref with parent traversal", "feature..main"],
@@ -476,6 +642,25 @@ describe("RepoVista API", () => {
       snapshot: { id: snapshotId, commitSha: snapshot.commitSha },
     });
     expect(result.json().data.nodes).toHaveLength(1);
+  });
+
+  it("returns symbol evidence only for the fixed ready snapshot", async () => {
+    const { app, store } = createTestApp();
+    openApps.push(app);
+    const result = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/symbols/${symbolId}`,
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.json().data).toMatchObject({
+      id: symbolId,
+      snapshotId,
+      commitSha: snapshot.commitSha,
+      path: "src/index.ts",
+      startLine: 1,
+    });
+    expect(store.getSnapshotSymbolEvidence).toHaveBeenCalledWith(snapshotId, symbolId);
   });
 
   it("downloads deterministic Markdown and safely escaped SVG for the requested snapshot", async () => {

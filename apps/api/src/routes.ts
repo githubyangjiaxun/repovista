@@ -5,6 +5,7 @@ import type { AppConfig } from "@repovista/config";
 import type { GraphLevel, RelationType } from "@repovista/contracts";
 import {
   askRequestSchema,
+  createPullRequestAnalysisRequestSchema,
   createRepositoryRequestSchema,
   createShareRequestSchema,
   graphLevelSchema,
@@ -22,14 +23,18 @@ import {
 } from "@repovista/exporter";
 import { parseGitHubUrl } from "@repovista/git";
 import { buildGraphView, type GraphView } from "@repovista/graph";
+import { IMPACT_ALGORITHM_VERSION } from "@repovista/impact";
 import { reciprocalRankFusion, tokenizeQuestion } from "@repovista/retrieval";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { fetchPublicPullRequest } from "./github.js";
 
 const repositoryParamsSchema = z.object({ repositoryId: idSchema });
 const snapshotParamsSchema = z.object({ snapshotId: idSchema });
+const snapshotSymbolParamsSchema = z.object({ snapshotId: idSchema, symbolId: idSchema });
 const jobParamsSchema = z.object({ jobId: idSchema });
 const shareParamsSchema = z.object({ slug: z.string().min(3).max(300) });
+const pullRequestAnalysisParamsSchema = z.object({ analysisId: idSchema });
 
 const githubWebhookHeadersSchema = z.object({
   delivery: z.string().regex(/^[A-Za-z0-9_-]{1,200}$/),
@@ -91,6 +96,11 @@ const askBodySchema = askRequestSchema.extend({
 
 const eventQuerySchema = z.object({
   after: z.coerce.number().int().nonnegative().default(0),
+});
+
+const impactQuerySchema = z.object({
+  cursor: z.string().min(1).max(1_000).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 
 function parseInput<T extends z.ZodType>(schema: T, value: unknown): z.infer<T> {
@@ -522,6 +532,119 @@ export function registerRoutes(
     return response(request, await store.listSnapshots(repositoryId));
   });
 
+  app.post(
+    "/v1/repositories/:repositoryId/pull-requests",
+    {
+      config: {
+        rateLimit: { max: 10, timeWindow: "1 hour" },
+      },
+    },
+    async (request, reply) => {
+      const { repositoryId } = parseInput(repositoryParamsSchema, request.params);
+      const body = parseInput(createPullRequestAnalysisRequestSchema, request.body);
+      const repository = await store.getRepository(repositoryId);
+      if (!repository) {
+        throw new DomainError("REPOSITORY_NOT_FOUND", "The requested repository does not exist.");
+      }
+      const metadata = await fetchPublicPullRequest(config, repository, body.number);
+      const result = await store.createPullRequestAnalysis({
+        workspaceId: PUBLIC_WORKSPACE_ID,
+        repositoryId,
+        prNumber: metadata.number,
+        title: metadata.title,
+        canonicalUrl: metadata.url,
+        baseSha: metadata.baseSha,
+        headSha: metadata.headSha,
+        parserVersion: PARSER_VERSION,
+        algorithmVersion: IMPACT_ALGORITHM_VERSION,
+        providerFiles: metadata.files,
+      });
+      if (result.status === "queued" || result.status === "running") reply.code(202);
+      return response(request, result);
+    },
+  );
+
+  app.get("/v1/pull-request-analyses/:analysisId", async (request) => {
+    const { analysisId } = parseInput(pullRequestAnalysisParamsSchema, request.params);
+    const analysis = await store.getPullRequestAnalysis(analysisId);
+    if (!analysis) {
+      throw new DomainError("PR_ANALYSIS_NOT_FOUND", "The pull request analysis does not exist.");
+    }
+    return response(request, analysis);
+  });
+
+  app.get("/v1/pull-request-analyses/:analysisId/impact", async (request) => {
+    const { analysisId } = parseInput(pullRequestAnalysisParamsSchema, request.params);
+    const { cursor, limit } = parseInput(impactQuerySchema, request.query);
+    const page = await store.getPullRequestImpactPage(analysisId, limit, cursor);
+    if (!page) {
+      throw new DomainError("PR_ANALYSIS_NOT_FOUND", "The pull request analysis does not exist.");
+    }
+    return response(request, page);
+  });
+
+  app.get("/v1/pull-request-analyses/:analysisId/events", async (request, reply) => {
+    const { analysisId } = parseInput(pullRequestAnalysisParamsSchema, request.params);
+    const query = parseInput(eventQuerySchema, request.query);
+    const header = request.headers["last-event-id"];
+    const headerId = typeof header === "string" ? Number.parseInt(header, 10) : Number.NaN;
+    let afterId = Number.isFinite(headerId) ? headerId : query.after;
+    const analysis = await store.getPullRequestAnalysis(analysisId);
+    const jobId = await store.getPullRequestAnalysisJobId(analysisId);
+    if (!analysis || !jobId) {
+      throw new DomainError("PR_ANALYSIS_NOT_FOUND", "The pull request analysis does not exist.");
+    }
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "X-Accel-Buffering": "no",
+      "X-Request-ID": request.id,
+    });
+    reply.raw.write("retry: 1000\n\n");
+    for (let cycle = 0; cycle < 25 && !request.raw.destroyed; cycle += 1) {
+      const events = await store.listJobEvents(jobId, afterId);
+      for (const event of events) {
+        reply.raw.write(sseEvent(event.id, event.type, event.payload));
+        afterId = event.id;
+      }
+      const current = await store.getPullRequestAnalysis(analysisId);
+      if (current && ["ready", "failed", "cancelled"].includes(current.status)) break;
+      if (events.length === 0) reply.raw.write(": keep-alive\n\n");
+      await wait(1_000);
+    }
+    if (!request.raw.destroyed) reply.raw.end();
+  });
+
+  app.post("/v1/pull-request-analyses/:analysisId/rerun", async (request, reply) => {
+    const { analysisId } = parseInput(pullRequestAnalysisParamsSchema, request.params);
+    const analysis = await store.getPullRequestAnalysis(analysisId);
+    if (!analysis) {
+      throw new DomainError("PR_ANALYSIS_NOT_FOUND", "The pull request analysis does not exist.");
+    }
+    const repository = await store.getRepository(analysis.repositoryId);
+    if (!repository) {
+      throw new DomainError("REPOSITORY_NOT_FOUND", "The requested repository does not exist.");
+    }
+    const metadata = await fetchPublicPullRequest(config, repository, analysis.prNumber);
+    const result = await store.createPullRequestAnalysis({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      repositoryId: repository.id,
+      prNumber: metadata.number,
+      title: metadata.title,
+      canonicalUrl: metadata.url,
+      baseSha: metadata.baseSha,
+      headSha: metadata.headSha,
+      parserVersion: PARSER_VERSION,
+      algorithmVersion: IMPACT_ALGORITHM_VERSION,
+      providerFiles: metadata.files,
+      forceRevision: analysis.revision + 1,
+    });
+    reply.code(202);
+    return response(request, result);
+  });
+
   app.get("/v1/snapshots/:snapshotId", async (request) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
     const snapshot = await store.getSnapshot(snapshotId);
@@ -660,6 +783,20 @@ export function registerRoutes(
       throw new DomainError("SOURCE_NOT_FOUND", "The requested source file does not exist.");
     }
     return response(request, source);
+  });
+
+  app.get("/v1/snapshots/:snapshotId/symbols/:symbolId", async (request) => {
+    const { snapshotId, symbolId } = parseInput(snapshotSymbolParamsSchema, request.params);
+    const snapshot = await store.getSnapshot(snapshotId);
+    requireReadySnapshot(snapshot);
+    const symbol = await store.getSnapshotSymbolEvidence(snapshotId, symbolId);
+    if (!symbol) {
+      throw new DomainError(
+        "SYMBOL_NOT_FOUND",
+        "The requested symbol does not belong to this snapshot.",
+      );
+    }
+    return response(request, symbol);
   });
 
   app.get("/v1/snapshots/:snapshotId/search", async (request) => {

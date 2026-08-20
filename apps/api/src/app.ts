@@ -93,17 +93,22 @@ export function buildApp(dependencies: AppDependencies = {}): {
     if (isDomainError(error)) {
       const status = error.code.endsWith("NOT_FOUND")
         ? 404
-        : error.code === "GITHUB_WEBHOOK_SIGNATURE_INVALID"
-          ? 401
-          : error.code === "GITHUB_APP_DISABLED"
-            ? 503
-            : error.code === "SNAPSHOT_NOT_READY" ||
-                error.code === "GITHUB_WEBHOOK_DELIVERY_CONFLICT" ||
-                error.code === "EXPORT_NOT_AVAILABLE"
-              ? 409
-              : error.code.startsWith("AI_")
-                ? 502
-                : 400;
+        : error.code === "GITHUB_RATE_LIMITED"
+          ? 429
+          : error.code === "GITHUB_WEBHOOK_SIGNATURE_INVALID"
+            ? 401
+            : error.code === "GITHUB_APP_DISABLED"
+              ? 503
+              : error.code === "SNAPSHOT_NOT_READY" ||
+                  error.code === "GITHUB_WEBHOOK_DELIVERY_CONFLICT" ||
+                  error.code === "EXPORT_NOT_AVAILABLE" ||
+                  error.code === "PR_ANALYSIS_REVISION_CONFLICT"
+                ? 409
+                : error.code === "GITHUB_API_FAILED"
+                  ? 502
+                  : error.code.startsWith("AI_")
+                    ? 502
+                    : 400;
       reply.status(status).send({
         error: {
           code: error.code,

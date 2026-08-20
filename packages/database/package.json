@@ -26,6 +26,7 @@
     "@repovista/config": "workspace:*",
     "@repovista/contracts": "workspace:*",
     "@repovista/domain": "workspace:*",
+    "@repovista/impact": "workspace:*",
     "pg": "^8.0.0"
   },
   "devDependencies": {

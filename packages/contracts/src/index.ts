@@ -147,7 +147,8 @@ export type Snapshot = z.infer<typeof snapshotSchema>;
 
 export const jobSchema = z.object({
   id: idSchema,
-  snapshotId: idSchema,
+  snapshotId: idSchema.nullable(),
+  analysisId: idSchema.nullable().default(null),
   type: z.string(),
   status: jobStatusSchema,
   phase: z.string().nullable(),
@@ -217,6 +218,27 @@ export const sourceFileSchema = z.object({
 });
 export type SourceFile = z.infer<typeof sourceFileSchema>;
 
+export const snapshotSymbolEvidenceSchema = z.object({
+  id: idSchema,
+  snapshotId: idSchema,
+  commitSha: commitShaSchema,
+  parserVersion: z.string(),
+  fileId: idSchema,
+  path: z.string(),
+  language: z.string().nullable(),
+  blobHash: z.string(),
+  stableKey: z.string(),
+  kind: symbolKindSchema,
+  name: z.string(),
+  qualifiedName: z.string().nullable(),
+  signature: z.string().nullable(),
+  startLine: z.number().int().positive(),
+  endLine: z.number().int().positive(),
+  content: z.string(),
+  contentHash: z.string(),
+});
+export type SnapshotSymbolEvidence = z.infer<typeof snapshotSymbolEvidenceSchema>;
+
 export const evidenceSchema = z.object({
   id: z.string(),
   snapshotId: idSchema,
@@ -268,6 +290,179 @@ export const askRequestSchema = z.object({
   model: z.string().max(200).optional(),
 });
 export type AskRequest = z.infer<typeof askRequestSchema>;
+
+export const pullRequestAnalysisStatusSchema = z.enum([
+  "queued",
+  "running",
+  "ready",
+  "failed",
+  "cancelled",
+]);
+export type PullRequestAnalysisStatus = z.infer<typeof pullRequestAnalysisStatusSchema>;
+
+export const pullRequestChangeTypeSchema = z.enum([
+  "added",
+  "modified",
+  "deleted",
+  "renamed",
+  "unchanged",
+]);
+export type PullRequestChangeType = z.infer<typeof pullRequestChangeTypeSchema>;
+
+export const pullRequestSymbolChangeTypeSchema = z.enum(["added", "modified", "deleted", "moved"]);
+export type PullRequestSymbolChangeType = z.infer<typeof pullRequestSymbolChangeTypeSchema>;
+
+export const pullRequestRiskLevelSchema = z.enum(["low", "medium", "high", "critical"]);
+export type PullRequestRiskLevel = z.infer<typeof pullRequestRiskLevelSchema>;
+
+export const pullRequestSnapshotSideSchema = z.enum(["base", "head"]);
+export type PullRequestSnapshotSide = z.infer<typeof pullRequestSnapshotSideSchema>;
+
+export const pullRequestImpactTypeSchema = z.enum(["changed", "direct", "transitive", "unknown"]);
+export type PullRequestImpactType = z.infer<typeof pullRequestImpactTypeSchema>;
+
+export const pullRequestRiskBreakdownSchema = z.object({
+  changedSymbolWeight: z.number().min(0).max(1),
+  reverseFanInWeight: z.number().min(0).max(1),
+  publicApiWeight: z.number().min(0).max(1),
+  languageWeight: z.number().min(0).max(1),
+});
+export type PullRequestRiskBreakdown = z.infer<typeof pullRequestRiskBreakdownSchema>;
+
+export const pullRequestStatsSchema = z.object({
+  changedFiles: z.number().int().nonnegative().default(0),
+  changedSymbols: z.number().int().nonnegative().default(0),
+  directImpacts: z.number().int().nonnegative().default(0),
+  transitiveImpacts: z.number().int().nonnegative().default(0),
+  unknownImpacts: z.number().int().nonnegative().default(0),
+  truncated: z.boolean().default(false),
+});
+export type PullRequestStats = z.infer<typeof pullRequestStatsSchema>;
+
+export const pullRequestAnalysisSchema = z.object({
+  id: idSchema,
+  repositoryId: idSchema,
+  prNumber: z.number().int().positive(),
+  title: z.string(),
+  url: z.url(),
+  baseSha: commitShaSchema.nullable(),
+  headSha: commitShaSchema.nullable(),
+  baseSnapshotId: idSchema.nullable(),
+  headSnapshotId: idSchema.nullable(),
+  parserVersion: z.string(),
+  algorithmVersion: z.string(),
+  revision: z.number().int().positive(),
+  status: pullRequestAnalysisStatusSchema,
+  progress: z.number().min(0).max(1),
+  stats: pullRequestStatsSchema,
+  failure: z.object({ code: z.string(), message: z.string(), retryable: z.boolean() }).nullable(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+  completedAt: z.iso.datetime().nullable(),
+});
+export type PullRequestAnalysis = z.infer<typeof pullRequestAnalysisSchema>;
+
+export const createPullRequestAnalysisRequestSchema = z.object({
+  number: z.coerce.number().int().positive().max(1_000_000),
+});
+export type CreatePullRequestAnalysisRequest = z.infer<
+  typeof createPullRequestAnalysisRequestSchema
+>;
+
+export const createPullRequestAnalysisResponseSchema = z.object({
+  analysisId: idSchema,
+  jobId: idSchema,
+  revision: z.number().int().positive(),
+  status: jobStatusSchema,
+});
+export type CreatePullRequestAnalysisResponse = z.infer<
+  typeof createPullRequestAnalysisResponseSchema
+>;
+
+export const pullRequestFileChangeSchema = z.object({
+  path: z.string(),
+  oldPath: z.string().nullable(),
+  changeType: pullRequestChangeTypeSchema,
+  baseBlobHash: z.string().nullable(),
+  headBlobHash: z.string().nullable(),
+  additions: z.number().int().nonnegative().nullable(),
+  deletions: z.number().int().nonnegative().nullable(),
+  binary: z.boolean(),
+});
+export type PullRequestFileChange = z.infer<typeof pullRequestFileChangeSchema>;
+
+export const pullRequestSymbolChangeSchema = z.object({
+  id: z.string(),
+  side: pullRequestSnapshotSideSchema,
+  symbolId: idSchema.nullable(),
+  stableKey: z.string(),
+  path: z.string(),
+  name: z.string(),
+  kind: z.string(),
+  startLine: z.number().int().positive(),
+  endLine: z.number().int().positive(),
+  changeType: pullRequestSymbolChangeTypeSchema,
+});
+export type PullRequestSymbolChange = z.infer<typeof pullRequestSymbolChangeSchema>;
+
+export const pullRequestImpactEvidenceSchema = z.object({
+  id: z.string(),
+  snapshotId: idSchema,
+  commitSha: commitShaSchema,
+  fileId: idSchema,
+  symbolId: idSchema.nullable(),
+  path: z.string(),
+  startLine: z.number().int().positive(),
+  endLine: z.number().int().positive(),
+  quote: z.string(),
+  contentHash: z.string(),
+  relationType: relationTypeSchema.nullable(),
+  algorithmVersion: z.string(),
+});
+export type PullRequestImpactEvidence = z.infer<typeof pullRequestImpactEvidenceSchema>;
+
+export const pullRequestImpactPathSchema = z.object({
+  ordinal: z.number().int().nonnegative(),
+  fromSymbolId: idSchema.nullable(),
+  toSymbolId: idSchema.nullable(),
+  fromPath: z.string().nullable(),
+  toPath: z.string().nullable(),
+  relationType: relationTypeSchema,
+  confidence: z.number().min(0).max(1),
+  evidenceId: z.string().nullable(),
+});
+export type PullRequestImpactPath = z.infer<typeof pullRequestImpactPathSchema>;
+
+export const pullRequestImpactSchema = z.object({
+  id: idSchema,
+  analysisId: idSchema,
+  side: pullRequestSnapshotSideSchema,
+  symbolId: idSchema.nullable(),
+  stableKey: z.string(),
+  path: z.string(),
+  name: z.string(),
+  kind: z.string(),
+  startLine: z.number().int().positive(),
+  endLine: z.number().int().positive(),
+  impactType: pullRequestImpactTypeSchema,
+  distance: z.number().int().nonnegative(),
+  riskScore: z.number().min(0).max(1),
+  riskLevel: pullRequestRiskLevelSchema,
+  riskBreakdown: pullRequestRiskBreakdownSchema,
+  truncated: z.boolean(),
+  paths: z.array(pullRequestImpactPathSchema),
+  evidence: z.array(pullRequestImpactEvidenceSchema),
+});
+export type PullRequestImpact = z.infer<typeof pullRequestImpactSchema>;
+
+export const pullRequestImpactResponseSchema = z.object({
+  analysis: pullRequestAnalysisSchema,
+  files: z.array(pullRequestFileChangeSchema),
+  symbols: z.array(pullRequestSymbolChangeSchema),
+  impacts: z.array(pullRequestImpactSchema),
+  nextCursor: z.string().nullable(),
+});
+export type PullRequestImpactResponse = z.infer<typeof pullRequestImpactResponseSchema>;
 
 export const createShareRequestSchema = z.object({
   snapshotId: idSchema,

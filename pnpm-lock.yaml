@@ -65,6 +65,9 @@ importers:
       '@repovista/graph':
         specifier: workspace:*
         version: link:../../packages/graph
+      '@repovista/impact':
+        specifier: workspace:*
+        version: link:../../packages/impact
       '@repovista/retrieval':
         specifier: workspace:*
         version: link:../../packages/retrieval
@@ -153,6 +156,9 @@ importers:
       '@repovista/graph':
         specifier: workspace:*
         version: link:../../packages/graph
+      '@repovista/impact':
+        specifier: workspace:*
+        version: link:../../packages/impact
       '@repovista/parser':
         specifier: workspace:*
         version: link:../../packages/parser
@@ -198,6 +204,9 @@ importers:
       '@repovista/domain':
         specifier: workspace:*
         version: link:../domain
+      '@repovista/impact':
+        specifier: workspace:*
+        version: link:../impact
       pg:
         specifier: ^8.0.0
         version: 8.23.0
@@ -235,6 +244,12 @@ importers:
       '@repovista/domain':
         specifier: workspace:*
         version: link:../domain
+
+  packages/impact:
+    dependencies:
+      '@repovista/contracts':
+        specifier: workspace:*
+        version: link:../contracts
 
   packages/parser:
     dependencies:
