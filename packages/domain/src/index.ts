@@ -108,7 +108,7 @@ export interface JobProgress {
 }
 
 export interface RetrievalResult extends Evidence {
-  source: "symbol" | "text" | "graph";
+  source: "symbol" | "text" | "semantic" | "graph";
 }
 
 export interface ModelAnswerDraft {

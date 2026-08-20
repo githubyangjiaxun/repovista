@@ -255,6 +255,125 @@ export const evidenceSchema = z.object({
 });
 export type Evidence = z.infer<typeof evidenceSchema>;
 
+export const retrievalModeSchema = z.enum(["text", "symbol", "semantic", "hybrid"]);
+export type RetrievalMode = z.infer<typeof retrievalModeSchema>;
+
+export const retrievalChannelSchema = z.enum(["text", "symbol", "semantic"]);
+export type RetrievalChannel = z.infer<typeof retrievalChannelSchema>;
+
+export const embeddingProviderSchema = z.enum(["ollama", "openai-compatible"]);
+export type EmbeddingProvider = z.infer<typeof embeddingProviderSchema>;
+
+export const embeddingIndexStatusSchema = z.enum([
+  "queued",
+  "running",
+  "ready",
+  "failed",
+  "cancelled",
+]);
+export type EmbeddingIndexStatus = z.infer<typeof embeddingIndexStatusSchema>;
+
+export const embeddingIndexSchema = z.object({
+  id: idSchema,
+  snapshotId: idSchema,
+  provider: embeddingProviderSchema,
+  model: z.string().min(1).max(200),
+  inputVersion: z.string().min(1).max(100),
+  status: embeddingIndexStatusSchema,
+  dimensions: z.number().int().min(1).max(16_000).nullable(),
+  totalChunks: z.number().int().nonnegative(),
+  embeddedChunks: z.number().int().nonnegative(),
+  revision: z.number().int().positive(),
+  jobId: idSchema.nullable(),
+  failure: z
+    .object({
+      code: z.string(),
+      message: z.string(),
+      retryable: z.boolean(),
+    })
+    .nullable(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+  readyAt: z.iso.datetime().nullable(),
+});
+export type EmbeddingIndex = z.infer<typeof embeddingIndexSchema>;
+
+export const retrievalUnavailableReasonSchema = z.enum([
+  "provider_disabled",
+  "index_missing",
+  "index_building",
+  "index_failed",
+  "model_mismatch",
+  "provider_unavailable",
+  "dimension_mismatch",
+]);
+export type RetrievalUnavailableReason = z.infer<typeof retrievalUnavailableReasonSchema>;
+
+export const retrievalChannelTraceSchema = z.object({
+  channel: retrievalChannelSchema,
+  status: z.enum(["used", "skipped", "unavailable", "failed"]),
+  candidateCount: z.number().int().nonnegative(),
+  reason: retrievalUnavailableReasonSchema.nullable(),
+  latencyMs: z.number().int().nonnegative().nullable(),
+});
+export type RetrievalChannelTrace = z.infer<typeof retrievalChannelTraceSchema>;
+
+export const retrievalTraceSchema = z.object({
+  requestedMode: retrievalModeSchema,
+  usedChannels: z.array(retrievalChannelSchema),
+  degraded: z.boolean(),
+  degradationReason: retrievalUnavailableReasonSchema.nullable(),
+  channels: z.array(retrievalChannelTraceSchema),
+  embeddingIndex: embeddingIndexSchema.nullable(),
+});
+export type RetrievalTrace = z.infer<typeof retrievalTraceSchema>;
+
+export const retrievalSignalSchema = z.object({
+  channel: retrievalChannelSchema,
+  rank: z.number().int().positive(),
+  rawScore: z.number().finite(),
+});
+export type RetrievalSignal = z.infer<typeof retrievalSignalSchema>;
+
+export const searchHitSchema = evidenceSchema.extend({
+  signals: z.array(retrievalSignalSchema).min(1),
+});
+export type SearchHit = z.infer<typeof searchHitSchema>;
+
+export const searchResultSchema = z.object({
+  query: z.string(),
+  trace: retrievalTraceSchema,
+  results: z.array(searchHitSchema),
+});
+export type SearchResult = z.infer<typeof searchResultSchema>;
+
+export const retrievalCapabilitySchema = z.object({
+  ready: z.boolean(),
+  reason: retrievalUnavailableReasonSchema.nullable(),
+});
+export type RetrievalCapability = z.infer<typeof retrievalCapabilitySchema>;
+
+export const retrievalStatusSchema = z.object({
+  snapshotId: idSchema,
+  text: retrievalCapabilitySchema,
+  symbol: retrievalCapabilitySchema,
+  semantic: z.object({
+    configured: z.boolean(),
+    queryable: z.boolean(),
+    reason: retrievalUnavailableReasonSchema.nullable(),
+    currentIndex: embeddingIndexSchema.nullable(),
+    latestIndex: embeddingIndexSchema.nullable(),
+  }),
+});
+export type RetrievalStatus = z.infer<typeof retrievalStatusSchema>;
+
+export const createEmbeddingIndexResponseSchema = z.object({
+  embeddingIndex: embeddingIndexSchema,
+  jobId: idSchema.nullable(),
+  reused: z.boolean(),
+});
+export type CreateEmbeddingIndexResponse = z.infer<typeof createEmbeddingIndexResponseSchema>;
+
 export const citationSchema = z.object({
   evidenceId: z.string(),
   path: z.string(),
@@ -283,6 +402,14 @@ export const groundedAnswerSchema = z.object({
   model: z.string(),
 });
 export type GroundedAnswer = z.infer<typeof groundedAnswerSchema>;
+
+export const askResultSchema = z.object({
+  messageId: idSchema,
+  answer: groundedAnswerSchema,
+  evidence: z.array(searchHitSchema),
+  trace: retrievalTraceSchema,
+});
+export type AskResult = z.infer<typeof askResultSchema>;
 
 export const askRequestSchema = z.object({
   question: z.string().trim().min(2).max(4_000),
@@ -469,6 +596,95 @@ export const createShareRequestSchema = z.object({
   title: z.string().trim().min(1).max(200).optional(),
 });
 export type CreateShareRequest = z.infer<typeof createShareRequestSchema>;
+
+export const architectureTourV1Schema = z.object({
+  version: z.literal(1).optional(),
+  overview: z.string(),
+  readingPath: z.array(z.object({ path: z.string(), reason: z.string() })),
+  map: z.unknown(),
+});
+export type ArchitectureTourV1 = z.infer<typeof architectureTourV1Schema>;
+
+export const storyGraphSchema = z.object({
+  nodes: z.array(graphNodeSchema),
+  edges: z.array(graphEdgeSchema),
+  truncated: z.boolean(),
+});
+export type StoryGraph = z.infer<typeof storyGraphSchema>;
+
+export const storyRetrievalProfileSchema = z.object({
+  id: idSchema,
+  provider: embeddingProviderSchema,
+  model: z.string(),
+  dimensions: z.number().int().positive(),
+});
+export type StoryRetrievalProfile = z.infer<typeof storyRetrievalProfileSchema>;
+
+export const architectureStoryV2Schema = z.object({
+  version: z.literal(2),
+  algorithmVersion: z.string(),
+  headline: z.string(),
+  overview: z.string(),
+  metrics: z.object({
+    files: z.number().int().nonnegative(),
+    symbols: z.number().int().nonnegative(),
+    edges: z.number().int().nonnegative(),
+    languages: z.array(
+      z.object({
+        name: z.string(),
+        files: z.number().int().nonnegative(),
+      }),
+    ),
+  }),
+  map: storyGraphSchema,
+  keyModules: z.array(
+    z.object({
+      id: z.string(),
+      label: z.string(),
+      path: z.string().nullable(),
+      importance: z.number().min(0).max(1),
+      inDegree: z.number().int().nonnegative(),
+      outDegree: z.number().int().nonnegative(),
+      score: z.number().min(0).max(1),
+      representativePath: z.string().nullable(),
+      reason: z.string(),
+    }),
+  ),
+  readingPath: z.array(
+    z.object({
+      path: z.string(),
+      reason: z.string(),
+    }),
+  ),
+  evidenceHighlights: z.array(
+    z.object({
+      id: z.string(),
+      fileId: idSchema,
+      symbolId: idSchema.nullable(),
+      path: z.string(),
+      symbol: z.string().nullable(),
+      startLine: z.number().int().positive(),
+      endLine: z.number().int().positive(),
+      quote: z.string(),
+      contentHash: z.string(),
+    }),
+  ),
+  provenance: z.object({
+    snapshotId: idSchema,
+    commitSha: commitShaSchema,
+    parserVersion: z.string(),
+    generatedAt: z.iso.datetime(),
+    generatedAtSource: z.enum(["snapshot_ready_at", "snapshot_requested_at"]),
+    retrievalProfile: storyRetrievalProfileSchema.nullable(),
+  }),
+});
+export type ArchitectureStoryV2 = z.infer<typeof architectureStoryV2Schema>;
+
+export const shareReportContentSchema = z.union([
+  architectureStoryV2Schema,
+  architectureTourV1Schema,
+]);
+export type ShareReportContent = z.infer<typeof shareReportContentSchema>;
 
 export interface ApiSuccess<T> {
   data: T;

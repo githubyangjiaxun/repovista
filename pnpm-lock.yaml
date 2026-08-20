@@ -224,6 +224,15 @@ importers:
         specifier: ^13.0.0
         version: 13.0.2
 
+  packages/embeddings:
+    dependencies:
+      '@repovista/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@repovista/domain':
+        specifier: workspace:*
+        version: link:../domain
+
   packages/exporter:
     dependencies:
       '@repovista/contracts':
@@ -283,6 +292,18 @@ importers:
       '@repovista/domain':
         specifier: workspace:*
         version: link:../domain
+
+  packages/story:
+    dependencies:
+      '@repovista/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@repovista/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@repovista/graph':
+        specifier: workspace:*
+        version: link:../graph
 
   packages/ui:
     devDependencies:
