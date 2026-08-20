@@ -1,8 +1,11 @@
 import type {
+  EmbeddingIndex,
+  EmbeddingProvider,
   GitHubWebhookResult,
   GroundedAnswer,
   Job,
   RepositorySummary,
+  RetrievalStatus,
   Snapshot,
   SnapshotStats,
 } from "@repovista/contracts";
@@ -252,6 +255,84 @@ export interface SearchEvidenceRecord {
   contentHash: string;
   score: number;
 }
+
+export interface EmbeddingChunkRecord {
+  id: string;
+  snapshotId: string;
+  commitSha: string;
+  fileId: string;
+  path: string;
+  symbolId: string | null;
+  symbol: string | null;
+  startLine: number;
+  endLine: number;
+  content: string;
+  contentHash: string;
+}
+
+export interface EmbeddingIndexInput {
+  snapshotId: string;
+  workspaceId: string;
+  provider: EmbeddingProvider;
+  model: string;
+  inputVersion: string;
+}
+
+export interface EmbeddingIndexResult {
+  embeddingIndex: EmbeddingIndex;
+  jobId: string | null;
+  reused: boolean;
+}
+
+export interface ClaimedEmbeddingJob {
+  id: string;
+  embeddingIndexId: string;
+  snapshotId: string;
+  workspaceId: string;
+  repositoryId: string;
+  provider: EmbeddingProvider;
+  model: string;
+  inputVersion: string;
+  attemptCount: number;
+  maxAttempts: number;
+}
+
+export interface SaveEmbeddingBatchInput {
+  jobId: string;
+  embeddingIndexId: string;
+  snapshotId: string;
+  workerId: string;
+  dimensions: number;
+  rows: {
+    codeChunkId: string;
+    contentHash: string;
+    inputHash: string;
+    embedding: readonly number[];
+  }[];
+  processed: number;
+  total: number;
+  message: string;
+}
+
+export interface EmbeddingSearchOptions {
+  snapshotId: string;
+  embeddingIndexId: string;
+  queryVector: readonly number[];
+  limit: number;
+}
+
+export interface RetrievalSearchRecord extends SearchEvidenceRecord {
+  channel: "text" | "symbol" | "semantic";
+}
+
+export interface RetrievalStatusOptions {
+  snapshotId: string;
+  provider: EmbeddingProvider | null;
+  model: string | null;
+  inputVersion: string;
+}
+
+export type RetrievalStatusResult = RetrievalStatus;
 
 export interface SaveAnswerInput {
   workspaceId: string;

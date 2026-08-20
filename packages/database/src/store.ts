@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import type {
+  EmbeddingIndex,
+  EmbeddingProvider,
   Job,
   PullRequestAnalysis,
   PullRequestAnalysisStatus,
@@ -12,9 +14,11 @@ import type {
   SourceFile,
 } from "@repovista/contracts";
 import {
+  embeddingIndexSchema,
   idSchema,
   pullRequestAnalysisSchema,
   pullRequestImpactSchema,
+  retrievalStatusSchema,
   snapshotStatsSchema,
 } from "@repovista/contracts";
 import {
@@ -29,12 +33,17 @@ import {
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import type {
+  ClaimedEmbeddingJob,
   ClaimedIndexJob,
   CompletePullRequestAnalysisInput,
   CreateImportInput,
   CreateImportResult,
   CreatePullRequestAnalysisInput,
   CreatePullRequestAnalysisResult,
+  EmbeddingChunkRecord,
+  EmbeddingIndexInput,
+  EmbeddingIndexResult,
+  EmbeddingSearchOptions,
   GitHubWebhookInput,
   GitHubWebhookProcessResult,
   IncrementalIndexBase,
@@ -43,7 +52,11 @@ import type {
   PullRequestAnalysisCursor,
   PullRequestAnalysisJob,
   PullRequestAnalysisPage,
+  RetrievalSearchRecord,
+  RetrievalStatusOptions,
+  RetrievalStatusResult,
   SaveAnswerInput,
+  SaveEmbeddingBatchInput,
   SearchEvidenceRecord,
   ShareReportContent,
   ShareReportRecord,
@@ -256,6 +269,53 @@ function mapSnapshot(row: SnapshotRow): Snapshot {
   };
 }
 
+interface EmbeddingIndexRow {
+  id: string;
+  snapshot_id: string;
+  provider: EmbeddingProvider;
+  model: string;
+  input_version: string;
+  status: EmbeddingIndex["status"];
+  dimensions: number | null;
+  total_chunks: number;
+  embedded_chunks: number;
+  revision: number;
+  job_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  error_retryable: boolean;
+  created_at: Date | string;
+  updated_at: Date | string;
+  ready_at: Date | string | null;
+}
+
+function mapEmbeddingIndex(row: EmbeddingIndexRow): EmbeddingIndex {
+  return embeddingIndexSchema.parse({
+    id: row.id,
+    snapshotId: row.snapshot_id,
+    provider: row.provider,
+    model: row.model,
+    inputVersion: row.input_version,
+    status: row.status,
+    dimensions: row.dimensions === null ? null : Number(row.dimensions),
+    totalChunks: Number(row.total_chunks),
+    embeddedChunks: Number(row.embedded_chunks),
+    revision: Number(row.revision),
+    jobId: row.job_id,
+    failure:
+      row.error_code === null
+        ? null
+        : {
+            code: row.error_code,
+            message: row.error_message ?? "Embedding index failed.",
+            retryable: row.error_retryable,
+          },
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+    readyAt: nullableIso(row.ready_at),
+  });
+}
+
 function mapJob(row: JobRow): Job {
   return {
     id: row.id,
@@ -291,6 +351,22 @@ function hashText(content: string): string {
 
 function approximateTokens(content: string): number {
   return Math.max(1, Math.ceil(content.length / 4));
+}
+
+function vectorLiteral(values: readonly number[]): string {
+  if (values.length < 1 || values.length > 16_000) {
+    throw new DomainError(
+      "EMBEDDING_OUTPUT_INVALID",
+      "The embedding vector dimensions are invalid.",
+    );
+  }
+  if (values.some((value) => !Number.isFinite(value))) {
+    throw new DomainError(
+      "EMBEDDING_OUTPUT_INVALID",
+      "Embedding vectors must contain finite numbers.",
+    );
+  }
+  return `[${values.join(",")}]`;
 }
 
 function fileTextChunks(content: string, maximumCharacters = 100_000) {
@@ -1865,6 +1941,833 @@ export class RepoVistaStore {
       })),
       parsedFiles,
     };
+  }
+
+  private async embeddingIndexQuery(
+    query: string,
+    params: unknown[],
+  ): Promise<EmbeddingIndex | null> {
+    const result = await this.pool.query<EmbeddingIndexRow>(query, params);
+    const row = result.rows[0];
+    return row ? mapEmbeddingIndex(row) : null;
+  }
+
+  async getEmbeddingIndex(indexId: string): Promise<EmbeddingIndex | null> {
+    return this.embeddingIndexQuery(
+      "SELECT i.id, i.snapshot_id, i.provider, i.model, i.input_version, i.status, " +
+        "i.dimensions, i.total_chunks, i.embedded_chunks, i.revision, j.id AS job_id, " +
+        "i.error_code, i.error_message, i.error_retryable, i.created_at, i.updated_at, i.ready_at " +
+        "FROM snapshot_embedding_indexes i " +
+        "LEFT JOIN analysis_jobs j ON j.embedding_index_id = i.id " +
+        "WHERE i.id = $1 ORDER BY j.created_at DESC NULLS LAST LIMIT 1",
+      [indexId],
+    );
+  }
+
+  async getEmbeddingIndexForSnapshot(
+    snapshotId: string,
+    provider: EmbeddingProvider,
+    model: string,
+    inputVersion: string,
+  ): Promise<EmbeddingIndex | null> {
+    return this.embeddingIndexQuery(
+      "SELECT i.id, i.snapshot_id, i.provider, i.model, i.input_version, i.status, " +
+        "i.dimensions, i.total_chunks, i.embedded_chunks, i.revision, j.id AS job_id, " +
+        "i.error_code, i.error_message, i.error_retryable, i.created_at, i.updated_at, i.ready_at " +
+        "FROM snapshot_embedding_indexes i " +
+        "LEFT JOIN analysis_jobs j ON j.embedding_index_id = i.id " +
+        "WHERE i.snapshot_id = $1 AND i.provider = $2 AND i.model = $3 AND i.input_version = $4 " +
+        "ORDER BY i.created_at DESC LIMIT 1",
+      [snapshotId, provider, model, inputVersion],
+    );
+  }
+
+  async createOrRetryEmbeddingIndex(input: EmbeddingIndexInput): Promise<EmbeddingIndexResult> {
+    if (
+      !idSchema.safeParse(input.snapshotId).success ||
+      !idSchema.safeParse(input.workspaceId).success
+    ) {
+      throw new DomainError(
+        "EMBEDDING_INPUT_INVALID",
+        "The embedding resource identifiers are invalid.",
+      );
+    }
+    if (!input.model.trim() || input.model.length > 200 || input.inputVersion.length > 100) {
+      throw new DomainError("EMBEDDING_INPUT_INVALID", "The embedding profile values are invalid.");
+    }
+    return withTransaction(this.pool, async (client) => {
+      const snapshotResult = await client.query<{
+        id: string;
+        repository_id: string;
+        workspace_id: string;
+        status: Snapshot["status"];
+        commit_sha: string | null;
+      }>(
+        "SELECT s.id, s.repository_id, r.workspace_id, s.status, s.commit_sha " +
+          "FROM repository_snapshots s JOIN repositories r ON r.id = s.repository_id " +
+          "WHERE s.id = $1 AND r.workspace_id = $2 FOR UPDATE",
+        [input.snapshotId, input.workspaceId],
+      );
+      const snapshot = snapshotResult.rows[0];
+      if (!snapshot) {
+        throw new DomainError("SNAPSHOT_NOT_FOUND", "The requested snapshot does not exist.");
+      }
+      if (snapshot.status !== "ready" || !snapshot.commit_sha) {
+        throw new DomainError(
+          "SNAPSHOT_NOT_READY",
+          "An embedding index requires a ready snapshot.",
+          {
+            retryable: true,
+          },
+        );
+      }
+      const chunkCount = await client.query<{ count: number }>(
+        "SELECT count(*)::integer AS count FROM code_chunks WHERE snapshot_id = $1",
+        [input.snapshotId],
+      );
+      const totalChunks = Number(chunkCount.rows[0]?.count ?? 0);
+      const existingResult = await client.query<EmbeddingIndexRow>(
+        "SELECT i.id, i.snapshot_id, i.provider, i.model, i.input_version, i.status, " +
+          "i.dimensions, i.total_chunks, i.embedded_chunks, i.revision, j.id AS job_id, " +
+          "i.error_code, i.error_message, i.error_retryable, i.created_at, i.updated_at, i.ready_at " +
+          "FROM snapshot_embedding_indexes i LEFT JOIN analysis_jobs j ON j.embedding_index_id = i.id " +
+          "WHERE i.snapshot_id = $1 AND i.provider = $2 AND i.model = $3 AND i.input_version = $4 " +
+          "FOR UPDATE OF i",
+        [input.snapshotId, input.provider, input.model.trim(), input.inputVersion],
+      );
+      let profileId = existingResult.rows[0]?.id;
+      let jobId = existingResult.rows[0]?.job_id ?? null;
+      let reused = false;
+
+      if (existingResult.rows[0]) {
+        const existing = existingResult.rows[0];
+        if (
+          existing.status === "ready" ||
+          existing.status === "queued" ||
+          existing.status === "running"
+        ) {
+          reused = true;
+          return {
+            embeddingIndex: mapEmbeddingIndex(existing),
+            jobId,
+            reused,
+          };
+        }
+        if (!profileId)
+          throw new DomainError("EMBEDDING_INDEX_NOT_FOUND", "The embedding profile is missing.");
+        const revision = Number(existing.revision) + 1;
+        // Keep any vectors that still match the current snapshot. A retry may
+        // follow a partial batch, so resetting the progress counter to zero
+        // would make the profile report misleading progress and needlessly
+        // re-embed already persisted chunks.
+        const embeddedResult = await client.query<{ embedded: number }>(
+          "SELECT count(*)::integer AS embedded FROM code_chunk_embeddings e " +
+            "JOIN code_chunks c ON c.id = e.code_chunk_id AND c.snapshot_id = e.snapshot_id " +
+            "WHERE e.embedding_index_id = $1 AND e.snapshot_id = $2 AND e.content_hash = c.content_hash",
+          [profileId, input.snapshotId],
+        );
+        const embeddedChunks = Number(embeddedResult.rows[0]?.embedded ?? 0);
+        await client.query(
+          "UPDATE snapshot_embedding_indexes SET status = $2, total_chunks = $3, " +
+            "embedded_chunks = $4, revision = $5, error_code = NULL, error_message = NULL, " +
+            "error_retryable = false, started_at = NULL, ready_at = NULL, failed_at = NULL, updated_at = now() " +
+            "WHERE id = $1",
+          [
+            profileId,
+            totalChunks === 0 ? "ready" : "queued",
+            totalChunks,
+            Math.min(totalChunks, embeddedChunks),
+            revision,
+          ],
+        );
+        if (jobId) {
+          await client.query(
+            "UPDATE analysis_jobs SET status = $2, phase = $3, progress = $4, processed = $5, total = $6, " +
+              "attempt_count = 0, lease_owner = NULL, lease_expires_at = NULL, cancel_requested_at = NULL, " +
+              "available_at = now(), error_code = NULL, error_message = NULL, error_details_json = NULL, " +
+              "finished_at = NULL WHERE id = $1",
+            [
+              jobId,
+              totalChunks === 0 ? "succeeded" : "queued",
+              totalChunks === 0 ? "completed" : "queued",
+              totalChunks === 0 ? 1 : 0,
+              totalChunks === 0 ? totalChunks : null,
+              totalChunks === 0 ? totalChunks : null,
+            ],
+          );
+        }
+      } else {
+        profileId = createId();
+        await client.query(
+          "INSERT INTO snapshot_embedding_indexes (" +
+            "id, snapshot_id, workspace_id, provider, model, input_version, status, total_chunks, embedded_chunks" +
+            ") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+          [
+            profileId,
+            input.snapshotId,
+            input.workspaceId,
+            input.provider,
+            input.model.trim(),
+            input.inputVersion,
+            totalChunks === 0 ? "ready" : "queued",
+            totalChunks,
+            0,
+          ],
+        );
+      }
+
+      if (totalChunks === 0) {
+        await client.query(
+          "UPDATE snapshot_embedding_indexes SET ready_at = now(), updated_at = now() WHERE id = $1",
+          [profileId],
+        );
+      } else {
+        if (!jobId) {
+          jobId = createId();
+          await client.query(
+            "INSERT INTO analysis_jobs (id, workspace_id, repository_id, snapshot_id, embedding_index_id, " +
+              "job_type, status, idempotency_key, total) VALUES ($1, $2, $3, $4, $5, 'embed_snapshot', 'queued', $6, $7)",
+            [
+              jobId,
+              input.workspaceId,
+              snapshot.repository_id,
+              input.snapshotId,
+              profileId,
+              `embedding:${profileId}`,
+              totalChunks,
+            ],
+          );
+        }
+        await this.appendJobEvent(client, jobId, "queued", {
+          phase: "queued",
+          progress: 0,
+          snapshotId: input.snapshotId,
+          embeddingIndexId: profileId,
+          total: totalChunks,
+        });
+      }
+
+      const finalResult = await client.query<EmbeddingIndexRow>(
+        "SELECT i.id, i.snapshot_id, i.provider, i.model, i.input_version, i.status, " +
+          "i.dimensions, i.total_chunks, i.embedded_chunks, i.revision, $2::uuid AS job_id, " +
+          "i.error_code, i.error_message, i.error_retryable, i.created_at, i.updated_at, i.ready_at " +
+          "FROM snapshot_embedding_indexes i WHERE i.id = $1",
+        [profileId, jobId],
+      );
+      const row = finalResult.rows[0];
+      if (!row)
+        throw new DomainError(
+          "EMBEDDING_INDEX_NOT_FOUND",
+          "The embedding profile was not created.",
+        );
+      return { embeddingIndex: mapEmbeddingIndex(row), jobId, reused };
+    });
+  }
+
+  async getRetrievalStatus(options: RetrievalStatusOptions): Promise<RetrievalStatusResult> {
+    const snapshot = await this.getSnapshot(options.snapshotId);
+    if (!snapshot)
+      throw new DomainError("SNAPSHOT_NOT_FOUND", "The requested snapshot does not exist.");
+    const latestResult = await this.pool.query<EmbeddingIndexRow>(
+      "SELECT i.id, i.snapshot_id, i.provider, i.model, i.input_version, i.status, " +
+        "i.dimensions, i.total_chunks, i.embedded_chunks, i.revision, j.id AS job_id, " +
+        "i.error_code, i.error_message, i.error_retryable, i.created_at, i.updated_at, i.ready_at " +
+        "FROM snapshot_embedding_indexes i LEFT JOIN analysis_jobs j ON j.embedding_index_id = i.id " +
+        "WHERE i.snapshot_id = $1 ORDER BY i.created_at DESC LIMIT 1",
+      [options.snapshotId],
+    );
+    const currentResult =
+      options.provider && options.model
+        ? await this.pool.query<EmbeddingIndexRow>(
+            "SELECT i.id, i.snapshot_id, i.provider, i.model, i.input_version, i.status, " +
+              "i.dimensions, i.total_chunks, i.embedded_chunks, i.revision, j.id AS job_id, " +
+              "i.error_code, i.error_message, i.error_retryable, i.created_at, i.updated_at, i.ready_at " +
+              "FROM snapshot_embedding_indexes i LEFT JOIN analysis_jobs j ON j.embedding_index_id = i.id " +
+              "WHERE i.snapshot_id = $1 AND i.provider = $2 AND i.model = $3 AND i.input_version = $4 " +
+              "ORDER BY i.created_at DESC LIMIT 1",
+            [options.snapshotId, options.provider, options.model, options.inputVersion],
+          )
+        : { rows: [] as EmbeddingIndexRow[] };
+    const current = currentResult.rows[0] ? mapEmbeddingIndex(currentResult.rows[0]) : null;
+    const latest = latestResult.rows[0] ? mapEmbeddingIndex(latestResult.rows[0]) : null;
+    const reason =
+      !options.provider || !options.model
+        ? "provider_disabled"
+        : current === null
+          ? "index_missing"
+          : current.status === "ready"
+            ? null
+            : current.status === "failed" || current.status === "cancelled"
+              ? "index_failed"
+              : "index_building";
+    return retrievalStatusSchema.parse({
+      snapshotId: options.snapshotId,
+      text: {
+        ready: snapshot.status === "ready",
+        reason: snapshot.status === "ready" ? null : "index_building",
+      },
+      symbol: {
+        ready: snapshot.status === "ready",
+        reason: snapshot.status === "ready" ? null : "index_building",
+      },
+      semantic: {
+        configured: Boolean(options.provider && options.model),
+        queryable: current?.status === "ready",
+        reason,
+        currentIndex: current,
+        latestIndex: latest,
+      },
+    });
+  }
+
+  async claimEmbeddingJob(
+    workerId: string,
+    leaseSeconds: number,
+  ): Promise<ClaimedEmbeddingJob | null> {
+    return withTransaction(this.pool, async (client) => {
+      const claimed = await client.query<{
+        id: string;
+        embedding_index_id: string;
+        snapshot_id: string;
+        workspace_id: string;
+        repository_id: string;
+        attempt_count: number;
+        max_attempts: number;
+        provider: EmbeddingProvider;
+        model: string;
+        input_version: string;
+      }>(
+        "WITH candidate AS (" +
+          "SELECT j.id, i.provider, i.model, i.input_version FROM analysis_jobs j " +
+          "JOIN snapshot_embedding_indexes i ON i.id = j.embedding_index_id " +
+          "WHERE j.job_type = 'embed_snapshot' AND i.status IN ('queued', 'running') " +
+          "AND ((j.status = 'queued' AND j.available_at <= now()) " +
+          "OR (j.status = 'running' AND j.lease_expires_at < now())) " +
+          "AND j.attempt_count < j.max_attempts " +
+          "ORDER BY j.priority ASC, j.created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1" +
+          ") UPDATE analysis_jobs j SET status = 'running', lease_owner = $1, " +
+          "lease_expires_at = now() + ($2 * interval '1 second'), available_at = now(), " +
+          "attempt_count = j.attempt_count + 1, started_at = COALESCE(j.started_at, now()), " +
+          "phase = 'embedding', progress = 0, error_code = NULL, error_message = NULL, " +
+          "error_details_json = NULL, finished_at = NULL " +
+          "FROM candidate c WHERE j.id = c.id " +
+          "RETURNING j.id, j.embedding_index_id, j.snapshot_id, j.workspace_id, j.repository_id, " +
+          "j.attempt_count, j.max_attempts, c.provider, c.model, c.input_version",
+        [workerId, leaseSeconds],
+      );
+      const row = claimed.rows[0];
+      if (!row) return null;
+      await client.query(
+        "UPDATE snapshot_embedding_indexes SET status = 'running', started_at = COALESCE(started_at, now()), " +
+          "updated_at = now(), error_code = NULL, error_message = NULL, error_retryable = false WHERE id = $1",
+        [row.embedding_index_id],
+      );
+      await this.appendJobEvent(client, row.id, "started", {
+        phase: "embedding",
+        progress: 0,
+        embeddingIndexId: row.embedding_index_id,
+        attempt: row.attempt_count,
+      });
+      return {
+        id: row.id,
+        embeddingIndexId: row.embedding_index_id,
+        snapshotId: row.snapshot_id,
+        workspaceId: row.workspace_id,
+        repositoryId: row.repository_id,
+        provider: row.provider,
+        model: row.model,
+        inputVersion: row.input_version,
+        attemptCount: row.attempt_count,
+        maxAttempts: row.max_attempts,
+      };
+    });
+  }
+
+  async listEmbeddingBatch(indexId: string, limit = 16): Promise<EmbeddingChunkRecord[]> {
+    const boundedLimit = Math.min(64, Math.max(1, Math.floor(limit)));
+    const result = await this.pool.query<{
+      id: string;
+      snapshot_id: string;
+      commit_sha: string;
+      file_id: string;
+      path: string;
+      symbol_id: string | null;
+      symbol: string | null;
+      start_line: number;
+      end_line: number;
+      content: string;
+      content_hash: string;
+    }>(
+      "SELECT c.id, c.snapshot_id, s.commit_sha, c.snapshot_file_id AS file_id, f.path, c.symbol_id, " +
+        "sym.name AS symbol, c.start_line, c.end_line, c.content, c.content_hash " +
+        "FROM code_chunks c " +
+        "JOIN snapshot_files f ON f.id = c.snapshot_file_id " +
+        "JOIN repository_snapshots s ON s.id = c.snapshot_id " +
+        "LEFT JOIN symbols sym ON sym.id = c.symbol_id " +
+        "LEFT JOIN code_chunk_embeddings e ON e.embedding_index_id = $1 AND e.code_chunk_id = c.id " +
+        "WHERE c.snapshot_id = (SELECT snapshot_id FROM snapshot_embedding_indexes WHERE id = $1) " +
+        "AND (e.code_chunk_id IS NULL OR e.content_hash <> c.content_hash) " +
+        "ORDER BY c.id LIMIT $2",
+      [indexId, boundedLimit],
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      snapshotId: row.snapshot_id,
+      commitSha: row.commit_sha,
+      fileId: row.file_id,
+      path: row.path,
+      symbolId: row.symbol_id,
+      symbol: row.symbol,
+      startLine: row.start_line,
+      endLine: row.end_line,
+      content: row.content,
+      contentHash: row.content_hash,
+    }));
+  }
+
+  async saveEmbeddingBatch(input: SaveEmbeddingBatchInput): Promise<void> {
+    if (!Number.isInteger(input.dimensions) || input.dimensions < 1 || input.dimensions > 16_000) {
+      throw new DomainError(
+        "EMBEDDING_DIMENSION_MISMATCH",
+        "The embedding dimensions are invalid.",
+      );
+    }
+    await withTransaction(this.pool, async (client) => {
+      const lease = await client.query<{
+        id: string;
+        dimensions: number | null;
+        total_chunks: number;
+      }>(
+        "SELECT j.id, i.dimensions, i.total_chunks FROM analysis_jobs j " +
+          "JOIN snapshot_embedding_indexes i ON i.id = j.embedding_index_id " +
+          "WHERE j.id = $1 AND j.embedding_index_id = $2 AND j.snapshot_id = $3 " +
+          "AND j.lease_owner = $4 AND j.status = 'running' FOR UPDATE",
+        [input.jobId, input.embeddingIndexId, input.snapshotId, input.workerId],
+      );
+      const job = lease.rows[0];
+      if (!job) {
+        throw new DomainError("JOB_LEASE_LOST", "The embedding job lease is no longer owned.", {
+          retryable: true,
+        });
+      }
+      if (job.dimensions !== null && Number(job.dimensions) !== input.dimensions) {
+        throw new DomainError(
+          "EMBEDDING_DIMENSION_MISMATCH",
+          "The embedding dimensions changed within one index.",
+        );
+      }
+      await client.query(
+        "UPDATE snapshot_embedding_indexes SET dimensions = COALESCE(dimensions, $2), updated_at = now() " +
+          "WHERE id = $1 AND (dimensions IS NULL OR dimensions = $2)",
+        [input.embeddingIndexId, input.dimensions],
+      );
+
+      for (const row of input.rows) {
+        const embedding = vectorLiteral(row.embedding);
+        if (row.embedding.length !== input.dimensions) {
+          throw new DomainError(
+            "EMBEDDING_DIMENSION_MISMATCH",
+            "A batch vector does not match the index dimensions.",
+          );
+        }
+        const chunk = await client.query<{ content_hash: string }>(
+          "SELECT content_hash FROM code_chunks WHERE id = $1 AND snapshot_id = $2 FOR SHARE",
+          [row.codeChunkId, input.snapshotId],
+        );
+        if (chunk.rows[0]?.content_hash !== row.contentHash) {
+          throw new DomainError(
+            "EMBEDDING_INPUT_STALE",
+            "The code chunk changed while its embedding was being computed.",
+            { retryable: true },
+          );
+        }
+        const existing = await client.query<{
+          content_hash: string;
+          input_hash: string;
+          dimensions: number;
+        }>(
+          "SELECT content_hash, input_hash, dimensions FROM code_chunk_embeddings " +
+            "WHERE embedding_index_id = $1 AND code_chunk_id = $2 FOR UPDATE",
+          [input.embeddingIndexId, row.codeChunkId],
+        );
+        const previous = existing.rows[0];
+        if (previous) {
+          if (
+            previous.content_hash !== row.contentHash ||
+            previous.input_hash !== row.inputHash ||
+            Number(previous.dimensions) !== input.dimensions
+          ) {
+            throw new DomainError(
+              "EMBEDDING_INPUT_STALE",
+              "An existing embedding row belongs to a different input.",
+            );
+          }
+          continue;
+        }
+        await client.query(
+          "INSERT INTO code_chunk_embeddings (embedding_index_id, snapshot_id, code_chunk_id, content_hash, input_hash, dimensions, embedding) " +
+            "VALUES ($1, $2, $3, $4, $5, $6, $7::vector)",
+          [
+            input.embeddingIndexId,
+            input.snapshotId,
+            row.codeChunkId,
+            row.contentHash,
+            row.inputHash,
+            input.dimensions,
+            embedding,
+          ],
+        );
+      }
+      const counts = await client.query<{ total: number; embedded: number }>(
+        "SELECT " +
+          "(SELECT count(*) FROM code_chunks WHERE snapshot_id = $2)::integer AS total, " +
+          "(SELECT count(*) FROM code_chunk_embeddings e JOIN code_chunks c ON c.id = e.code_chunk_id " +
+          "AND c.snapshot_id = e.snapshot_id WHERE e.embedding_index_id = $1 AND e.content_hash = c.content_hash)::integer AS embedded",
+        [input.embeddingIndexId, input.snapshotId],
+      );
+      const count = counts.rows[0] ?? { total: 0, embedded: 0 };
+      await client.query(
+        "UPDATE snapshot_embedding_indexes SET total_chunks = $2, embedded_chunks = $3, updated_at = now() WHERE id = $1",
+        [input.embeddingIndexId, Number(count.total), Number(count.embedded)],
+      );
+      const progress =
+        Number(count.total) === 0
+          ? 1
+          : Math.min(0.99, Number(count.embedded) / Number(count.total));
+      await client.query(
+        "UPDATE analysis_jobs SET progress = $2, processed = $3, total = $4, phase = 'embedding' WHERE id = $1",
+        [input.jobId, progress, Number(count.embedded), Number(count.total)],
+      );
+      await this.appendJobEvent(client, input.jobId, "progress", {
+        phase: "embedding",
+        progress,
+        processed: Number(count.embedded),
+        total: Number(count.total),
+        message: input.message,
+        dimensions: input.dimensions,
+      });
+    });
+  }
+
+  async completeEmbeddingJob(
+    jobId: string,
+    embeddingIndexId: string,
+    snapshotId: string,
+    workerId: string,
+  ): Promise<void> {
+    await withTransaction(this.pool, async (client) => {
+      const lease = await client.query<{ id: string }>(
+        "SELECT j.id FROM analysis_jobs j WHERE j.id = $1 AND j.embedding_index_id = $2 " +
+          "AND j.snapshot_id = $3 AND j.lease_owner = $4 AND j.status = 'running' FOR UPDATE",
+        [jobId, embeddingIndexId, snapshotId, workerId],
+      );
+      if (lease.rowCount !== 1) {
+        throw new DomainError("JOB_LEASE_LOST", "The embedding job lease is no longer owned.", {
+          retryable: true,
+        });
+      }
+      const counts = await client.query<{ total: number; embedded: number; dimensions: number }>(
+        "SELECT " +
+          "(SELECT count(*) FROM code_chunks WHERE snapshot_id = $2)::integer AS total, " +
+          "(SELECT count(*) FROM code_chunk_embeddings e JOIN code_chunks c ON c.id = e.code_chunk_id " +
+          "AND c.snapshot_id = e.snapshot_id WHERE e.embedding_index_id = $1 AND e.content_hash = c.content_hash)::integer AS embedded, " +
+          "(SELECT count(DISTINCT e.dimensions) FROM code_chunk_embeddings e WHERE e.embedding_index_id = $1)::integer AS dimensions",
+        [embeddingIndexId, snapshotId],
+      );
+      const count = counts.rows[0] ?? { total: 0, embedded: 0, dimensions: 0 };
+      if (Number(count.total) !== Number(count.embedded) || Number(count.dimensions) > 1) {
+        throw new DomainError(
+          "EMBEDDING_INDEX_INCOMPLETE",
+          "The embedding index is not complete or contains mixed dimensions.",
+          { retryable: true },
+        );
+      }
+      await client.query(
+        "UPDATE snapshot_embedding_indexes SET status = 'ready', total_chunks = $2, embedded_chunks = $3, " +
+          "ready_at = now(), updated_at = now(), error_code = NULL, error_message = NULL, error_retryable = false " +
+          "WHERE id = $1",
+        [embeddingIndexId, Number(count.total), Number(count.embedded)],
+      );
+      await client.query(
+        "UPDATE analysis_jobs SET status = 'succeeded', phase = 'completed', progress = 1, processed = $2, total = $2, " +
+          "lease_owner = NULL, lease_expires_at = NULL, finished_at = now(), error_code = NULL, error_message = NULL, error_details_json = NULL " +
+          "WHERE id = $1",
+        [jobId, Number(count.total)],
+      );
+      await this.appendJobEvent(client, jobId, "completed", {
+        phase: "completed",
+        progress: 1,
+        embeddingIndexId,
+        snapshotId,
+        embeddedChunks: Number(count.embedded),
+        totalChunks: Number(count.total),
+      });
+    });
+  }
+
+  async cancelEmbeddingJob(
+    jobId: string,
+    embeddingIndexId: string,
+    snapshotId: string,
+    workerId: string,
+  ): Promise<void> {
+    await withTransaction(this.pool, async (client) => {
+      const cancelled = await client.query(
+        "UPDATE analysis_jobs SET status = 'cancelled', phase = 'cancelled', progress = 1, " +
+          "lease_owner = NULL, lease_expires_at = NULL, finished_at = now() " +
+          "WHERE id = $1 AND embedding_index_id = $2 AND snapshot_id = $3 AND lease_owner = $4 AND status = 'running' RETURNING id",
+        [jobId, embeddingIndexId, snapshotId, workerId],
+      );
+      if (cancelled.rowCount !== 1) {
+        throw new DomainError("JOB_LEASE_LOST", "The embedding job lease is no longer owned.", {
+          retryable: true,
+        });
+      }
+      await client.query(
+        "UPDATE snapshot_embedding_indexes SET status = 'cancelled', updated_at = now() WHERE id = $1",
+        [embeddingIndexId],
+      );
+      await this.appendJobEvent(client, jobId, "cancelled", {
+        phase: "cancelled",
+        progress: 1,
+        embeddingIndexId,
+      });
+    });
+  }
+
+  async failEmbeddingJob(
+    jobId: string,
+    embeddingIndexId: string,
+    snapshotId: string,
+    workerId: string,
+    code: string,
+    message: string,
+    retryable: boolean,
+  ): Promise<void> {
+    await withTransaction(this.pool, async (client) => {
+      const jobResult = await client.query<{ attempt_count: number; max_attempts: number }>(
+        "SELECT attempt_count, max_attempts FROM analysis_jobs WHERE id = $1 AND embedding_index_id = $2 " +
+          "AND snapshot_id = $3 AND lease_owner = $4 AND status = 'running' FOR UPDATE",
+        [jobId, embeddingIndexId, snapshotId, workerId],
+      );
+      const job = jobResult.rows[0];
+      if (!job) {
+        throw new DomainError("JOB_LEASE_LOST", "The embedding job lease is no longer owned.", {
+          retryable: true,
+        });
+      }
+      const shouldRetry = retryable && job.attempt_count < job.max_attempts;
+      const status = shouldRetry ? "queued" : "failed";
+      await client.query(
+        "UPDATE analysis_jobs SET status = $2, phase = $3, error_code = $4, error_message = $5, " +
+          "error_details_json = jsonb_build_object('retryable', $6::boolean), lease_owner = NULL, " +
+          "lease_expires_at = NULL, available_at = CASE WHEN $2 = 'queued' THEN now() + interval '2 seconds' ELSE now() END, " +
+          "finished_at = CASE WHEN $2 = 'failed' THEN now() ELSE NULL END WHERE id = $1",
+        [jobId, status, shouldRetry ? "retrying" : "failed", code, message, retryable],
+      );
+      await client.query(
+        "UPDATE snapshot_embedding_indexes SET status = $2, error_code = $3, error_message = $4, " +
+          "error_retryable = $5, updated_at = now(), failed_at = CASE WHEN $2 = 'failed' THEN now() ELSE NULL END " +
+          "WHERE id = $1",
+        [embeddingIndexId, status, code, message, retryable],
+      );
+      await this.appendJobEvent(client, jobId, shouldRetry ? "warning" : "failed", {
+        phase: shouldRetry ? "retrying" : "failed",
+        progress: 1,
+        embeddingIndexId,
+        code,
+        message,
+        retryable: shouldRetry,
+      });
+    });
+  }
+
+  async searchTextEvidence(
+    snapshotId: string,
+    query: string,
+    limit = 20,
+  ): Promise<RetrievalSearchRecord[]> {
+    const normalized = query.trim();
+    if (normalized.length < 2) return [];
+    const boundedLimit = Math.min(200, Math.max(1, Math.floor(limit)));
+    const result = await this.pool.query<{
+      id: string;
+      snapshot_id: string;
+      commit_sha: string;
+      snapshot_file_id: string;
+      path: string;
+      symbol_id: string | null;
+      symbol: string | null;
+      start_line: number;
+      end_line: number;
+      content: string;
+      content_hash: string;
+      score: number;
+    }>(
+      "WITH search_query AS (SELECT plainto_tsquery('simple', $2) AS query) " +
+        "SELECT c.id, c.snapshot_id, rs.commit_sha, c.snapshot_file_id, f.path, c.symbol_id, " +
+        "s.name AS symbol, c.start_line, c.end_line, c.content, c.content_hash, " +
+        "GREATEST(ts_rank_cd(c.search_vector, search_query.query), similarity(f.path, $2)) AS score " +
+        "FROM code_chunks c JOIN snapshot_files f ON f.id = c.snapshot_file_id " +
+        "JOIN repository_snapshots rs ON rs.id = c.snapshot_id CROSS JOIN search_query " +
+        "LEFT JOIN symbols s ON s.id = c.symbol_id " +
+        "WHERE c.snapshot_id = $1 AND rs.status = 'ready' AND (" +
+        "c.search_vector @@ search_query.query OR f.path ILIKE '%' || $2 || '%'" +
+        ") ORDER BY score DESC, f.path ASC, c.start_line ASC, c.id ASC LIMIT $3",
+      [snapshotId, normalized, boundedLimit],
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      snapshotId: row.snapshot_id,
+      commitSha: row.commit_sha,
+      fileId: row.snapshot_file_id,
+      path: row.path,
+      symbolId: row.symbol_id,
+      symbol: row.symbol,
+      startLine: row.start_line,
+      endLine: row.end_line,
+      content: row.content,
+      contentHash: row.content_hash,
+      score: Number(row.score),
+      channel: "text" as const,
+    }));
+  }
+
+  async searchSymbolEvidence(
+    snapshotId: string,
+    query: string,
+    limit = 20,
+  ): Promise<RetrievalSearchRecord[]> {
+    const normalized = query.trim();
+    if (normalized.length < 2) return [];
+    const boundedLimit = Math.min(200, Math.max(1, Math.floor(limit)));
+    const result = await this.pool.query<{
+      id: string;
+      snapshot_id: string;
+      commit_sha: string;
+      snapshot_file_id: string;
+      path: string;
+      symbol_id: string | null;
+      symbol: string | null;
+      start_line: number;
+      end_line: number;
+      content: string;
+      content_hash: string;
+      score: number;
+    }>(
+      "SELECT c.id, c.snapshot_id, rs.commit_sha, c.snapshot_file_id, f.path, c.symbol_id, " +
+        "s.name AS symbol, c.start_line, c.end_line, c.content, c.content_hash, " +
+        "GREATEST(" +
+        "CASE WHEN lower(s.name) = lower($2) THEN 1 ELSE 0 END, " +
+        "CASE WHEN lower(COALESCE(s.qualified_name, '')) = lower($2) THEN 0.95 ELSE 0 END, " +
+        "similarity(s.name, $2), similarity(COALESCE(s.qualified_name, ''), $2), similarity(f.path, $2)" +
+        ") AS score " +
+        "FROM code_chunks c JOIN snapshot_files f ON f.id = c.snapshot_file_id " +
+        "JOIN repository_snapshots rs ON rs.id = c.snapshot_id " +
+        "JOIN symbols s ON s.id = c.symbol_id " +
+        "WHERE c.snapshot_id = $1 AND rs.status = 'ready' AND (" +
+        "s.name ILIKE '%' || $2 || '%' OR s.qualified_name ILIKE '%' || $2 || '%' OR f.path ILIKE '%' || $2 || '%'" +
+        ") ORDER BY score DESC, f.path ASC, c.start_line ASC, c.id ASC LIMIT $3",
+      [snapshotId, normalized, boundedLimit],
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      snapshotId: row.snapshot_id,
+      commitSha: row.commit_sha,
+      fileId: row.snapshot_file_id,
+      path: row.path,
+      symbolId: row.symbol_id,
+      symbol: row.symbol,
+      startLine: row.start_line,
+      endLine: row.end_line,
+      content: row.content,
+      contentHash: row.content_hash,
+      score: Number(row.score),
+      channel: "symbol" as const,
+    }));
+  }
+
+  async searchSemanticEvidence(options: EmbeddingSearchOptions): Promise<RetrievalSearchRecord[]> {
+    if (!Number.isInteger(options.limit) || options.limit < 1) {
+      throw new DomainError("RETRIEVAL_INPUT_INVALID", "The semantic result limit is invalid.");
+    }
+    const profile = await this.pool.query<{
+      status: EmbeddingIndex["status"];
+      dimensions: number | null;
+      snapshot_id: string;
+    }>("SELECT status, dimensions, snapshot_id FROM snapshot_embedding_indexes WHERE id = $1", [
+      options.embeddingIndexId,
+    ]);
+    const profileRow = profile.rows[0];
+    if (!profileRow || profileRow.snapshot_id !== options.snapshotId) {
+      throw new DomainError(
+        "EMBEDDING_INDEX_NOT_FOUND",
+        "The embedding profile does not belong to this snapshot.",
+      );
+    }
+    if (profileRow.status !== "ready") {
+      throw new DomainError(
+        "EMBEDDING_INDEX_NOT_READY",
+        "The embedding profile is not ready for queries.",
+        {
+          retryable: true,
+        },
+      );
+    }
+    if (
+      profileRow.dimensions !== null &&
+      options.queryVector.length !== Number(profileRow.dimensions)
+    ) {
+      throw new DomainError(
+        "EMBEDDING_DIMENSION_MISMATCH",
+        "The query vector dimensions do not match the embedding profile.",
+      );
+    }
+    const query = vectorLiteral(options.queryVector);
+    const boundedLimit = Math.min(200, Math.max(1, Math.floor(options.limit)));
+    const result = await this.pool.query<{
+      id: string;
+      snapshot_id: string;
+      commit_sha: string;
+      snapshot_file_id: string;
+      path: string;
+      symbol_id: string | null;
+      symbol: string | null;
+      start_line: number;
+      end_line: number;
+      content: string;
+      content_hash: string;
+      score: number;
+    }>(
+      "SELECT c.id, c.snapshot_id, rs.commit_sha, c.snapshot_file_id, f.path, c.symbol_id, " +
+        "s.name AS symbol, c.start_line, c.end_line, c.content, c.content_hash, " +
+        "1 - (e.embedding <=> $3::vector) AS score " +
+        "FROM code_chunk_embeddings e " +
+        "JOIN code_chunks c ON c.id = e.code_chunk_id AND c.snapshot_id = e.snapshot_id " +
+        "JOIN snapshot_files f ON f.id = c.snapshot_file_id " +
+        "JOIN repository_snapshots rs ON rs.id = c.snapshot_id " +
+        "LEFT JOIN symbols s ON s.id = c.symbol_id " +
+        "JOIN snapshot_embedding_indexes i ON i.id = e.embedding_index_id AND i.snapshot_id = e.snapshot_id " +
+        "WHERE e.embedding_index_id = $1 AND e.snapshot_id = $2 AND i.status = 'ready' " +
+        "AND e.dimensions = i.dimensions AND e.content_hash = c.content_hash " +
+        "ORDER BY e.embedding <=> $3::vector, f.path ASC, c.start_line ASC, c.id ASC LIMIT $4",
+      [options.embeddingIndexId, options.snapshotId, query, boundedLimit],
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      snapshotId: row.snapshot_id,
+      commitSha: row.commit_sha,
+      fileId: row.snapshot_file_id,
+      path: row.path,
+      symbolId: row.symbol_id,
+      symbol: row.symbol,
+      startLine: row.start_line,
+      endLine: row.end_line,
+      content: row.content,
+      contentHash: row.content_hash,
+      score: Number(row.score),
+      channel: "semantic" as const,
+    }));
   }
 
   async listJobEvents(jobId: string, afterId = 0): Promise<JobEventRecord[]> {

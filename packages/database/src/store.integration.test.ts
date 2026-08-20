@@ -478,6 +478,244 @@ integration("RepoVistaStore with PostgreSQL", () => {
     });
   });
 
+  it("persists versioned embedding indexes with idempotent profiles, partial recovery, and strict dimensions", async () => {
+    const suffix = randomUUID();
+    const imported = await store.createRepositoryImport({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      identity: {
+        owner: "repovista-embedding-test",
+        name: suffix,
+        canonicalUrl: `https://github.com/repovista-embedding-test/${suffix}`,
+        cloneUrl: `https://github.com/repovista-embedding-test/${suffix}.git`,
+      },
+      ignore: [],
+      parserVersion: "embedding-integration-v1",
+    });
+    repositoryIds.add(imported.repositoryId);
+    const indexJob = await store.claimIndexJob("embedding-index-worker", 30);
+    if (!indexJob) throw new Error("Expected an embedding fixture index job.");
+    const content = [
+      "export function semanticGreeting(name: string) {",
+      "  return `Hello ` + name;",
+      "}",
+    ].join("\n");
+    const contentHash = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+    const moduleKey = "module:src/semantic.ts";
+    const symbolKey = "function:src/semantic.ts:semanticGreeting:embedding";
+    await store.completeIndexJob(
+      indexJob.id,
+      indexJob.snapshotId,
+      indexJob.repositoryId,
+      "embedding-index-worker",
+      {
+        commitSha: "456789abcdef0123456789abcdef0123456789ab",
+        branch: "main",
+        baseSnapshotId: null,
+        indexMode: "full",
+        treeHash: "sha256:embedding-fixture-tree",
+        files: [
+          {
+            path: "src/semantic.ts",
+            absolutePath: `/tmp/${suffix}/src/semantic.ts`,
+            language: "typescript",
+            byteSize: Buffer.byteLength(content),
+            lineCount: 3,
+            content,
+            contentHash,
+            isGenerated: false,
+          },
+        ],
+        parsedFiles: [
+          {
+            path: "src/semantic.ts",
+            moduleStableKey: moduleKey,
+            imports: [],
+            symbols: [
+              {
+                stableKey: moduleKey,
+                kind: "module",
+                name: "semantic.ts",
+                qualifiedName: "src/semantic.ts",
+                signature: null,
+                startLine: 1,
+                startColumn: 0,
+                endLine: 3,
+                endColumn: 0,
+                docText: null,
+                contentHash,
+              },
+              {
+                stableKey: symbolKey,
+                kind: "function",
+                name: "semanticGreeting",
+                qualifiedName: "semanticGreeting",
+                signature: "semanticGreeting(name: string)",
+                startLine: 1,
+                startColumn: 0,
+                endLine: 3,
+                endColumn: 1,
+                docText: null,
+                contentHash,
+              },
+            ],
+            edges: [],
+          },
+        ],
+        stats: {
+          files: 1,
+          symbols: 2,
+          edges: 0,
+          languages: { typescript: 1 },
+          warnings: 0,
+          indexing: null,
+        },
+      },
+    );
+
+    const profileInput = {
+      snapshotId: indexJob.snapshotId,
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      provider: "ollama" as const,
+      model: "test-embedding-a",
+      inputVersion: "code-chunk-v1",
+    };
+    const [first, concurrent] = await Promise.all([
+      store.createOrRetryEmbeddingIndex(profileInput),
+      store.createOrRetryEmbeddingIndex(profileInput),
+    ]);
+    expect(first.embeddingIndex.id).toBe(concurrent.embeddingIndex.id);
+    expect(concurrent.reused || first.reused).toBe(true);
+    expect(first.jobId).toBeTruthy();
+
+    const otherProfile = await store.createOrRetryEmbeddingIndex({
+      ...profileInput,
+      provider: "openai-compatible",
+      model: "test-embedding-b",
+    });
+    expect(otherProfile.embeddingIndex.id).not.toBe(first.embeddingIndex.id);
+
+    const chunks = await store.listEmbeddingBatch(first.embeddingIndex.id, 10);
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    const embeddingJob = await store.claimEmbeddingJob("embedding-worker-a", 30);
+    expect(embeddingJob).toMatchObject({
+      id: first.jobId,
+      embeddingIndexId: first.embeddingIndex.id,
+      snapshotId: indexJob.snapshotId,
+    });
+    if (!embeddingJob) throw new Error("Expected a claimed embedding job.");
+    const firstChunk = chunks[0];
+    if (!firstChunk) throw new Error("Expected an embedding chunk.");
+    await store.saveEmbeddingBatch({
+      jobId: embeddingJob.id,
+      embeddingIndexId: embeddingJob.embeddingIndexId,
+      snapshotId: embeddingJob.snapshotId,
+      workerId: "embedding-worker-a",
+      dimensions: 3,
+      rows: [
+        {
+          codeChunkId: firstChunk.id,
+          contentHash: firstChunk.contentHash,
+          inputHash: "sha256:embedding-input-1",
+          embedding: [1, 0, 0],
+        },
+      ],
+      processed: 1,
+      total: chunks.length,
+      message: "partial batch",
+    });
+    await expect(
+      store.saveEmbeddingBatch({
+        jobId: embeddingJob.id,
+        embeddingIndexId: embeddingJob.embeddingIndexId,
+        snapshotId: embeddingJob.snapshotId,
+        workerId: "embedding-worker-a",
+        dimensions: 4,
+        rows: [],
+        processed: 1,
+        total: chunks.length,
+        message: "mixed dimensions",
+      }),
+    ).rejects.toMatchObject({ code: "EMBEDDING_DIMENSION_MISMATCH" });
+    await store.failEmbeddingJob(
+      embeddingJob.id,
+      embeddingJob.embeddingIndexId,
+      embeddingJob.snapshotId,
+      "embedding-worker-a",
+      "EMBEDDING_PROVIDER_UNAVAILABLE",
+      "fixture failure",
+      false,
+    );
+    const failed = await store.getEmbeddingIndex(first.embeddingIndex.id);
+    expect(failed).toMatchObject({ status: "failed", embeddedChunks: 1, dimensions: 3 });
+
+    const retried = await store.createOrRetryEmbeddingIndex(profileInput);
+    expect(retried.embeddingIndex).toMatchObject({
+      id: first.embeddingIndex.id,
+      status: "queued",
+      embeddedChunks: 1,
+      revision: 2,
+    });
+    const retryJob = await store.claimEmbeddingJob("embedding-worker-b", 30);
+    expect(retryJob).toMatchObject({ embeddingIndexId: first.embeddingIndex.id });
+    if (!retryJob) throw new Error("Expected the retried embedding job.");
+    const remaining = chunks.slice(1);
+    await store.saveEmbeddingBatch({
+      jobId: retryJob.id,
+      embeddingIndexId: retryJob.embeddingIndexId,
+      snapshotId: retryJob.snapshotId,
+      workerId: "embedding-worker-b",
+      dimensions: 3,
+      rows: remaining.map((chunk) => ({
+        codeChunkId: chunk.id,
+        contentHash: chunk.contentHash,
+        inputHash: `sha256:${chunk.id}`,
+        embedding: [0, 1, 0],
+      })),
+      processed: chunks.length,
+      total: chunks.length,
+      message: "recovered batch",
+    });
+    await store.completeEmbeddingJob(
+      retryJob.id,
+      retryJob.embeddingIndexId,
+      retryJob.snapshotId,
+      "embedding-worker-b",
+    );
+    const ready = await store.getEmbeddingIndex(first.embeddingIndex.id);
+    expect(ready).toMatchObject({
+      status: "ready",
+      dimensions: 3,
+      totalChunks: chunks.length,
+      embeddedChunks: chunks.length,
+    });
+    await expect(
+      store.searchSemanticEvidence({
+        snapshotId: indexJob.snapshotId,
+        embeddingIndexId: first.embeddingIndex.id,
+        queryVector: [1, 0],
+        limit: 5,
+      }),
+    ).rejects.toMatchObject({ code: "EMBEDDING_DIMENSION_MISMATCH" });
+    const semantic = await store.searchSemanticEvidence({
+      snapshotId: indexJob.snapshotId,
+      embeddingIndexId: first.embeddingIndex.id,
+      queryVector: [1, 0, 0],
+      limit: 5,
+    });
+    expect(semantic.length).toBeGreaterThan(0);
+    expect(semantic.every((item) => item.channel === "semantic")).toBe(true);
+
+    await pool.query("DELETE FROM repositories WHERE id = $1", [imported.repositoryId]);
+    const cascaded = await pool.query<{ indexes: string; embeddings: string }>(
+      "SELECT " +
+        "(SELECT count(*) FROM snapshot_embedding_indexes WHERE snapshot_id = $1)::text AS indexes, " +
+        "(SELECT count(*) FROM code_chunk_embeddings WHERE snapshot_id = $1)::text AS embeddings",
+      [indexJob.snapshotId],
+    );
+    expect(cascaded.rows[0]).toEqual({ indexes: "0", embeddings: "0" });
+    repositoryIds.delete(imported.repositoryId);
+  });
+
   it("enqueues GitHub pushes idempotently and records automation metadata", async () => {
     const suffix = randomUUID();
     const input = {
