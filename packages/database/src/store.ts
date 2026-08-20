@@ -2740,18 +2740,29 @@ export class RepoVistaStore {
       content_hash: string;
       score: number;
     }>(
-      "SELECT c.id, c.snapshot_id, rs.commit_sha, c.snapshot_file_id, f.path, c.symbol_id, " +
-        "s.name AS symbol, c.start_line, c.end_line, c.content, c.content_hash, " +
-        "1 - (e.embedding <=> $3::vector) AS score " +
-        "FROM code_chunk_embeddings e " +
+      "WITH embedding_profile AS MATERIALIZED (" +
+        "SELECT dimensions FROM snapshot_embedding_indexes " +
+        "WHERE id = $1 AND snapshot_id = $2 AND status = 'ready'" +
+        "), ranked_embeddings AS MATERIALIZED (" +
+        "SELECT e.code_chunk_id, e.snapshot_id, f.path, c.start_line, " +
+        "e.embedding <=> $3::vector AS distance " +
+        "FROM embedding_profile i " +
+        "JOIN code_chunk_embeddings e ON e.embedding_index_id = $1 " +
+        "AND e.snapshot_id = $2 AND e.dimensions = i.dimensions " +
         "JOIN code_chunks c ON c.id = e.code_chunk_id AND c.snapshot_id = e.snapshot_id " +
+        "AND c.content_hash = e.content_hash " +
         "JOIN snapshot_files f ON f.id = c.snapshot_file_id " +
-        "JOIN repository_snapshots rs ON rs.id = c.snapshot_id " +
+        "ORDER BY distance ASC, f.path ASC, c.start_line ASC, c.id ASC LIMIT $4" +
+        "), snapshot_context AS MATERIALIZED (" +
+        "SELECT commit_sha FROM repository_snapshots WHERE id = $2 AND status = 'ready'" +
+        ") SELECT c.id, c.snapshot_id, rs.commit_sha, c.snapshot_file_id, ranked.path, " +
+        "c.symbol_id, s.name AS symbol, c.start_line, c.end_line, c.content, c.content_hash, " +
+        "1 - ranked.distance AS score " +
+        "FROM ranked_embeddings ranked " +
+        "JOIN code_chunks c ON c.id = ranked.code_chunk_id AND c.snapshot_id = ranked.snapshot_id " +
+        "CROSS JOIN snapshot_context rs " +
         "LEFT JOIN symbols s ON s.id = c.symbol_id " +
-        "JOIN snapshot_embedding_indexes i ON i.id = e.embedding_index_id AND i.snapshot_id = e.snapshot_id " +
-        "WHERE e.embedding_index_id = $1 AND e.snapshot_id = $2 AND i.status = 'ready' " +
-        "AND e.dimensions = i.dimensions AND e.content_hash = c.content_hash " +
-        "ORDER BY e.embedding <=> $3::vector, f.path ASC, c.start_line ASC, c.id ASC LIMIT $4",
+        "ORDER BY ranked.distance ASC, ranked.path ASC, c.start_line ASC, c.id ASC",
       [options.embeddingIndexId, options.snapshotId, query, boundedLimit],
     );
     return result.rows.map((row) => ({

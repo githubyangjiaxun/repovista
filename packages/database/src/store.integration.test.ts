@@ -757,6 +757,7 @@ integration("RepoVistaStore with PostgreSQL", () => {
       limit: 5,
     });
     expect(semantic.length).toBeGreaterThan(0);
+    expect(semantic[0]?.id).toBe(firstChunk.id);
     expect(semantic.every((item) => item.channel === "semantic")).toBe(true);
 
     await pool.query("DELETE FROM repositories WHERE id = $1", [imported.repositoryId]);
