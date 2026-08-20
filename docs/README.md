@@ -18,6 +18,8 @@
 | [领域模型与数据流](./architecture/领域模型与数据流.md) | 仓库、快照、任务、证据、答案与分享报告的生命周期 |
 | [ADR 0001](./decisions/0001-implementation-baseline.md) | v0.1 技术选型和明确边界 |
 | [ADR 0002](./decisions/0002-v02-update-pipeline.md) | v0.2 增量、多语言、Webhook 与导出的共同边界 |
+| [ADR 0003](./decisions/0003-pr-impact-and-editor.md) | v0.3 双快照影响分析、固定 Commit 证据与编辑器安全边界 |
+| [ADR 0004](./decisions/0004-transparent-hybrid-retrieval.md) | v0.4 派生向量索引、透明降级、RRF 与 Story 事实边界 |
 
 ## v0.2 实施计划
 
@@ -41,6 +43,17 @@
 | [VS Code 扩展开发文档](./extensions/vscode扩展开发文档.md) | 固定快照导航、Repository Mapping、安全和打包 |
 | [v0.3 测试与发布计划](./operations/v0.3测试与发布计划.md) | 自动化、真实仓库、PR fixture、扩展和 Compose 发布门禁 |
 | [v0.3 验收记录](./releases/v0.3-验收记录.md) | 真实 Go、PR fixture、数据库兼容性、Web、扩展和发布审计证据 |
+
+## v0.4 实施计划（已冻结，待实现）
+
+| 文档 | 内容 |
+|---|---|
+| [版本开发计划](./releases/v0.4-开发计划.md) | 真实 Embedding、透明混合检索、Retrieval Lab 与 Architecture Story 的完整链路 |
+| [ADR 0004](./decisions/0004-transparent-hybrid-retrieval.md) | Snapshot 派生索引、可变维度 pgvector、RRF 与降级决策 |
+| [v0.4 后端开发文档](./backend/v0.4后端开发文档.md) | Provider、Embedding Worker、检索编排、API 与 Story Builder |
+| [v0.4 数据库设计](./database/v0.4数据库设计.md) | Embedding Profile、Chunk Vector、Job、事务与查询不变量 |
+| [v0.4 前端开发文档](./frontend/v0.4前端开发文档.md) | Evidence Retrieval Lab、Ask Trace、Story v2 与可访问性 |
+| [v0.4 测试与发布计划](./operations/v0.4测试与发布计划.md) | 模型协议、数据库、真实 Ollama、检索质量、性能和发布门禁 |
 
 ## 前端
 
