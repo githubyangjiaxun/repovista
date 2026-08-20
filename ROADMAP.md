@@ -24,11 +24,11 @@
 - [Done](./docs/releases/v0.3-开发计划.md) Web Impact Workspace and fixed evidence links.
 - [Done](./docs/releases/v0.3-开发计划.md) Independently versioned VS Code extension with read-only mapping, security boundaries, tests, and `.vsix` packaging.
 
-## v0.4 — Transparent semantic retrieval and architecture stories (planned)
+## v0.4 — Transparent semantic retrieval and architecture stories (implemented 2026-08-20)
 
-- [Planned](./docs/releases/v0.4-开发计划.md) Versioned Ollama/OpenAI-compatible embedding indexes attached to immutable snapshots.
-- [Planned](./docs/releases/v0.4-开发计划.md) Explainable text, symbol, semantic, and RRF hybrid retrieval with explicit degradation.
-- [Planned](./docs/releases/v0.4-开发计划.md) Evidence Retrieval Lab, shared grounded-Ask trace, and CLI search/index workflows.
-- [Planned](./docs/releases/v0.4-开发计划.md) Commit-pinned Architecture Story v2 with deterministic hotspots, reading paths, evidence, and provenance.
+- [Done](./docs/releases/v0.4-开发计划.md) Versioned Ollama/OpenAI-compatible embedding indexes attached to immutable snapshots.
+- [Done](./docs/releases/v0.4-开发计划.md) Explainable text, symbol, semantic, and RRF hybrid retrieval with explicit degradation.
+- [Done](./docs/releases/v0.4-开发计划.md) Evidence Retrieval Lab, shared grounded-Ask trace, and CLI search/index workflows.
+- [Done](./docs/releases/v0.4-开发计划.md) Commit-pinned Architecture Story v2 with deterministic hotspots, reading paths, evidence, and provenance.
 
 Roadmap ordering may change based on measured usage and contributor feedback.

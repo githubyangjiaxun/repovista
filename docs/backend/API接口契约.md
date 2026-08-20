@@ -1,6 +1,6 @@
 # API 接口契约
 
-状态：v0.3 已实现并验收
+状态：v0.4 已实现并验收（2026-08-20）
 Base path：`/v1`
 机器事实来源：`openapi/openapi.json`
 
@@ -38,7 +38,7 @@ X-Request-ID: client-generated-id
 }
 ```
 
-Health Endpoint 直接返回 `{ "status": "ok" }`，不包信封。v0.2 仍没有 Authorization Header 约定。
+Health Endpoint 直接返回 `{ "status": "ok" }`，不包信封。v0.4 仍没有 Authorization Header 约定。
 
 ## 2. Operation 列表
 
@@ -52,6 +52,11 @@ Health Endpoint 直接返回 `{ "status": "ok" }`，不包信封。v0.2 仍没�
 | GET | `/v1/repositories` | 列出 Public Workspace 仓库 |
 | GET | `/v1/repositories/{repositoryId}` | 仓库摘要和最新 Snapshot |
 | GET | `/v1/repositories/{repositoryId}/snapshots` | 列出不可变 Snapshot |
+| POST | `/v1/repositories/{repositoryId}/pull-requests` | 创建/复用固定 Base/Head 的 PR Impact Analysis |
+| GET | `/v1/pull-request-analyses/{analysisId}` | 读取 PR Analysis 状态与汇总 |
+| GET | `/v1/pull-request-analyses/{analysisId}/impact` | 分页读取 Changed/Direct/Transitive/Unknown Impact |
+| GET | `/v1/pull-request-analyses/{analysisId}/events` | PR Analysis SSE 事件 |
+| POST | `/v1/pull-request-analyses/{analysisId}/rerun` | 显式创建下一 Revision |
 | GET | `/v1/snapshots/{snapshotId}` | Snapshot 状态与统计 |
 | GET | `/v1/snapshots/{snapshotId}/exports/markdown` | 下载固定 Snapshot 的 Markdown 报告 |
 | GET | `/v1/snapshots/{snapshotId}/exports/svg` | 下载固定 Snapshot 的 SVG 地图 |
@@ -61,12 +66,15 @@ Health Endpoint 直接返回 `{ "status": "ok" }`，不包信封。v0.2 仍没�
 | GET | `/v1/snapshots/{snapshotId}/map` | 包/文件/符号图 |
 | GET | `/v1/snapshots/{snapshotId}/files` | 文件 Cursor 列表 |
 | GET | `/v1/snapshots/{snapshotId}/source` | 固定 Snapshot 源码 |
-| GET | `/v1/snapshots/{snapshotId}/search` | 证据搜索 |
-| POST | `/v1/repositories/{repositoryId}/ask` | 可信问答 |
-| POST | `/v1/share-reports` | 创建公开导览 |
-| GET | `/v1/share-reports/{slug}` | 读取公开导览 |
+| GET | `/v1/snapshots/{snapshotId}/symbols/{symbolId}` | 读取固定 Symbol Evidence |
+| GET | `/v1/snapshots/{snapshotId}/retrieval` | Text/Symbol/Semantic 能力与 Profile 状态 |
+| POST | `/v1/snapshots/{snapshotId}/embeddings` | 创建、复用或重试 Embedding Index Job |
+| GET | `/v1/snapshots/{snapshotId}/search` | 执行 Text/Symbol/Semantic/Hybrid 检索并返回 Trace |
+| POST | `/v1/repositories/{repositoryId}/ask` | 复用 Hybrid Retriever 的可信问答 |
+| POST | `/v1/share-reports` | 创建 Architecture Story v2 |
+| GET | `/v1/share-reports/{slug}` | 读取 v1 Tour 或 v2 Story |
 
-共 27 个 Operation。
+共 29 个 Operation。
 
 ## 3. 创建分析
 
@@ -116,7 +124,8 @@ data: {"phase":"parsing","progress":0.62,"processed":120,"total":190}
 
 客户端断线后应携带最后 Event ID 重连，并同时读取 Job 当前状态，避免错过终态。
 
-Progress Event 的 `message` 是可展示的阶段说明。增量 Parsing 会明确报告本轮 Parsed 与 Reused 文件数；客户端不能只根据百分比猜测。
+Progress Event 的 `message` 是可展示的阶段说明。增量 Parsing 会明确报告本轮 Parsed 与 Reused
+文件数；Embedding Job 报告 embedded/total Chunk 和 Provider/Model，客户端不能只根据百分比猜测。
 
 ## 5. 地图
 
@@ -146,17 +155,46 @@ GET /v1/snapshots/{snapshotId}/source?path=src/server.ts&startLine=10&endLine=40
 
 响应包含 `id`、`path`、`language`、`content`、`lineCount`、实际 `startLine`、`commitSha`、`blobHash`、`truncated`。Path 必须属于该 Snapshot，目录穿越返回 400。
 
-## 7. 搜索
+## 7. Retrieval 状态与 Embedding Job
+
+```http
+GET /v1/snapshots/{snapshotId}/retrieval
+POST /v1/snapshots/{snapshotId}/embeddings
+```
+
+Retrieval Status 返回 Text/Symbol Ready 状态，以及 Semantic 的 `configured`、`queryable`、
+`reason`、`currentIndex` 和 `latestIndex`。Profile 包含 Provider、Model、Input Version、Status、
+Dimensions、Total/Embedded Chunk、Revision、Job、Failure 和时间，不返回 Endpoint/API Key。
+
+创建 Embedding 要求 Snapshot Ready 且服务显式配置真实 Provider/Model：
+
+- 新 Profile/Job 返回 202；
+- queued/running Profile 幂等返回原 Job；
+- ready Profile 返回 200，不重新计算；
+- failed/cancelled Profile 显式重试并复用 Hash 匹配的 Partial Vector；
+- 未配置返回 `EMBEDDING_PROVIDER_DISABLED`，配置/维度/上游错误使用稳定 Error Code。
+
+## 8. 搜索
 
 ```http
 GET /v1/snapshots/{snapshotId}/search?q=createRouter&mode=hybrid&limit=20
 ```
 
-`mode` 接受 `text|symbol|hybrid`。当前存储层返回同一套全文/符号证据，Mode 会在响应中回显，为后续检索策略扩展保留 Contract。
+`mode` 接受 `text|symbol|semantic|hybrid`，`limit` 为 1～100：
 
-每条 Evidence 包含 Snapshot、Commit、File、可选 Symbol、行号、内容、Hash 和 Score。
+- `text`：PostgreSQL Full-text + Path；
+- `symbol`：Symbol Name/Qualified Name/Path Exact/Fuzzy；
+- `semantic`：当前 Provider/Model 的 Ready Profile + 真实 Query Vector；
+- `hybrid`：可用通道的 Reciprocal Rank Fusion。
 
-## 8. 可信问答
+响应包含 `query`、`results[]` 和 `trace`。Trace 公开 Requested Mode、Used Channels、每个通道的
+Status/Candidate Count/Latency/Reason、是否降级以及 Profile 来源。Semantic-only 不可用时返回错误；
+Hybrid 在 Semantic 上游失败时仍可返回 Text/Symbol，但必须 `degraded=true` 并说明原因。
+
+每条 Hit 包含 Snapshot、Commit、File、可选 Symbol、行号、内容、Hash、Fusion Score 和
+`signals[]`；每个 Signal 带 Channel、1-based Rank 和 Raw Score。不同通道原始分数不直接相加。
+
+## 9. 可信问答
 
 ```http
 POST /v1/repositories/{repositoryId}/ask
@@ -178,10 +216,12 @@ POST /v1/repositories/{repositoryId}/ask
 - `messageId`。
 - `answer.summary/steps/limitations/status/citations/provider/model`。
 - 服务端实际检索的 `evidence[]`。
+- 与 Search 同结构的 `trace`，说明实际使用通道、降级和 Embedding Profile。
 
-Citation 的路径、行号和 Quote 来自服务端 Evidence，而不是模型自由输出。
+Ask 使用同一 Hybrid Retriever；Citation 的路径、行号和 Quote 来自服务端 Evidence，而不是模型
+自由输出。`MODEL_PROVIDER=fake` 是确定性 Evidence Summarizer，不等于 Semantic 已配置。
 
-## 9. 分享报告
+## 10. 分享报告
 
 ```http
 POST /v1/share-reports
@@ -190,13 +230,15 @@ POST /v1/share-reports
 ```json
 {
   "snapshotId": "uuid",
-  "title": "owner/repository architecture tour"
+  "title": "owner/repository architecture story"
 }
 ```
 
-返回 201 和 `{id, slug}`。`GET /v1/share-reports/{slug}` 公开读取创建时固定的 Repository、Snapshot、Overview、Reading Path 和 Package Map。
+返回 201 和 `{id, slug}`。新记录写 `report_type=architecture_story`、`content_version=2`。
+`GET /v1/share-reports/{slug}` 公开读取创建时固定的 Repository/Snapshot，以及 Metrics、Overview、
+Package Map、Key Modules、Reading Path、Evidence Highlights 和 Provenance。旧 v1 Tour 继续读取。
 
-## 10. GitHub 自动更新
+## 11. GitHub 自动更新
 
 `GET /v1/integrations/github` 只返回 `enabled/appSlug/events/scope`，永不返回 Secret。
 
@@ -208,7 +250,16 @@ Webhook 请求必须包含：
 
 服务端先对原始 JSON Bytes 做 HMAC-SHA256，再解析 Payload。`ping`、未知事件、Private、非默认分支和删除 Push 被安全忽略；Public 默认分支 Push 以完整 `after` SHA 创建 Snapshot/Job。同 Delivery/同 Body 返回 Duplicate；同 Delivery/不同 Body 返回 409。
 
-## 11. Snapshot 导出
+## 12. Pull Request Impact
+
+`POST /v1/repositories/{repositoryId}/pull-requests` 接受公共 GitHub PR Number 与可选 rerun 语义，
+把 Base/Head Ref 解析为不可变 Snapshot。Analysis Status、SSE、Impact Cursor、Kind/Risk/Path Filter、
+固定 Evidence、最短路径与 Revision 的机器字段以 OpenAPI 为准。
+
+相同 Repository/PR/Base/Head/Parser/Algorithm 幂等复用；`rerun` 创建下一 Revision。GitHub 上游
+Rate Limit 与无效 PR 使用稳定错误，不能回退到可变分支内容。
+
+## 13. Snapshot 导出
 
 Markdown 与 SVG 只允许 Ready Snapshot。它们是附件正文，不使用 JSON Success Envelope；错误仍使用统一失败信封。
 
@@ -219,17 +270,17 @@ GET /v1/snapshots/{snapshotId}/exports/svg?level=package|file|symbol
 
 响应设置安全 `Content-Disposition`、`ETag`、`X-Content-Type-Options`；SVG 额外设置 Sandbox CSP。输出固定完整 Commit SHA、Snapshot ID 和 Parser Version，不调用 AI Provider。
 
-## 12. 状态码
+## 14. 状态码
 
 - 200：读取或问答成功。
 - 201：Share Report 创建成功。
-- 202：分析或取消请求被接受。
+- 202：Source/PR/Embedding 分析或取消请求被接受。
 - 401：GitHub Webhook 签名错误。
 - 400：输入、URL、Ref 或 Path 不合法。
 - 404：资源不存在。
-- 409：Snapshot 未 Ready、Delivery Payload 冲突等状态冲突。
+- 409：Snapshot/Embedding 未 Ready、Delivery Payload 冲突、配置不匹配等状态冲突。
 - 429：匿名业务限流。
-- 502：上游模型失败或输出不合法。
-- 503：Readiness 数据库不可用或 Webhook 未配置。
+- 502：上游 Chat/Embedding 输出不合法或不可接受。
+- 503：Readiness 数据库不可用、Webhook 未配置或可重试 Embedding 上游不可用。
 
 调用方必须按 `error.code` 和 `retryable` 决策，不解析英文 Message。

@@ -508,6 +508,11 @@ integration("RepoVistaStore with PostgreSQL", () => {
       retryable: true,
       error: { code: "REPOSITORY_CLONE_FAILED" },
     });
+
+    // This test intentionally leaves its job retryable. Remove its isolated fixture now so the
+    // global queue cannot feed that job to a later claim-oriented integration test.
+    await pool.query("DELETE FROM repositories WHERE id = $1", [imported.repositoryId]);
+    repositoryIds.delete(imported.repositoryId);
   });
 
   it("survives a checked-out transaction connection being terminated", async () => {

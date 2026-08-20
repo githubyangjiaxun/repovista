@@ -5,6 +5,48 @@ Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-20
+
+### Added
+
+- Real Ollama and OpenAI-compatible embedding adapters with bounded versioned inputs, strict
+  vector validation, and independently configured chat/embedding providers.
+- Snapshot-scoped embedding profiles, resumable leased jobs, partial-batch reuse, variable
+  dimensions, explicit lifecycle/error states, and exact pgvector search.
+- Transparent text, symbol, semantic, and RRF hybrid retrieval with per-channel rank/score traces,
+  stable ordering, and explicit Hybrid degradation when semantic retrieval is unavailable.
+- Web Evidence Retrieval Lab, semantic-index status and build controls, grounded-Ask retrieval
+  summaries, and deterministic public Architecture Story v2 pages.
+- CLI `search` and `embed --wait` workflows plus a deterministic test-only retrieval-quality
+  benchmark that reports Recall@1/3/5, MRR@10, candidate counts, and Hybrid/Text deltas.
+
+### Changed
+
+- Grounded Ask now uses the same hybrid retrieval pipeline as Search while retaining server-side
+  citation verification and evidence-only refusal behavior.
+- Semantic SQL ranks and limits vectors inside one fixed embedding profile before joining source
+  metadata, avoiding an all-metadata distance sort.
+- Root and workspace package versions, CLI user agent, and the OpenAPI contract are now `0.4.0`;
+  the checked API contains 29 operations.
+
+### Fixed
+
+- Job completion now schedules repository navigation only once even when polling and SSE observe
+  the same terminal status, preventing duplicate RSC navigations during a cold dynamic-page load.
+
+### Verification
+
+- `go-chi/chi@8b258c7bb28f97a5f2a856ff7ef962578fec9215` produced 97 files, 644
+  symbols, 3,120 edges, and 663 chunks; Ollama `nomic-embed-text` produced 663/663 validated
+  768-dimensional vectors in 73.02 seconds, and restart reuse returned the same Profile/Job.
+- With Ollama stopped, Hybrid returned HTTP 200 with lexical evidence and
+  `provider_unavailable`; semantic-only returned HTTP 503 `EMBEDDING_UPSTREAM_UNAVAILABLE`.
+- Optimized semantic SQL measured 41.772 ms cold and 2.5–3.1 ms warm in the documented temporary
+  tmpfs PostgreSQL plan audit; 20 real Hybrid requests measured p50 56 ms and p95 69 ms after
+  warm-up. Full context and limitations are in [the v0.4 acceptance record](docs/releases/v0.4-验收记录.md).
+- Final release gates passed 19/19 typecheck and build tasks, 155 tests with real PostgreSQL, 6/6
+  Playwright journeys, all three Compose image builds, and full Git integrity checks.
+
 ## [0.3.0] - 2026-08-20
 
 ### Added

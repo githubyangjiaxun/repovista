@@ -174,9 +174,15 @@ importers:
 
   benchmarks:
     dependencies:
+      '@repovista/contracts':
+        specifier: workspace:*
+        version: link:../packages/contracts
       '@repovista/parser':
         specifier: workspace:*
         version: link:../packages/parser
+      '@repovista/retrieval':
+        specifier: workspace:*
+        version: link:../packages/retrieval
 
   packages/ai:
     dependencies:

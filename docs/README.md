@@ -1,6 +1,6 @@
 # RepoVista 工程文档
 
-状态：v0.3 已实现并完成自动化、真实数据库、公共仓库 fixture、Web Impact Workspace 与独立 VS Code 扩展验收（2026-08-20）
+状态：v0.4 已实现并完成自动化、真实 PostgreSQL、公共 Go 仓库、真实 Ollama、透明降级、Web Retrieval Lab、CLI 与 Architecture Story 验收（2026-08-20）
 
 本目录描述当前代码，而不是早期愿景。发生冲突时，事实来源优先级如下：
 
@@ -44,7 +44,7 @@
 | [v0.3 测试与发布计划](./operations/v0.3测试与发布计划.md) | 自动化、真实仓库、PR fixture、扩展和 Compose 发布门禁 |
 | [v0.3 验收记录](./releases/v0.3-验收记录.md) | 真实 Go、PR fixture、数据库兼容性、Web、扩展和发布审计证据 |
 
-## v0.4 实施计划（已冻结，待实现）
+## v0.4 实施计划（已完成）
 
 | 文档 | 内容 |
 |---|---|
@@ -54,6 +54,7 @@
 | [v0.4 数据库设计](./database/v0.4数据库设计.md) | Embedding Profile、Chunk Vector、Job、事务与查询不变量 |
 | [v0.4 前端开发文档](./frontend/v0.4前端开发文档.md) | Evidence Retrieval Lab、Ask Trace、Story v2 与可访问性 |
 | [v0.4 测试与发布计划](./operations/v0.4测试与发布计划.md) | 模型协议、数据库、真实 Ollama、检索质量、性能和发布门禁 |
+| [v0.4 验收记录](./releases/v0.4-验收记录.md) | 真实 go-chi/chi、Ollama、查询排名、降级、SQL Plan、Story、质量门禁与 Git 审计 |
 
 ## 前端
 
@@ -67,7 +68,7 @@
 | 文档 | 内容 |
 |---|---|
 | [后端开发文档](./backend/后端开发文档.md) | Fastify 请求边界、配置、错误和模块职责 |
-| [API 接口契约](./backend/API接口契约.md) | 27 个 v0.3 Operation、信封格式、SSE、Webhook、导出与 PR Impact |
+| [API 接口契约](./backend/API接口契约.md) | 29 个 v0.4 Operation、信封格式、SSE、Embedding、四模式检索、Ask、Story 与 PR Impact |
 | [任务与索引流水线](./backend/任务与索引流水线.md) | 租约任务、安全克隆、扫描、解析和持久化 |
 
 ## 数据与可信 AI

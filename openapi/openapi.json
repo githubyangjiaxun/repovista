@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RepoVista API",
-    "version": "0.3.0",
-    "description": "Evidence-first repository indexing for TypeScript, JavaScript, Python, and Go, with deterministic pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, grounded answers, and immutable share reports."
+    "version": "0.4.0",
+    "description": "Evidence-first repository indexing for TypeScript, JavaScript, Python, and Go, with versioned semantic indexes, transparent hybrid retrieval, deterministic architecture stories, pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, and grounded answers."
   },
   "servers": [
     {

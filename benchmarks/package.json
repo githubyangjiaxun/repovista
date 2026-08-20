@@ -1,6 +1,6 @@
 {
   "name": "@repovista/benchmarks",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,6 +10,8 @@
     "benchmark": "tsx src/index.ts"
   },
   "dependencies": {
-    "@repovista/parser": "workspace:*"
+    "@repovista/contracts": "workspace:*",
+    "@repovista/parser": "workspace:*",
+    "@repovista/retrieval": "workspace:*"
   }
 }

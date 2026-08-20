@@ -104,7 +104,7 @@ describe("RepoVista CLI", () => {
     const exitCode = await runCli(["--version"], dependencies);
 
     expect(exitCode).toBe(0);
-    expect(stdout).toEqual(["0.3.0"]);
+    expect(stdout).toEqual(["0.4.0"]);
     expect(stderr).toEqual([]);
     expect(fetchImplementation).not.toHaveBeenCalled();
   });

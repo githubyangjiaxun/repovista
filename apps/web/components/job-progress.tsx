@@ -3,7 +3,7 @@
 import { Check, Circle, CircleX, LoaderCircle, Radio, RotateCcw, X } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiErrorMessage, apiFetch, apiOrigin, type Job } from "@/lib/api";
 
 const stages = [
@@ -36,17 +36,23 @@ export function JobProgress({
   const [streamConnected, setStreamConnected] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [progressMessage, setProgressMessage] = useState<string | null>(null);
+  const navigationScheduled = useRef(false);
+  const navigationTimer = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       const next = await apiFetch<Job>(`/v1/jobs/${jobId}`);
       setJob(next);
       setError(null);
-      if (next.status === "succeeded" && repositoryId) {
+      if (next.status === "succeeded" && repositoryId && !navigationScheduled.current) {
+        navigationScheduled.current = true;
         const destination = snapshotId
           ? `/repositories/${repositoryId}?snapshotId=${encodeURIComponent(snapshotId)}`
           : `/repositories/${repositoryId}`;
-        window.setTimeout(() => router.replace(destination), 900);
+        navigationTimer.current = window.setTimeout(() => {
+          navigationTimer.current = null;
+          router.replace(destination);
+        }, 900);
       }
     } catch (cause) {
       setError(apiErrorMessage(cause, "Unable to load job progress."));
@@ -84,6 +90,11 @@ export function JobProgress({
     return () => {
       window.clearInterval(poll);
       events.close();
+      if (navigationTimer.current !== null) {
+        window.clearTimeout(navigationTimer.current);
+        navigationTimer.current = null;
+        navigationScheduled.current = false;
+      }
     };
   }, [jobId, refresh]);
 

@@ -26,6 +26,25 @@ The map, source browser, search, reading path, and share reports remain useful w
 key. The default `fake` provider is a transparent deterministic evidence summarizer, so the full
 workflow can be evaluated locally before connecting Ollama or an OpenAI-compatible endpoint.
 
+## What v0.4 includes
+
+- Versioned, immutable-Snapshot embedding indexes through real Ollama or OpenAI-compatible
+  `/embeddings` endpoints, with resumable leased jobs and validated variable-dimension vectors.
+- Transparent `text`, `symbol`, `semantic`, and RRF `hybrid` retrieval. Every result exposes its
+  channel ranks and raw scores; Hybrid reports explicit degradation instead of pretending that
+  semantic retrieval succeeded.
+- An Evidence Retrieval Lab in the Web workspace, shared retrieval traces for grounded Ask, and
+  CLI workflows for building indexes and searching fixed snapshots.
+- Deterministic Architecture Story v2 reports with metrics, package maps, key modules, reading
+  paths, source evidence, and complete Commit/parser/algorithm provenance.
+
+The release was exercised against `go-chi/chi` at
+`8b258c7bb28f97a5f2a856ff7ef962578fec9215`: 97 files, 644 symbols, 3,120 graph edges, and 663
+source chunks were indexed with Ollama `nomic-embed-text` into 663 validated 768-dimensional
+vectors. Hybrid search stayed available when Ollama was stopped, while semantic-only search
+returned an explicit upstream-unavailable error. Commands, ranks, SQL plans, machine details, and
+limitations are in the [v0.4 acceptance record](docs/releases/v0.4-验收记录.md).
+
 ## What v0.3 includes
 
 - Go Tree-sitter indexing with module-path import linking, struct embedding, interface implementation, methods, calls, and incremental snapshots.
@@ -102,6 +121,14 @@ pnpm --filter @repovista/cli dev show <repository-id>
 pnpm --filter @repovista/cli dev ask <repository-id> "Where does this application start?"
 ```
 
+For a Ready Snapshot, inspect retrieval, build a configured semantic index, and search it:
+
+```bash
+pnpm --filter @repovista/cli dev embed <snapshot-id> --wait
+pnpm --filter @repovista/cli dev search <snapshot-id> \
+  "where is response compression configured" --mode hybrid --limit 10
+```
+
 Every command supports `--json`; `--api-url` points the CLI at a different API origin. Run
 `pnpm --filter @repovista/cli dev --help` for the complete command reference.
 
@@ -128,6 +155,29 @@ docker compose up --build -d
 RepoVista sends the retrieved source evidence to the selected model endpoint. Use `fake`, `none`,
 or a locally controlled Ollama instance when source must remain on the machine.
 
+Chat and embeddings are configured independently. Semantic retrieval is disabled by default and
+is never simulated by `MODEL_PROVIDER=fake`:
+
+| `EMBEDDING_PROVIDER` | Required configuration | Embedding protocol |
+|---|---|---|
+| `none` | none | Text and symbol search remain available; Hybrid reports `index_not_ready` |
+| `ollama` | `EMBEDDING_MODEL`, `OLLAMA_BASE_URL` | `POST /api/embed` |
+| `openai-compatible` | `EMBEDDING_MODEL`, `OPENAI_COMPATIBLE_BASE_URL`, optional key | `POST /embeddings` |
+
+Example with host Ollama and the model used for v0.4 acceptance:
+
+```bash
+ollama pull nomic-embed-text
+EMBEDDING_PROVIDER=ollama \
+EMBEDDING_MODEL=nomic-embed-text \
+OLLAMA_BASE_URL=http://host.docker.internal:11434 \
+docker compose up --build -d
+```
+
+API and Worker must use the same provider/model configuration. Embedding input is bounded and
+versioned (`code-chunk-v1`); vector count, finite values, non-zero norm, and dimensions are
+validated before persistence.
+
 ## Architecture
 
 ```mermaid
@@ -136,9 +186,12 @@ flowchart LR
     CLI[RepoVista CLI] --> API
     GitHub[Signed GitHub webhook] --> API
     API --> PG[(PostgreSQL 17 + pgvector)]
-    API --> Model[Fake / Ollama / OpenAI-compatible]
+    API --> Chat[Fake / Ollama / OpenAI-compatible chat]
+    API --> Embed[Ollama / OpenAI-compatible embeddings]
     API --> Export[Deterministic Markdown / SVG]
+    API --> Story[Deterministic Architecture Story]
     Worker[Index Worker] --> PG
+    Worker --> Embed
     Worker --> Git[Safe shallow Git clone]
     Git --> Plan[Content-hash incremental plan]
     Plan --> Parser[Tree-sitter TS / JS / Python / Go]
@@ -151,13 +204,13 @@ flowchart LR
 This is a modular TypeScript monorepo:
 
 ```text
-apps/web       Next.js repository explorer
-apps/api       Fastify HTTP API and grounded-answer orchestration
-apps/worker    leased full/incremental indexing worker
+apps/web       Next.js repository explorer and Evidence Retrieval Lab
+apps/api       Fastify HTTP API, retrieval, story, and grounded-answer orchestration
+apps/worker    leased source-index and resumable embedding-index worker
 apps/cli       command-line client
-packages/*     contracts, database, Git, parser, graph, retrieval, AI, exporter, UI
+packages/*     contracts, database, Git, parser, graph, embeddings, retrieval, story, AI, exporter, UI
 openapi/       checked API contract
-benchmarks/    parser benchmark harness
+benchmarks/    parser baseline and deterministic retrieval-quality harness
 ```
 
 The API and Worker coordinate through PostgreSQL rather than Redis. Source blobs are content
@@ -192,12 +245,13 @@ docker compose config --quiet
 DATABASE_TEST_URL=postgresql://repovista:repovista@localhost:5432/repovista pnpm test
 ```
 
-`pnpm check` validates the 27-operation OpenAPI contract, formatting/lint rules, TypeScript,
+`pnpm check` validates the 29-operation OpenAPI contract, formatting/lint rules, TypeScript,
 unit/integration tests that have their required environment, and production builds. Playwright
 covers import, incremental progress, Python source navigation, map/source exploration, grounded
 answers, sharing, repository listing, deterministic Markdown/SVG downloads, pull-request impact
-progress/filters/fixed evidence, and structured failures with deterministic network mocks. The
-independent VS Code project has its own `pnpm check` and reproducible `vsce package` gate.
+progress/filters/fixed evidence, Retrieval Lab modes/degradation, Architecture Story v2, and
+structured failures with deterministic network mocks. The independent VS Code project has its own
+`pnpm check` and reproducible `vsce package` gate.
 
 ## Security model
 
@@ -223,6 +277,7 @@ Read [SECURITY.md](./SECURITY.md) before reporting a vulnerability.
 - [Trusted AI design](./docs/ai/AI可信问答设计.md)
 - [Local development and deployment](./docs/operations/本地开发与部署.md)
 - [Testing and release gates](./docs/operations/测试与质量.md)
+- [v0.4 acceptance record](./docs/releases/v0.4-验收记录.md)
 - [Roadmap](./ROADMAP.md)
 
 The machine-readable API source of truth is [openapi/openapi.json](./openapi/openapi.json).

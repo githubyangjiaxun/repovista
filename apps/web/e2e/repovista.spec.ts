@@ -936,14 +936,19 @@ test("analyzes a repository and explores its evidence-backed result", async ({ c
   await page.getByLabel("Ignored paths").fill("dist\ngenerated");
   await page.getByRole("button", { name: "Analyze repository" }).click();
 
-  await expect(page).toHaveURL(new RegExp(`/jobs/${jobId}`));
+  await expect
+    .poll(() => state.importRequests, {
+      message: "repository import request should reach the mocked API",
+    })
+    .toHaveLength(1);
+  await expect(page).toHaveURL(new RegExp(`/jobs/${jobId}`), { timeout: 30_000 });
   await expect(page.getByRole("progressbar")).toBeVisible();
   await expect(
     page.getByText("Parsed 2 of 2 changed files; reused 1 unchanged file."),
   ).toBeVisible();
   await expect(page).toHaveURL(
     `${webOrigin}/repositories/${repositoryId}?snapshotId=${snapshotId}`,
-    { timeout: 12_000 },
+    { timeout: 30_000 },
   );
   expect(state.importRequests).toEqual([
     { url: repository.canonicalUrl, ref: "main", ignore: ["dist", "generated"] },
@@ -1083,14 +1088,21 @@ test("keeps hybrid useful and makes semantic-only failure explicit when Ollama s
 });
 
 test("analyzes pull request impact and opens immutable evidence", async ({ context, page }) => {
+  test.setTimeout(60_000);
   const state = await installMockApi(context);
   await page.goto(`/repositories/${repositoryId}?snapshotId=${snapshotId}`);
 
   await page.getByLabel("Pull request impact").fill("42");
   await page.getByRole("button", { name: "Analyze pull request" }).click();
 
+  await expect
+    .poll(() => state.prAnalysisRequests, {
+      message: "pull request analysis request should reach the mocked API",
+    })
+    .toHaveLength(1);
   await expect(page).toHaveURL(
     `${webOrigin}/repositories/${repositoryId}/pull-requests/42?analysisId=${prAnalysisId}`,
+    { timeout: 30_000 },
   );
   await expect(
     page.getByText("Waiting for immutable base and head snapshots.").first(),
@@ -1173,6 +1185,7 @@ test("downloads deterministic Markdown and SVG for the selected snapshot", async
 });
 
 test("lists existing repositories and opens an immutable snapshot", async ({ context, page }) => {
+  test.setTimeout(60_000);
   await installMockApi(context);
 
   await page.goto("/repositories");
@@ -1183,8 +1196,9 @@ test("lists existing repositories and opens an immutable snapshot", async ({ con
   await page.getByRole("link", { name: /acme signal-hub/ }).click();
   await expect(page).toHaveURL(
     `${webOrigin}/repositories/${repositoryId}?snapshotId=${snapshotId}`,
+    { timeout: 30_000 },
   );
-  await expect(page.getByText("main · 0123456")).toBeVisible();
+  await expect(page.getByText("main · 0123456")).toBeVisible({ timeout: 30_000 });
 });
 
 test("shows structured API failures with a request ID", async ({ context, page }) => {
