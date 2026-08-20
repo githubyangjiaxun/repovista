@@ -328,6 +328,111 @@ integration("RepoVistaStore with PostgreSQL", () => {
     expect(updatedRepository?.latestSnapshotId).toBe(incrementalJob.snapshotId);
   });
 
+  it("reports the canonical edge count after unresolved calls resolve to one target", async () => {
+    const suffix = randomUUID();
+    const imported = await store.createRepositoryImport({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      identity: {
+        owner: "repovista-edge-count-test",
+        name: suffix,
+        canonicalUrl: `https://github.com/repovista-edge-count-test/${suffix}`,
+        cloneUrl: `https://github.com/repovista-edge-count-test/${suffix}.git`,
+      },
+      ignore: [],
+      parserVersion: "integration-edge-count-v1",
+    });
+    repositoryIds.add(imported.repositoryId);
+    const job = await store.claimIndexJob("edge-count-worker", 30);
+    if (!job) throw new Error("Expected an edge-count index job.");
+    const content = [
+      "export function target() { return 1; }",
+      "export function caller() { return target(); }",
+    ].join("\n");
+    const contentHash = `sha256:${createHash("sha256").update(content).digest("hex")}`;
+    const moduleKey = "module:src/index.ts";
+    const targetKey = "function:src/index.ts:target:edge-count";
+    const callerKey = "function:src/index.ts:caller:edge-count";
+    const symbol = (
+      stableKey: string,
+      name: string,
+      startLine: number,
+    ): IndexedRepository["parsedFiles"][number]["symbols"][number] => ({
+      stableKey,
+      kind: name === "index.ts" ? "module" : "function",
+      name,
+      qualifiedName: name === "index.ts" ? "src/index.ts" : name,
+      signature: name === "index.ts" ? null : `${name}()`,
+      startLine,
+      startColumn: 0,
+      endLine: startLine,
+      endColumn: 1,
+      docText: null,
+      contentHash,
+    });
+    await store.completeIndexJob(job.id, job.snapshotId, job.repositoryId, "edge-count-worker", {
+      commitSha: "abcdef0123456789abcdef0123456789abcdef01",
+      branch: "main",
+      baseSnapshotId: null,
+      indexMode: "full",
+      treeHash: "sha256:edge-count-tree",
+      files: [
+        {
+          path: "src/index.ts",
+          absolutePath: `/tmp/${suffix}/src/index.ts`,
+          language: "typescript",
+          byteSize: Buffer.byteLength(content),
+          lineCount: 2,
+          content,
+          contentHash,
+          isGenerated: false,
+        },
+      ],
+      parsedFiles: [
+        {
+          path: "src/index.ts",
+          moduleStableKey: moduleKey,
+          imports: [],
+          symbols: [
+            symbol(moduleKey, "index.ts", 1),
+            symbol(targetKey, "target", 1),
+            symbol(callerKey, "caller", 2),
+          ],
+          edges: ["target", "service.target"].map((referenceTarget, index) => ({
+            fromStableKey: callerKey,
+            unresolvedTarget: referenceTarget,
+            type: "calls" as const,
+            confidence: 0.7,
+            evidence: {
+              path: "src/index.ts",
+              startLine: 2,
+              endLine: 2,
+              syntaxType: "call_expression",
+              referenceTarget,
+              importedNames: [String(index)],
+            },
+          })),
+        },
+      ],
+      stats: {
+        files: 1,
+        symbols: 3,
+        edges: 2,
+        languages: { typescript: 1 },
+        warnings: 0,
+        indexing: null,
+      },
+    });
+
+    const [snapshot, graph, events] = await Promise.all([
+      store.getSnapshot(job.snapshotId),
+      store.getSnapshotGraphData(job.snapshotId),
+      store.listJobEvents(job.id),
+    ]);
+    expect(graph?.edges).toHaveLength(1);
+    expect(snapshot?.stats.edges).toBe(1);
+    expect(events.at(-1)?.payload).toMatchObject({ stats: { edges: 1 } });
+  });
+
   it("allows only the lease owner to fail a job and preserves retryability", async () => {
     const suffix = randomUUID();
     const imported = await store.createRepositoryImport({

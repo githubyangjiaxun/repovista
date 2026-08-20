@@ -2270,6 +2270,19 @@ export class RepoVistaStore {
         }
       }
 
+      // Call-target resolution can collapse syntactically different unresolved references onto
+      // the same canonical relationship (for example `run` and `service.run`). The partial unique
+      // indexes on symbol_edges are the final graph authority, so publish their committed count
+      // instead of a pre-resolution parser estimate.
+      const edgeCountResult = await client.query<{ count: number }>(
+        "SELECT count(*)::integer AS count FROM symbol_edges WHERE snapshot_id = $1",
+        [snapshotId],
+      );
+      const persistedStats = {
+        ...indexed.stats,
+        edges: edgeCountResult.rows[0]?.count ?? 0,
+      };
+
       const parsedByPath = new Map(indexed.parsedFiles.map((item) => [item.path, item]));
       for (const file of indexed.files) {
         const fileId = fileIdByPath.get(file.path);
@@ -2323,7 +2336,7 @@ export class RepoVistaStore {
         "UPDATE repository_snapshots SET status = 'ready', stats_json = $2::jsonb, " +
           "ready_at = now(), failed_at = NULL, error_code = NULL, error_message = NULL " +
           "WHERE id = $1",
-        [snapshotId, JSON.stringify(indexed.stats)],
+        [snapshotId, JSON.stringify(persistedStats)],
       );
       await client.query(
         "UPDATE repositories r SET latest_ready_snapshot_id = $2, " +
@@ -2342,7 +2355,7 @@ export class RepoVistaStore {
         progress: 1,
         snapshotId,
         commitSha: indexed.commitSha,
-        stats: indexed.stats,
+        stats: persistedStats,
       });
     });
   }
