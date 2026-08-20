@@ -197,7 +197,18 @@ function gitEnvironment(): NodeJS.ProcessEnv {
 }
 
 function gitArgs(...args: string[]): string[] {
-  return ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", ...args];
+  return [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "credential.helper=",
+    // Pin the transport independently of user/system Git configuration. Besides making clone
+    // behavior reproducible, HTTP/1.1 avoids known HTTP/2 stalls seen with GitHub through some
+    // corporate/local proxy stacks while preserving the same HTTPS-only security boundary.
+    "-c",
+    "http.version=HTTP/1.1",
+    ...args,
+  ];
 }
 
 async function cloneCommit(options: CloneRepositoryOptions, environment: NodeJS.ProcessEnv) {
@@ -218,6 +229,7 @@ async function cloneCommit(options: CloneRepositoryOptions, environment: NodeJS.
       "fetch",
       "--depth",
       "1",
+      "--filter=blob:none",
       "--no-tags",
       "origin",
       options.ref as string,
@@ -238,7 +250,14 @@ async function cloneCommit(options: CloneRepositoryOptions, environment: NodeJS.
 export async function cloneRepository(
   options: CloneRepositoryOptions,
 ): Promise<{ commitSha: string; branch: string | null }> {
-  const args = gitArgs("clone", "--depth", "1", "--no-tags", "--single-branch");
+  const args = gitArgs(
+    "clone",
+    "--depth",
+    "1",
+    "--filter=blob:none",
+    "--no-tags",
+    "--single-branch",
+  );
   if (options.ref) {
     args.push("--branch", options.ref);
   }

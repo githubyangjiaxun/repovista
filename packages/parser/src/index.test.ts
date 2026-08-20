@@ -203,4 +203,25 @@ describe("parseSourceFile", () => {
     expect(parsed).toHaveLength(1);
     expect(parsed[0]?.symbols.some((symbol) => symbol.name === "Run")).toBe(true);
   });
+
+  it("parses Go source files larger than the binding's default 32 KiB buffer", () => {
+    const padding = Array.from({ length: 1_800 }, (_, index) => `// route fixture ${index}`).join(
+      "\n",
+    );
+    const parsed = parseGoSourceFile(
+      goFixture(`package service\n${padding}\nfunc Run() { helper() }\nfunc helper() {}`),
+    );
+
+    expect(parsed.symbols).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "function", name: "Run" }),
+        expect.objectContaining({ kind: "function", name: "helper" }),
+      ]),
+    );
+    expect(parsed.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "calls", unresolvedTarget: "helper" }),
+      ]),
+    );
+  });
 });

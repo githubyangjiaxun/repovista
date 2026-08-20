@@ -86,6 +86,17 @@ function sourceLines(content: string, startLine: number, endLine: number): strin
     .join("\n");
 }
 
+function parseText(parser: Parser, content: string): Parser.Tree {
+  // tree-sitter 0.21's Node binding defaults to a 32 KiB UTF-16 callback buffer. On Node 22,
+  // passing a longer string through that default path can make N-API return `Invalid argument`
+  // before the binding gets a chance to request the next chunk. Source files are already bounded
+  // by SOURCE_FILE_MAX_BYTES, so sizing the buffer to the exact UTF-16 input is deterministic and
+  // avoids silently dropping real-world files above 32 KiB.
+  return parser.parse(content, undefined, {
+    bufferSize: Math.max(64 * 1024, content.length + 1),
+  });
+}
+
 function importedNames(node: Parser.SyntaxNode): string[] {
   const clause = node.namedChildren.find((child) => child.type === "import_clause");
   if (!clause) return [];
@@ -159,7 +170,7 @@ function pythonAssignmentName(node: Parser.SyntaxNode): string | null {
 export function parsePythonSourceFile(file: ScannedFile): ParsedFile {
   const parser = new Parser();
   parser.setLanguage(Python);
-  const tree = parser.parse(file.content);
+  const tree = parseText(parser, file.content);
   const root = tree.rootNode;
   const rootStableKey = moduleKey(file.path);
   const moduleSymbol: ParsedSymbol = {
@@ -372,7 +383,7 @@ export function parseSourceFile(file: ScannedFile): ParsedFile {
   const parser = new Parser();
   const useTsx = [".tsx", ".jsx"].includes(path.extname(file.path).toLowerCase());
   parser.setLanguage(useTsx ? TypeScript.tsx : TypeScript.typescript);
-  const tree = parser.parse(file.content);
+  const tree = parseText(parser, file.content);
   const root = tree.rootNode;
   const rootStableKey = moduleKey(file.path);
   const moduleSymbol: ParsedSymbol = {
@@ -605,7 +616,7 @@ function goTypeSpec(node: Parser.SyntaxNode): {
 export function parseGoSourceFile(file: ScannedFile): ParsedFile {
   const parser = new Parser();
   parser.setLanguage(Go);
-  const tree = parser.parse(file.content);
+  const tree = parseText(parser, file.content);
   const root = tree.rootNode;
   const rootStableKey = moduleKey(file.path);
   const moduleSymbol: ParsedSymbol = {
