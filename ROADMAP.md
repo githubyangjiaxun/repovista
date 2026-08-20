@@ -17,10 +17,11 @@
 - [Done](./docs/releases/v0.2-开发计划.md) Signed GitHub push updates for public repositories.
 - [Done](./docs/releases/v0.2-开发计划.md) Deterministic Markdown and SVG exports.
 
-## v0.3
+## v0.3 — Pull-request impact workspace (implemented 2026-08-20)
 
-- [In progress](./docs/releases/v0.3-开发计划.md) Go parser adapter.
-- [In progress](./docs/releases/v0.3-开发计划.md) Pull request impact analysis.
-- [In progress](./docs/releases/v0.3-开发计划.md) VS Code extension.
+- [Done](./docs/releases/v0.3-开发计划.md) Go parser adapter and module-path import linking.
+- [Done](./docs/releases/v0.3-开发计划.md) Pull request impact analysis with immutable dual snapshots, bounded deterministic BFS, risk decomposition, paths, and evidence.
+- [Done](./docs/releases/v0.3-开发计划.md) Web Impact Workspace and fixed evidence links.
+- [Done](./docs/releases/v0.3-开发计划.md) Independently versioned VS Code extension with read-only mapping, security boundaries, tests, and `.vsix` packaging.
 
 Roadmap ordering may change based on measured usage and contributor feedback.

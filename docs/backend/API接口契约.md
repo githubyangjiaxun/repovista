@@ -1,6 +1,6 @@
 # API 接口契约
 
-状态：v0.2 已实现并验收
+状态：v0.3 已实现并验收
 Base path：`/v1`
 机器事实来源：`openapi/openapi.json`
 
@@ -66,7 +66,7 @@ Health Endpoint 直接返回 `{ "status": "ok" }`，不包信封。v0.2 仍没�
 | POST | `/v1/share-reports` | 创建公开导览 |
 | GET | `/v1/share-reports/{slug}` | 读取公开导览 |
 
-共 21 个 Operation。
+共 27 个 Operation。
 
 ## 3. 创建分析
 

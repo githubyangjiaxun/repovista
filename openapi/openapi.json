@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RepoVista API",
-    "version": "0.2.0",
-    "description": "Evidence-first incremental repository indexing for TypeScript, JavaScript, and Python, with signed GitHub updates, deterministic exports, grounded answers, and immutable share reports."
+    "version": "0.3.0",
+    "description": "Evidence-first repository indexing for TypeScript, JavaScript, Python, and Go, with deterministic pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, grounded answers, and immutable share reports."
   },
   "servers": [
     {
@@ -18,7 +18,8 @@
     { "name": "Jobs" },
     { "name": "Answers" },
     { "name": "Shares" },
-    { "name": "Integrations" }
+    { "name": "Integrations" },
+    { "name": "Pull Requests" }
   ],
   "paths": {
     "/v1/integrations/github": {
@@ -294,7 +295,7 @@
       "post": {
         "operationId": "createPullRequestAnalysis",
         "summary": "Queue a deterministic analysis for a public GitHub pull request",
-        "tags": ["Repositories"],
+        "tags": ["Pull Requests"],
         "requestBody": {
           "required": true,
           "content": {
@@ -326,7 +327,7 @@
       "get": {
         "operationId": "getPullRequestAnalysis",
         "summary": "Get immutable pull request analysis status and provenance",
-        "tags": ["Repositories"],
+        "tags": ["Pull Requests"],
         "responses": {
           "200": {
             "description": "Analysis status",
@@ -343,7 +344,7 @@
       "get": {
         "operationId": "getPullRequestImpact",
         "summary": "Read changed files, symbols, impact paths, risk and fixed evidence",
-        "tags": ["Repositories"],
+        "tags": ["Pull Requests"],
         "parameters": [
           {
             "name": "cursor",
@@ -372,7 +373,7 @@
       "get": {
         "operationId": "streamPullRequestAnalysisEvents",
         "summary": "Stream pull request analysis progress as SSE",
-        "tags": ["Jobs"],
+        "tags": ["Pull Requests"],
         "parameters": [
           {
             "name": "after",
@@ -394,7 +395,7 @@
       "post": {
         "operationId": "rerunPullRequestAnalysis",
         "summary": "Create a new immutable analysis revision",
-        "tags": ["Repositories"],
+        "tags": ["Pull Requests"],
         "responses": {
           "202": {
             "description": "Analysis revision queued",

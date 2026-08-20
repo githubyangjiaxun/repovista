@@ -5,6 +5,22 @@ Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-20
+
+### Added
+
+- Go parser adapter with module-path import linking, struct embedding, interface implementation, methods, calls, and parser-version compatibility boundaries.
+- Public GitHub pull-request impact pipeline with immutable base/head snapshots, idempotent revisions, bounded deterministic reverse BFS, risk decomposition, stable cursor pagination, shortest paths, unknown evidence, and rate-limit-safe upstream handling.
+- Web Impact Workspace for progress, changed files/symbols, risk and impact filters, evidence drawer, fixed GitHub links, VS Code evidence links, truncation warnings, and revision reruns.
+- Independently versioned `extensions/vscode` project with read-only repository mapping, fixed-commit navigation, TreeView/Webview, nonce CSP, Zod message validation, offline cache, security tests, and reproducible `.vsix` packaging.
+
+### Verification
+
+- Root OpenAPI contract: 27 operations; root lint, typecheck, unit/integration tests, and production builds pass.
+- Web: 15 Vitest tests, PR Impact Chromium route-mocked journey, and production build pass.
+- Extension: 13 tests, TypeScript check, compiled bundle, and `repovista-0.3.0.vsix` package audit pass; the VSIX contains only manifest, documentation, icon, and bundled runtime.
+- Real Go, PR fixture, PostgreSQL migration/compatibility, idempotency/rerun, and container-build evidence is recorded in [the v0.3 acceptance record](docs/releases/v0.3-验收记录.md).
+
 ## [0.2.0] - 2026-08-20
 
 ### Added

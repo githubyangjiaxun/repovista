@@ -18,7 +18,7 @@ an immutable commit and a deterministic index:
 | Layer | What it does | Trust property |
 |---|---|---|
 | Git snapshot | Resolves and shallow-clones a public repository | Every result is pinned to one commit |
-| Static analysis | Extracts modules, declarations, imports, and calls | Repeatable without a model |
+| Static analysis | Extracts modules, declarations, imports, calls, and cross-language relations | Repeatable without a model |
 | Evidence retrieval | Ranks source chunks and symbols | Always returns paths and line ranges |
 | AI explanation | Turns retrieved evidence into an answer | Unsupported citations are removed |
 
@@ -26,11 +26,20 @@ The map, source browser, search, reading path, and share reports remain useful w
 key. The default `fake` provider is a transparent deterministic evidence summarizer, so the full
 workflow can be evaluated locally before connecting Ollama or an OpenAI-compatible endpoint.
 
+## What v0.3 includes
+
+- Go Tree-sitter indexing with module-path import linking, struct embedding, interface implementation, methods, calls, and incremental snapshots.
+- Deterministic public GitHub pull-request impact analysis across immutable base/head snapshots, with direct/transitive/unknown results, bounded reverse BFS, risk breakdown, shortest paths, and fixed evidence.
+- A Web Impact Workspace with progress polling, changed-file/symbol summaries, stable cursor pagination, filters, evidence drawer, GitHub links, and read-only VS Code links.
+- An independently versioned VS Code extension (`extensions/vscode`) with repository mapping, immutable snapshot selection, TreeView/Webview impact inspection, nonce CSP, schema-validated messages, offline cache, path/Origin/Commit guards, and `.vsix` packaging.
+
+The reproducible real-repository and pull-request verification details are recorded in [docs/releases/v0.3-验收记录.md](docs/releases/v0.3-验收记录.md).
+
 ## What v0.2 includes
 
 - Public GitHub repository import with branch, tag, or commit selection.
 - Security-constrained shallow clones; repository scripts are never installed or executed.
-- TypeScript, TSX, JavaScript, JSX, MJS, CJS, and Python indexing with Tree-sitter.
+- TypeScript, TSX, JavaScript, JSX, MJS, CJS, and Python indexing with Tree-sitter (Go support is documented above for v0.3).
 - Package-, file-, and symbol-level architecture maps with source navigation.
 - Immutable source browsing and full-text/symbol evidence search.
 - PostgreSQL-backed jobs with leases, progress events, cancellation, retries, and crash recovery.
@@ -46,8 +55,8 @@ workflow can be evaluated locally before connecting Ollama or an OpenAI-compatib
 - Deterministic Markdown architecture reports and CSP-protected SVG maps for every ready snapshot.
 
 Current scope is intentionally narrow: RepoVista accepts public
-`https://github.com/owner/repository` URLs. Private repositories, installation tokens, OAuth, and
-additional language adapters remain out of scope. AI is an optional explanation layer; the map,
+`https://github.com/owner/repository` URLs. Private repositories, installation tokens, and OAuth
+remain out of scope. AI is an optional explanation layer; the map,
 source browser, search, and exports work without a model key.
 
 ## Quick start
@@ -132,8 +141,10 @@ flowchart LR
     Worker[Index Worker] --> PG
     Worker --> Git[Safe shallow Git clone]
     Git --> Plan[Content-hash incremental plan]
-    Plan --> Parser[Tree-sitter TS / JS / Python]
+    Plan --> Parser[Tree-sitter TS / JS / Python / Go]
     Parser --> Graph[Complete package / file / symbol graph]
+    Graph --> Impact[Deterministic PR impact + fixed evidence]
+    Impact --> Editor[Web Impact Workspace + VS Code extension]
     Graph --> PG
 ```
 
@@ -181,11 +192,12 @@ docker compose config --quiet
 DATABASE_TEST_URL=postgresql://repovista:repovista@localhost:5432/repovista pnpm test
 ```
 
-`pnpm check` validates the 21-operation OpenAPI contract, formatting/lint rules, TypeScript,
+`pnpm check` validates the 27-operation OpenAPI contract, formatting/lint rules, TypeScript,
 unit/integration tests that have their required environment, and production builds. Playwright
 covers import, incremental progress, Python source navigation, map/source exploration, grounded
-answers, sharing, repository listing, deterministic Markdown/SVG downloads, and structured
-failures with deterministic network mocks.
+answers, sharing, repository listing, deterministic Markdown/SVG downloads, pull-request impact
+progress/filters/fixed evidence, and structured failures with deterministic network mocks. The
+independent VS Code project has its own `pnpm check` and reproducible `vsce package` gate.
 
 ## Security model
 

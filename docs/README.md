@@ -1,6 +1,6 @@
 # RepoVista 工程文档
 
-状态：v0.2 已实现并完成自动化、真实数据库、Compose、公共 Python 仓库与 Webhook 验收（2026-08-20）
+状态：v0.3 已实现并完成自动化、真实数据库、公共仓库 fixture、Web Impact Workspace 与独立 VS Code 扩展验收（2026-08-20）
 
 本目录描述当前代码，而不是早期愿景。发生冲突时，事实来源优先级如下：
 
@@ -29,7 +29,7 @@
 | [v0.2 数据库设计](./database/v0.2数据库设计.md) | Snapshot 基线、Repository 自动更新和 Delivery 幂等表 |
 | [v0.2 测试与发布计划](./operations/v0.2测试与发布计划.md) | 自动化、真实仓库、Compose 和发布门禁 |
 
-## v0.3 实施计划（开发中）
+## v0.3 实施计划（已完成）
 
 | 文档 | 内容 |
 |---|---|
@@ -40,6 +40,7 @@
 | [v0.3 前端开发文档](./frontend/v0.3前端开发文档.md) | Impact Workspace、证据抽屉、分页和可访问性 |
 | [VS Code 扩展开发文档](./extensions/vscode扩展开发文档.md) | 固定快照导航、Repository Mapping、安全和打包 |
 | [v0.3 测试与发布计划](./operations/v0.3测试与发布计划.md) | 自动化、真实仓库、PR fixture、扩展和 Compose 发布门禁 |
+| [v0.3 验收记录](./releases/v0.3-验收记录.md) | 真实 Go、PR fixture、数据库兼容性、Web、扩展和发布审计证据 |
 
 ## 前端
 
@@ -53,7 +54,7 @@
 | 文档 | 内容 |
 |---|---|
 | [后端开发文档](./backend/后端开发文档.md) | Fastify 请求边界、配置、错误和模块职责 |
-| [API 接口契约](./backend/API接口契约.md) | 21 个 v0.2 Operation、信封格式、SSE、Webhook 与导出 |
+| [API 接口契约](./backend/API接口契约.md) | 27 个 v0.3 Operation、信封格式、SSE、Webhook、导出与 PR Impact |
 | [任务与索引流水线](./backend/任务与索引流水线.md) | 租约任务、安全克隆、扫描、解析和持久化 |
 
 ## 数据与可信 AI
