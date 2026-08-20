@@ -15,6 +15,7 @@ import {
   Files,
   GitBranch,
   Github,
+  GitPullRequest,
   Layers3,
   Link2,
   LoaderCircle,
@@ -99,6 +100,8 @@ export function RepositoryExplorer({
   const [graphLoading, setGraphLoading] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [reindexing, setReindexing] = useState(false);
+  const [prNumber, setPrNumber] = useState("");
+  const [creatingImpact, setCreatingImpact] = useState(false);
   const [integration, setIntegration] = useState<GitHubIntegrationStatus | null>(null);
   const [integrationUnavailable, setIntegrationUnavailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -256,6 +259,32 @@ export function RepositoryExplorer({
     }
   }
 
+  async function analyzePullRequest(event: FormEvent) {
+    event.preventDefault();
+    const number = Number.parseInt(prNumber, 10);
+    if (!Number.isInteger(number) || number < 1) {
+      setError("Enter a valid public GitHub pull request number.");
+      return;
+    }
+    setCreatingImpact(true);
+    setError(null);
+    try {
+      const result = await apiFetch<{ analysisId: string }>(
+        `/v1/repositories/${repositoryId}/pull-requests`,
+        {
+          method: "POST",
+          body: JSON.stringify({ number }),
+        },
+      );
+      router.push(
+        `/repositories/${repositoryId}/pull-requests/${number}?analysisId=${encodeURIComponent(result.analysisId)}`,
+      );
+    } catch (cause) {
+      setError(apiErrorMessage(cause, "Unable to start pull request impact analysis."));
+      setCreatingImpact(false);
+    }
+  }
+
   const filteredFiles = useMemo(() => {
     const query = fileFilter.trim().toLowerCase();
     return query ? files.filter((file) => file.path.toLowerCase().includes(query)) : files;
@@ -355,6 +384,32 @@ export function RepositoryExplorer({
           >
             <Bot size={17} /> Ask repository
           </button>
+          <form className="sidebar-impact-form" onSubmit={analyzePullRequest}>
+            <label htmlFor="sidebar-pr-number">Pull request impact</label>
+            <div>
+              <GitPullRequest size={15} />
+              <input
+                id="sidebar-pr-number"
+                inputMode="numeric"
+                min={1}
+                onChange={(event) => setPrNumber(event.target.value)}
+                placeholder="PR number"
+                type="number"
+                value={prNumber}
+              />
+              <button
+                aria-label="Analyze pull request"
+                disabled={creatingImpact || !prNumber}
+                type="submit"
+              >
+                {creatingImpact ? (
+                  <LoaderCircle className="spin" size={14} />
+                ) : (
+                  <ArrowRight size={14} />
+                )}
+              </button>
+            </div>
+          </form>
         </nav>
         <div className="sidebar-files-heading">
           <span>

@@ -10,7 +10,14 @@ const fileId = "01900000-0000-7000-8000-000000000004";
 const symbolId = "01900000-0000-7000-8000-000000000005";
 const messageId = "01900000-0000-7000-8000-000000000006";
 const baseSnapshotId = "01900000-0000-7000-8000-000000000008";
+const prAnalysisId = "01900000-0000-7000-8000-000000000010";
+const prImpactId = "01900000-0000-7000-8000-000000000011";
+const prUnknownImpactId = "01900000-0000-7000-8000-000000000012";
+const prBaseSnapshotId = "01900000-0000-7000-8000-000000000013";
+const prHeadSnapshotId = "01900000-0000-7000-8000-000000000014";
 const baseCommitSha = "fedcba9876543210fedcba9876543210fedcba98";
+const prBaseCommitSha = "1111111111111111111111111111111111111111";
+const prHeadCommitSha = "2222222222222222222222222222222222222222";
 
 const repository = {
   id: repositoryId,
@@ -111,6 +118,8 @@ interface MockState {
   importRequests: unknown[];
   jobRequests: number;
   mapLevels: string[];
+  prAnalysisPolls: number;
+  prAnalysisRequests: unknown[];
   questions: unknown[];
   shareRequests: unknown[];
 }
@@ -176,6 +185,158 @@ function graph(level: string) {
   };
 }
 
+function pullRequestAnalysis(status: "queued" | "ready") {
+  return {
+    id: prAnalysisId,
+    repositoryId,
+    prNumber: 42,
+    title: "Keep impact evidence fixed to immutable commits",
+    url: "https://github.com/acme/signal-hub/pull/42",
+    baseSha: prBaseCommitSha,
+    headSha: prHeadCommitSha,
+    baseSnapshotId: prBaseSnapshotId,
+    headSnapshotId: prHeadSnapshotId,
+    parserVersion: "tree-sitter-ts-js-py-go-v1",
+    algorithmVersion: "reverse-bfs-v1",
+    revision: 1,
+    status,
+    progress: status === "ready" ? 1 : 0.48,
+    stats: {
+      changedFiles: 2,
+      changedSymbols: 2,
+      directImpacts: 1,
+      transitiveImpacts: 0,
+      unknownImpacts: 1,
+      truncated: true,
+    },
+    failure: null,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: status === "ready" ? "2026-01-01T00:00:04.000Z" : "2026-01-01T00:00:02.000Z",
+    completedAt: status === "ready" ? "2026-01-01T00:00:04.000Z" : null,
+  };
+}
+
+function pullRequestImpact() {
+  return {
+    analysis: pullRequestAnalysis("ready"),
+    files: [
+      {
+        path: "src/api.ts",
+        oldPath: null,
+        changeType: "modified",
+        baseBlobHash: "sha256:base-api",
+        headBlobHash: "sha256:head-api",
+        additions: 12,
+        deletions: 4,
+        binary: false,
+      },
+      {
+        path: "generated/client.go",
+        oldPath: null,
+        changeType: "added",
+        baseBlobHash: null,
+        headBlobHash: "sha256:client",
+        additions: 24,
+        deletions: 0,
+        binary: false,
+      },
+    ],
+    symbols: [
+      {
+        id: "symbol-change-e2e",
+        side: "head",
+        symbolId,
+        stableKey: "function:src/api.ts:createServer",
+        path: "src/api.ts",
+        name: "createServer",
+        kind: "function",
+        startLine: 10,
+        endLine: 24,
+        changeType: "modified",
+      },
+    ],
+    impacts: [
+      {
+        id: prImpactId,
+        analysisId: prAnalysisId,
+        side: "head",
+        symbolId,
+        stableKey: "function:src/api.ts:createServer",
+        path: "src/api.ts",
+        name: "createServer",
+        kind: "function",
+        startLine: 10,
+        endLine: 24,
+        impactType: "direct",
+        distance: 1,
+        riskScore: 0.92,
+        riskLevel: "critical",
+        riskBreakdown: {
+          changedSymbolWeight: 1,
+          reverseFanInWeight: 0.8,
+          publicApiWeight: 0.9,
+          languageWeight: 0.5,
+        },
+        truncated: false,
+        paths: [
+          {
+            ordinal: 0,
+            fromSymbolId: symbolId,
+            toSymbolId: symbolId,
+            fromPath: "src/router.ts",
+            toPath: "src/api.ts",
+            relationType: "calls",
+            confidence: 0.98,
+            evidenceId: "e2e-impact-evidence",
+          },
+        ],
+        evidence: [
+          {
+            id: "e2e-impact-evidence",
+            snapshotId: prHeadSnapshotId,
+            commitSha: prHeadCommitSha,
+            fileId,
+            symbolId,
+            path: "src/api.ts",
+            startLine: 10,
+            endLine: 24,
+            quote: "export function createServer() { return buildRouter(); }",
+            contentHash: "sha256:impact-evidence",
+            relationType: "calls",
+            algorithmVersion: "reverse-bfs-v1",
+          },
+        ],
+      },
+      {
+        id: prUnknownImpactId,
+        analysisId: prAnalysisId,
+        side: "head",
+        symbolId: null,
+        stableKey: "unknown:generated/client.go",
+        path: "generated/client.go",
+        name: "GeneratedClient",
+        kind: "unknown",
+        startLine: 1,
+        endLine: 1,
+        impactType: "unknown",
+        distance: 0,
+        riskScore: 0.18,
+        riskLevel: "low",
+        riskBreakdown: {
+          changedSymbolWeight: 0.2,
+          reverseFanInWeight: 0,
+          publicApiWeight: 0,
+          languageWeight: 0.5,
+        },
+        truncated: true,
+        paths: [],
+        evidence: [],
+      },
+    ],
+    nextCursor: null,
+  };
+}
+
 function corsHeaders(): Record<string, string> {
   return {
     "Access-Control-Allow-Headers": "Content-Type, X-Request-ID",
@@ -203,6 +364,8 @@ async function installMockApi(
     importRequests: [],
     jobRequests: 0,
     mapLevels: [],
+    prAnalysisPolls: 0,
+    prAnalysisRequests: [],
     questions: [],
     shareRequests: [],
   };
@@ -281,6 +444,41 @@ async function installMockApi(
 
     if (request.method() === "GET" && url.pathname === `/v1/repositories/${repositoryId}`) {
       await json(route, repository);
+      return;
+    }
+
+    if (
+      request.method() === "POST" &&
+      url.pathname === `/v1/repositories/${repositoryId}/pull-requests`
+    ) {
+      state.prAnalysisRequests.push(request.postDataJSON());
+      await json(
+        route,
+        {
+          analysisId: prAnalysisId,
+          jobId: jobId,
+          revision: 1,
+          status: "queued",
+        },
+        202,
+      );
+      return;
+    }
+
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/v1/pull-request-analyses/${prAnalysisId}`
+    ) {
+      state.prAnalysisPolls += 1;
+      await json(route, pullRequestAnalysis(state.prAnalysisPolls > 1 ? "ready" : "queued"));
+      return;
+    }
+
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/v1/pull-request-analyses/${prAnalysisId}/impact`
+    ) {
+      await json(route, pullRequestImpact());
       return;
     }
 
@@ -550,6 +748,57 @@ test("analyzes a repository and explores its evidence-backed result", async ({ c
   ).toBeVisible();
   await expect(popup.getByText("Read the repository in this order.")).toBeVisible();
   expect(state.shareRequests).toEqual([{ snapshotId, title: "acme/signal-hub architecture tour" }]);
+});
+
+test("analyzes pull request impact and opens immutable evidence", async ({ context, page }) => {
+  const state = await installMockApi(context);
+  await page.goto(`/repositories/${repositoryId}?snapshotId=${snapshotId}`);
+
+  await page.getByLabel("Pull request impact").fill("42");
+  await page.getByRole("button", { name: "Analyze pull request" }).click();
+
+  await expect(page).toHaveURL(
+    `${webOrigin}/repositories/${repositoryId}/pull-requests/42?analysisId=${prAnalysisId}`,
+  );
+  await expect(
+    page.getByText("Waiting for immutable base and head snapshots.").first(),
+  ).toBeVisible();
+  await expect(page.getByRole("region", { name: "Impact summary" })).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.getByText(/Static traversal reached its safety limit/)).toBeVisible();
+  expect(state.prAnalysisRequests).toEqual([{ number: 42 }]);
+  expect(state.prAnalysisPolls).toBeGreaterThanOrEqual(2);
+
+  await page.locator(".impact-toolbar select").nth(0).selectOption("critical");
+  await expect(page.getByText("1 visible impacts")).toBeVisible();
+  await expect(page.getByText("GeneratedClient")).toBeHidden();
+  await page.getByRole("button", { name: "1-step shortest static path" }).click();
+  await expect(page.getByText("src/router.ts")).toBeVisible();
+
+  await page.getByRole("button", { name: "Inspect createServer evidence" }).click();
+  const drawer = page.getByRole("complementary", { name: "Fixed impact evidence" });
+  await expect(drawer.getByText(prHeadSnapshotId)).toBeVisible();
+  await expect(drawer.getByText(prHeadCommitSha)).toBeVisible();
+  await expect(drawer.getByText(/export function createServer/)).toBeVisible();
+  await expect(drawer.getByRole("link", { name: "Open in VS Code" })).toHaveAttribute(
+    "href",
+    new RegExp(
+      `repositoryId=${repositoryId}&snapshotId=${prHeadSnapshotId}&commitSha=${prHeadCommitSha}`,
+    ),
+  );
+  await expect(drawer.getByRole("link", { name: /GitHub/ })).toHaveAttribute(
+    "href",
+    `https://github.com/acme/signal-hub/blob/${prHeadCommitSha}/src/api.ts#L10-L24`,
+  );
+
+  await drawer.getByRole("button", { name: "Close evidence" }).click();
+  await page.locator(".impact-toolbar select").nth(0).selectOption("all");
+  await page.locator(".impact-toolbar select").nth(1).selectOption("unknown");
+  await page.getByRole("button", { name: "Inspect GeneratedClient evidence" }).click();
+  await expect(
+    page.getByText(/could not prove a fixed source range.*marked unknown/i),
+  ).toBeVisible();
 });
 
 test("downloads deterministic Markdown and SVG for the selected snapshot", async ({

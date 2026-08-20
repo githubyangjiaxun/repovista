@@ -4,8 +4,14 @@ import type {
   GraphResponse,
   GroundedAnswer,
   Job,
+  PullRequestAnalysis,
+  PullRequestFileChange,
+  PullRequestImpact,
+  PullRequestImpactResponse,
+  PullRequestSymbolChange,
   RepositorySummary,
   Snapshot,
+  SnapshotSymbolEvidence,
   SourceFile,
 } from "@repovista/contracts";
 
@@ -66,6 +72,25 @@ export function snapshotExportUrl(
   return `${apiOrigin}/v1/snapshots/${encodedSnapshotId}${suffix}`;
 }
 
+export function vscodeEvidenceUrl(input: {
+  repositoryId: string;
+  snapshotId: string;
+  commitSha: string;
+  path: string;
+  startLine: number;
+  endLine: number;
+}): string {
+  const query = new URLSearchParams({
+    repositoryId: input.repositoryId,
+    snapshotId: input.snapshotId,
+    commitSha: input.commitSha,
+    path: input.path,
+    startLine: String(input.startLine),
+    endLine: String(input.endLine),
+  });
+  return `vscode://yueliang.repovista/openEvidence?${query.toString()}`;
+}
+
 export async function apiFetch<T>(pathname: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${apiOrigin}${pathname}`, {
     ...init,
@@ -96,6 +121,17 @@ export interface CreateRepositoryResult {
   snapshotId: string;
   status: "queued";
 }
+
+export type CreatePullRequestAnalysisResult =
+  import("@repovista/contracts").CreatePullRequestAnalysisResponse;
+export type {
+  PullRequestAnalysis,
+  PullRequestFileChange,
+  PullRequestImpact,
+  PullRequestImpactResponse,
+  PullRequestSymbolChange,
+  SnapshotSymbolEvidence,
+};
 
 export interface SnapshotFileSummary {
   id: string;
