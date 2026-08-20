@@ -19,4 +19,7 @@ test-results/
 tmp/
 data/
 
+# RepoVista extensions are independently versioned Git projects.
+/extensions/vscode/
+
 *.tsbuildinfo
