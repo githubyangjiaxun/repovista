@@ -1,5 +1,6 @@
 import { getConfig } from "@repovista/config";
 import { createDatabasePool, migrateDatabase, RepoVistaStore } from "@repovista/database";
+import { executeNextEmbeddingJob } from "./embedding-indexer.js";
 import { executeNextIndexJob } from "./indexer.js";
 import { executeNextPullRequestAnalysisJob } from "./pull-request-analyzer.js";
 
@@ -29,8 +30,10 @@ async function main(): Promise<void> {
   while (!stopping) {
     try {
       const processed = await executeNextIndexJob(store, config);
-      const analyzed = processed ? false : await executeNextPullRequestAnalysisJob(store, config);
-      if (!processed && !analyzed) {
+      const embedded = processed ? false : await executeNextEmbeddingJob(store, config);
+      const analyzed =
+        processed || embedded ? false : await executeNextPullRequestAnalysisJob(store, config);
+      if (!processed && !embedded && !analyzed) {
         await wait(config.JOB_POLL_INTERVAL_MS);
       }
     } catch (error) {

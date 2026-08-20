@@ -56,6 +56,9 @@ importers:
       '@repovista/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@repovista/embeddings':
+        specifier: workspace:*
+        version: link:../../packages/embeddings
       '@repovista/exporter':
         specifier: workspace:*
         version: link:../../packages/exporter
@@ -150,6 +153,9 @@ importers:
       '@repovista/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@repovista/embeddings':
+        specifier: workspace:*
+        version: link:../../packages/embeddings
       '@repovista/git':
         specifier: workspace:*
         version: link:../../packages/git

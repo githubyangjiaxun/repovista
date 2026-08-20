@@ -18,6 +18,7 @@
     "@repovista/config": "workspace:*",
     "@repovista/database": "workspace:*",
     "@repovista/domain": "workspace:*",
+    "@repovista/embeddings": "workspace:*",
     "@repovista/git": "workspace:*",
     "@repovista/graph": "workspace:*",
     "@repovista/impact": "workspace:*",
