@@ -19,6 +19,7 @@ import {
   pullRequestAnalysisSchema,
   pullRequestImpactSchema,
   retrievalStatusSchema,
+  shareReportContentSchema,
   snapshotStatsSchema,
 } from "@repovista/contracts";
 import {
@@ -3663,9 +3664,19 @@ export class RepoVistaStore {
         .slice(-16);
     await this.pool.query(
       "INSERT INTO share_reports (" +
-        "id, repository_id, snapshot_id, slug, title, visibility, generated_content_json, created_by" +
-        ") VALUES ($1, $2, $3, $4, $5, 'public', $6::jsonb, $7)",
-      [id, repositoryId, snapshotId, slug, title, JSON.stringify(content), PUBLIC_USER_ID],
+        "id, repository_id, snapshot_id, slug, title, report_type, visibility, content_version, generated_content_json, created_by" +
+        ") VALUES ($1, $2, $3, $4, $5, $6, 'public', $7, $8::jsonb, $9)",
+      [
+        id,
+        repositoryId,
+        snapshotId,
+        slug,
+        title,
+        content.version === 2 ? "architecture_story" : "architecture_tour",
+        content.version === 2 ? 2 : 1,
+        JSON.stringify(content),
+        PUBLIC_USER_ID,
+      ],
     );
     return { id, slug };
   }
@@ -3698,7 +3709,7 @@ export class RepoVistaStore {
       title: row.title,
       repository,
       snapshot,
-      content: row.generated_content_json,
+      content: shareReportContentSchema.parse(row.generated_content_json),
       createdAt: iso(row.created_at),
     };
   }

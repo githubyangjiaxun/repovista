@@ -5,6 +5,7 @@ import { getConfig } from "@repovista/config";
 import { createDatabasePool, type DatabasePool, RepoVistaStore } from "@repovista/database";
 import { isDomainError } from "@repovista/domain";
 import Fastify, { type FastifyInstance } from "fastify";
+import type { RetrievalDependencies } from "./retrieval.js";
 import { registerRoutes } from "./routes.js";
 
 type FastifyRequestWithRawBody = { rawBody?: Buffer };
@@ -12,6 +13,7 @@ type FastifyRequestWithRawBody = { rawBody?: Buffer };
 export interface AppDependencies {
   config?: AppConfig;
   pool?: DatabasePool;
+  retrievalDependencies?: RetrievalDependencies;
   store?: RepoVistaStore;
 }
 
@@ -86,7 +88,7 @@ export function buildApp(dependencies: AppDependencies = {}): {
     }
   });
 
-  registerRoutes(app, { config, store });
+  registerRoutes(app, { config, store, retrievalDependencies: dependencies.retrievalDependencies });
 
   app.setErrorHandler((error, request, reply) => {
     request.log.error({ err: error }, "request failed");
@@ -99,16 +101,23 @@ export function buildApp(dependencies: AppDependencies = {}): {
             ? 401
             : error.code === "GITHUB_APP_DISABLED"
               ? 503
-              : error.code === "SNAPSHOT_NOT_READY" ||
-                  error.code === "GITHUB_WEBHOOK_DELIVERY_CONFLICT" ||
-                  error.code === "EXPORT_NOT_AVAILABLE" ||
-                  error.code === "PR_ANALYSIS_REVISION_CONFLICT"
-                ? 409
-                : error.code === "GITHUB_API_FAILED"
-                  ? 502
-                  : error.code.startsWith("AI_")
+              : error.code === "EMBEDDING_PROVIDER_DISABLED" ||
+                  error.code === "EMBEDDING_INDEX_NOT_READY" ||
+                  error.code === "RETRIEVAL_MODE_UNAVAILABLE" ||
+                  error.code === "EMBEDDING_UPSTREAM_UNAVAILABLE"
+                ? error.retryable
+                  ? 503
+                  : 409
+                : error.code === "SNAPSHOT_NOT_READY" ||
+                    error.code === "GITHUB_WEBHOOK_DELIVERY_CONFLICT" ||
+                    error.code === "EXPORT_NOT_AVAILABLE" ||
+                    error.code === "PR_ANALYSIS_REVISION_CONFLICT"
+                  ? 409
+                  : error.code === "GITHUB_API_FAILED"
                     ? 502
-                    : 400;
+                    : error.code.startsWith("AI_")
+                      ? 502
+                      : 400;
       reply.status(status).send({
         error: {
           code: error.code,

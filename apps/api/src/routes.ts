@@ -12,9 +12,11 @@ import {
   idSchema,
   PARSER_VERSION,
   relationTypeSchema,
+  retrievalModeSchema,
 } from "@repovista/contracts";
 import type { RepoVistaStore, SearchEvidenceRecord } from "@repovista/database";
 import { DomainError, PUBLIC_WORKSPACE_ID } from "@repovista/domain";
+import { EMBEDDING_INPUT_VERSION } from "@repovista/embeddings";
 import {
   createMarkdownExport,
   createSvgExport,
@@ -24,10 +26,11 @@ import {
 import { parseGitHubUrl } from "@repovista/git";
 import { buildGraphView, type GraphView } from "@repovista/graph";
 import { IMPACT_ALGORITHM_VERSION } from "@repovista/impact";
-import { reciprocalRankFusion, tokenizeQuestion } from "@repovista/retrieval";
+import { buildArchitectureStory } from "@repovista/story";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { fetchPublicPullRequest } from "./github.js";
+import { type RetrievalDependencies, retrieveEvidence } from "./retrieval.js";
 
 const repositoryParamsSchema = z.object({ repositoryId: idSchema });
 const snapshotParamsSchema = z.object({ snapshotId: idSchema });
@@ -74,7 +77,7 @@ const sourceQuerySchema = z.object({
 
 const searchQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
-  mode: z.enum(["text", "symbol", "hybrid"]).default("hybrid"),
+  mode: retrievalModeSchema.default("hybrid"),
   q: z.string().trim().min(2).max(4_000),
 });
 
@@ -282,7 +285,7 @@ function filterGraph(
   return { nodes, edges, truncated: view.truncated };
 }
 
-function compactEvidence(record: SearchEvidenceRecord): SearchEvidenceRecord {
+function compactEvidence<T extends SearchEvidenceRecord>(record: T): T {
   const maximumCharacters = 8_000;
   if (record.content.length <= maximumCharacters) return record;
   const lines = record.content.split(/\r?\n/);
@@ -301,51 +304,6 @@ function compactEvidence(record: SearchEvidenceRecord): SearchEvidenceRecord {
     contentHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
     endLine: record.startLine + Math.max(0, selected.length - 1),
   };
-}
-
-async function retrieveEvidence(
-  store: RepoVistaStore,
-  snapshotId: string,
-  question: string,
-): Promise<SearchEvidenceRecord[]> {
-  const queries = [question, ...tokenizeQuestion(question).slice(0, 6)];
-  const uniqueQueries = [
-    ...new Set(queries.map((item) => item.trim()).filter((item) => item.length >= 2)),
-  ];
-  const resultSets = await Promise.all(
-    uniqueQueries.map((query) => store.searchEvidence(snapshotId, query, 12)),
-  );
-  const ranked = resultSets.map((resultSet) =>
-    resultSet.map((item, index) => ({
-      ...item,
-      rank: index + 1,
-      source: item.symbolId ? ("symbol" as const) : ("text" as const),
-    })),
-  );
-  return reciprocalRankFusion(ranked, 12).map((item) => compactEvidence(item));
-}
-
-function readingPath(files: readonly { path: string }[]): { path: string; reason: string }[] {
-  const score = (filePath: string): number => {
-    const lower = filePath.toLowerCase();
-    if (lower === "readme.md") return 100;
-    if (lower === "package.json") return 90;
-    if (/(^|\/)(index|main|server|app)\.[cm]?[jt]sx?$/.test(lower)) return 80;
-    if (lower.startsWith("src/")) return 50;
-    return 10;
-  };
-  return [...files]
-    .sort(
-      (left, right) => score(right.path) - score(left.path) || left.path.localeCompare(right.path),
-    )
-    .slice(0, 8)
-    .map((file) => ({
-      path: file.path,
-      reason:
-        file.path.toLowerCase() === "readme.md"
-          ? "Start with the project-maintained overview."
-          : "This file is a likely entry point or central implementation file.",
-    }));
 }
 
 function sseEvent(id: number, event: string, payload: Record<string, unknown>): string {
@@ -404,9 +362,13 @@ function sendExport(reply: FastifyReply, artifact: ExportArtifact) {
 
 export function registerRoutes(
   app: FastifyInstance,
-  dependencies: { config: AppConfig; store: RepoVistaStore },
+  dependencies: {
+    config: AppConfig;
+    store: RepoVistaStore;
+    retrievalDependencies?: RetrievalDependencies;
+  },
 ): void {
-  const { config, store } = dependencies;
+  const { config, store, retrievalDependencies } = dependencies;
 
   app.get("/v1/integrations/github", async (request) =>
     response(request, {
@@ -799,13 +761,48 @@ export function registerRoutes(
     return response(request, symbol);
   });
 
+  app.get("/v1/snapshots/:snapshotId/retrieval", async (request) => {
+    const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    return response(
+      request,
+      await store.getRetrievalStatus({
+        snapshotId,
+        provider: config.EMBEDDING_PROVIDER === "none" ? null : config.EMBEDDING_PROVIDER,
+        model: config.EMBEDDING_MODEL ?? null,
+        inputVersion: EMBEDDING_INPUT_VERSION,
+      }),
+    );
+  });
+
+  app.post("/v1/snapshots/:snapshotId/embeddings", async (request, reply) => {
+    const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    if (config.EMBEDDING_PROVIDER === "none" || !config.EMBEDDING_MODEL) {
+      throw new DomainError(
+        "EMBEDDING_PROVIDER_DISABLED",
+        "Semantic embedding is not configured on this server.",
+      );
+    }
+    const result = await store.createOrRetryEmbeddingIndex({
+      snapshotId,
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      provider: config.EMBEDDING_PROVIDER,
+      model: config.EMBEDDING_MODEL,
+      inputVersion: EMBEDDING_INPUT_VERSION,
+    });
+    if (result.embeddingIndex.status !== "ready") reply.code(202);
+    return response(request, result);
+  });
+
   app.get("/v1/snapshots/:snapshotId/search", async (request) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
     const query = parseInput(searchQuerySchema, request.query);
-    const snapshot = await store.getSnapshot(snapshotId);
-    requireReadySnapshot(snapshot);
-    const evidence = await store.searchEvidence(snapshotId, query.q, query.limit);
-    return response(request, { mode: query.mode, results: evidence });
+    const result = await retrieveEvidence(
+      store,
+      config,
+      { snapshotId, query: query.q, mode: query.mode, limit: query.limit },
+      retrievalDependencies,
+    );
+    return response(request, result);
   });
 
   app.post(
@@ -838,7 +835,13 @@ export function registerRoutes(
       }
 
       const startedAt = Date.now();
-      const evidence = await retrieveEvidence(store, snapshotId, body.question);
+      const retrieval = await retrieveEvidence(
+        store,
+        config,
+        { snapshotId, query: body.question, mode: "hybrid", limit: 12 },
+        retrievalDependencies,
+      );
+      const evidence = retrieval.results.map((item) => compactEvidence(item));
       const providerName =
         body.provider ?? (config.MODEL_PROVIDER === "none" ? "fake" : config.MODEL_PROVIDER);
       const provider = createModelProvider({
@@ -860,7 +863,7 @@ export function registerRoutes(
         evidence,
         latencyMs: Date.now() - startedAt,
       });
-      return response(request, { messageId, answer, evidence });
+      return response(request, { messageId, answer, evidence, trace: retrieval.trace });
     },
   );
 
@@ -882,13 +885,36 @@ export function registerRoutes(
       if (!repository) {
         throw new DomainError("REPOSITORY_NOT_FOUND", "The requested repository does not exist.");
       }
-      const map = buildGraphView(graphData, "package", 250);
-      const title = body.title ?? `${repository.owner}/${repository.name} architecture tour`;
-      const report = await store.createShareReport(repository.id, graphData.snapshot.id, title, {
-        overview: `${repository.owner}/${repository.name} contains ${graphData.snapshot.stats.files} indexed files and ${graphData.snapshot.stats.symbols} symbols at commit ${graphData.snapshot.commitSha.slice(0, 7)}.`,
-        readingPath: readingPath(graphData.files),
-        map,
+      const status = await store.getRetrievalStatus({
+        snapshotId: graphData.snapshot.id,
+        provider: config.EMBEDDING_PROVIDER === "none" ? null : config.EMBEDDING_PROVIDER,
+        model: config.EMBEDDING_MODEL ?? null,
+        inputVersion: EMBEDDING_INPUT_VERSION,
       });
+      const profile = status.semantic.currentIndex;
+      const title = body.title ?? `${repository.owner}/${repository.name} architecture story`;
+      const story = buildArchitectureStory({
+        repository,
+        snapshot: graphData.snapshot,
+        files: graphData.files,
+        symbols: graphData.symbols,
+        edges: graphData.edges,
+        retrievalProfile:
+          profile?.status === "ready" && profile.dimensions !== null
+            ? {
+                id: profile.id,
+                provider: profile.provider,
+                model: profile.model,
+                dimensions: profile.dimensions,
+              }
+            : null,
+      });
+      const report = await store.createShareReport(
+        repository.id,
+        graphData.snapshot.id,
+        title,
+        story,
+      );
       reply.code(201);
       return response(request, report);
     },

@@ -234,12 +234,44 @@ integration("RepoVistaStore with PostgreSQL", () => {
       job.repositoryId,
       job.snapshotId,
       "Integration report 2",
-      { overview: answer.summary, readingPath: [], map: { nodes: [], edges: [] } },
+      {
+        version: 2,
+        algorithmVersion: "architecture-story-v2",
+        headline: "Integration story",
+        overview: answer.summary,
+        metrics: {
+          files: 1,
+          symbols: 2,
+          edges: 1,
+          languages: [{ name: "typescript", files: 1 }],
+        },
+        map: { nodes: [], edges: [], truncated: false },
+        keyModules: [],
+        readingPath: [],
+        evidenceHighlights: [],
+        provenance: {
+          snapshotId: job.snapshotId,
+          commitSha: indexed.commitSha,
+          parserVersion: "integration-test-v1",
+          generatedAt: snapshot?.readyAt ?? "2026-01-01T00:00:00.000Z",
+          generatedAtSource: "snapshot_ready_at",
+          retrievalProfile: null,
+        },
+      },
     );
     expect(secondShare.slug).not.toBe(share.slug);
     expect(await store.getShareReport(secondShare.slug)).toMatchObject({
       title: "Integration report 2",
       snapshot: { id: job.snapshotId },
+      content: { version: 2, provenance: { snapshotId: job.snapshotId } },
+    });
+    const shareShape = await pool.query<{ content_version: number; report_type: string }>(
+      "SELECT report_type, content_version FROM share_reports WHERE slug = $1",
+      [secondShare.slug],
+    );
+    expect(shareShape.rows[0]).toEqual({
+      report_type: "architecture_story",
+      content_version: 2,
     });
 
     const base = await store.getIncrementalIndexBase(

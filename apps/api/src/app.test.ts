@@ -212,6 +212,56 @@ function createStore(): RepoVistaStore {
         score: 1,
       },
     ]),
+    getRetrievalStatus: vi.fn(async () => ({
+      snapshotId,
+      text: { ready: true, reason: null },
+      symbol: { ready: true, reason: null },
+      semantic: {
+        configured: false,
+        queryable: false,
+        reason: "provider_disabled" as const,
+        currentIndex: null,
+        latestIndex: null,
+      },
+    })),
+    searchTextEvidence: vi.fn(async () => [
+      {
+        id: "evidence-1",
+        snapshotId,
+        commitSha: snapshot.commitSha,
+        fileId,
+        path: "src/index.ts",
+        symbolId,
+        symbol: "hello",
+        startLine: 1,
+        endLine: 1,
+        content: "export function hello() { return 1; }",
+        contentHash: "sha256:evidence",
+        score: 1,
+        channel: "text" as const,
+      },
+    ]),
+    searchSymbolEvidence: vi.fn(async () => [
+      {
+        id: "evidence-1",
+        snapshotId,
+        commitSha: snapshot.commitSha,
+        fileId,
+        path: "src/index.ts",
+        symbolId,
+        symbol: "hello",
+        startLine: 1,
+        endLine: 1,
+        content: "export function hello() { return 1; }",
+        contentHash: "sha256:evidence",
+        score: 1,
+        channel: "symbol" as const,
+      },
+    ]),
+    searchSemanticEvidence: vi.fn(async () => []),
+    createOrRetryEmbeddingIndex: vi.fn(async () => {
+      throw new DomainError("EMBEDDING_PROVIDER_DISABLED", "Embedding is disabled.");
+    }),
     saveAnswer: vi.fn(async () => messageId),
     createShareReport: vi.fn(async () => ({ id: messageId, slug: "acme-demo-report" })),
     getShareReport: vi.fn(async () => null),
@@ -661,6 +711,34 @@ describe("RepoVista API", () => {
       startLine: 1,
     });
     expect(store.getSnapshotSymbolEvidence).toHaveBeenCalledWith(snapshotId, symbolId);
+  });
+
+  it("creates a deterministic architecture story v2 pinned to the ready snapshot", async () => {
+    const store = createStore();
+    const { app } = createTestApp(store);
+    openApps.push(app);
+
+    const result = await app.inject({
+      method: "POST",
+      url: "/v1/share-reports",
+      payload: { snapshotId, title: "Fixed story" },
+    });
+
+    expect(result.statusCode).toBe(201);
+    expect(store.createShareReport).toHaveBeenCalledWith(
+      repositoryId,
+      snapshotId,
+      "Fixed story",
+      expect.objectContaining({
+        version: 2,
+        algorithmVersion: "architecture-story-v2",
+        provenance: expect.objectContaining({
+          snapshotId,
+          commitSha: snapshot.commitSha,
+          retrievalProfile: null,
+        }),
+      }),
+    );
   });
 
   it("downloads deterministic Markdown and safely escaped SVG for the requested snapshot", async () => {

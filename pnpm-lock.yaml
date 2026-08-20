@@ -74,6 +74,9 @@ importers:
       '@repovista/retrieval':
         specifier: workspace:*
         version: link:../../packages/retrieval
+      '@repovista/story':
+        specifier: workspace:*
+        version: link:../../packages/story
       fastify:
         specifier: ^5.0.0
         version: 5.12.1

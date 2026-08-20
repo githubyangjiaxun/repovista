@@ -6,6 +6,7 @@ import type {
   Job,
   RepositorySummary,
   RetrievalStatus,
+  ShareReportContent,
   Snapshot,
   SnapshotStats,
 } from "@repovista/contracts";
@@ -344,12 +345,6 @@ export interface SaveAnswerInput {
   latencyMs: number;
 }
 
-export interface ShareReportContent {
-  overview: string;
-  readingPath: { path: string; reason: string }[];
-  map: unknown;
-}
-
 export interface ShareReportRecord {
   id: string;
   slug: string;
@@ -361,3 +356,4 @@ export interface ShareReportRecord {
 }
 
 export type { IndexedRepository, Job, RepositorySummary, Snapshot, SnapshotStats };
+export type { ShareReportContent };

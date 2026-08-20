@@ -755,6 +755,77 @@
         }
       }
     },
+    "/v1/snapshots/{snapshotId}/retrieval": {
+      "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
+      "get": {
+        "operationId": "getSnapshotRetrievalStatus",
+        "summary": "Get transparent retrieval capabilities and embedding index status",
+        "tags": ["Snapshots"],
+        "responses": {
+          "200": {
+            "description": "Retrieval capability status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    { "properties": { "data": { "$ref": "#/components/schemas/RetrievalStatus" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/embeddings": {
+      "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
+      "post": {
+        "operationId": "createSnapshotEmbeddingIndex",
+        "summary": "Queue or retry a versioned snapshot embedding index",
+        "tags": ["Snapshots"],
+        "responses": {
+          "200": {
+            "description": "Existing ready embedding index",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/CreateEmbeddingIndexResponse" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Embedding index queued or running",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/CreateEmbeddingIndexResponse" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
     "/v1/snapshots/{snapshotId}/search": {
       "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
       "get": {
@@ -773,7 +844,7 @@
             "in": "query",
             "schema": {
               "type": "string",
-              "enum": ["text", "symbol", "hybrid"],
+              "enum": ["text", "symbol", "semantic", "hybrid"],
               "default": "hybrid"
             }
           },
@@ -1503,10 +1574,210 @@
       },
       "SearchResult": {
         "type": "object",
-        "required": ["mode", "results"],
+        "required": ["query", "trace", "results"],
         "properties": {
-          "mode": { "type": "string", "enum": ["text", "symbol", "hybrid"] },
-          "results": { "type": "array", "items": { "$ref": "#/components/schemas/Evidence" } }
+          "query": { "type": "string" },
+          "trace": { "$ref": "#/components/schemas/RetrievalTrace" },
+          "results": { "type": "array", "items": { "$ref": "#/components/schemas/SearchHit" } }
+        }
+      },
+      "RetrievalSignal": {
+        "type": "object",
+        "required": ["channel", "rank", "rawScore"],
+        "properties": {
+          "channel": { "type": "string", "enum": ["text", "symbol", "semantic"] },
+          "rank": { "type": "integer", "minimum": 1 },
+          "rawScore": { "type": "number" }
+        }
+      },
+      "SearchHit": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Evidence" },
+          {
+            "type": "object",
+            "required": ["signals"],
+            "properties": {
+              "signals": {
+                "type": "array",
+                "minItems": 1,
+                "items": { "$ref": "#/components/schemas/RetrievalSignal" }
+              }
+            }
+          }
+        ]
+      },
+      "RetrievalChannelTrace": {
+        "type": "object",
+        "required": ["channel", "status", "candidateCount", "reason", "latencyMs"],
+        "properties": {
+          "channel": { "type": "string", "enum": ["text", "symbol", "semantic"] },
+          "status": { "type": "string", "enum": ["used", "skipped", "unavailable", "failed"] },
+          "candidateCount": { "type": "integer", "minimum": 0 },
+          "reason": {
+            "type": ["string", "null"],
+            "enum": [
+              "provider_disabled",
+              "index_missing",
+              "index_building",
+              "index_failed",
+              "model_mismatch",
+              "provider_unavailable",
+              "dimension_mismatch",
+              null
+            ]
+          },
+          "latencyMs": { "type": ["integer", "null"], "minimum": 0 }
+        }
+      },
+      "RetrievalTrace": {
+        "type": "object",
+        "required": [
+          "requestedMode",
+          "usedChannels",
+          "degraded",
+          "degradationReason",
+          "channels",
+          "embeddingIndex"
+        ],
+        "properties": {
+          "requestedMode": { "type": "string", "enum": ["text", "symbol", "semantic", "hybrid"] },
+          "usedChannels": {
+            "type": "array",
+            "items": { "type": "string", "enum": ["text", "symbol", "semantic"] }
+          },
+          "degraded": { "type": "boolean" },
+          "degradationReason": {
+            "type": ["string", "null"],
+            "enum": [
+              "provider_disabled",
+              "index_missing",
+              "index_building",
+              "index_failed",
+              "model_mismatch",
+              "provider_unavailable",
+              "dimension_mismatch",
+              null
+            ]
+          },
+          "channels": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/RetrievalChannelTrace" }
+          },
+          "embeddingIndex": {
+            "oneOf": [{ "$ref": "#/components/schemas/EmbeddingIndex" }, { "type": "null" }]
+          }
+        }
+      },
+      "EmbeddingIndex": {
+        "type": "object",
+        "required": [
+          "id",
+          "snapshotId",
+          "provider",
+          "model",
+          "inputVersion",
+          "status",
+          "dimensions",
+          "totalChunks",
+          "embeddedChunks",
+          "revision",
+          "jobId",
+          "failure",
+          "createdAt",
+          "updatedAt",
+          "readyAt"
+        ],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "snapshotId": { "$ref": "#/components/schemas/Uuid" },
+          "provider": { "type": "string", "enum": ["ollama", "openai-compatible"] },
+          "model": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "inputVersion": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "status": {
+            "type": "string",
+            "enum": ["queued", "running", "ready", "failed", "cancelled"]
+          },
+          "dimensions": { "type": ["integer", "null"], "minimum": 1, "maximum": 16000 },
+          "totalChunks": { "type": "integer", "minimum": 0 },
+          "embeddedChunks": { "type": "integer", "minimum": 0 },
+          "revision": { "type": "integer", "minimum": 1 },
+          "jobId": { "oneOf": [{ "$ref": "#/components/schemas/Uuid" }, { "type": "null" }] },
+          "failure": {
+            "type": ["object", "null"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" },
+              "retryable": { "type": "boolean" }
+            }
+          },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "readyAt": { "type": ["string", "null"], "format": "date-time" }
+        }
+      },
+      "RetrievalCapability": {
+        "type": "object",
+        "required": ["ready", "reason"],
+        "properties": {
+          "ready": { "type": "boolean" },
+          "reason": {
+            "type": ["string", "null"],
+            "enum": [
+              "provider_disabled",
+              "index_missing",
+              "index_building",
+              "index_failed",
+              "model_mismatch",
+              "provider_unavailable",
+              "dimension_mismatch",
+              null
+            ]
+          }
+        }
+      },
+      "RetrievalStatus": {
+        "type": "object",
+        "required": ["snapshotId", "text", "symbol", "semantic"],
+        "properties": {
+          "snapshotId": { "$ref": "#/components/schemas/Uuid" },
+          "text": { "$ref": "#/components/schemas/RetrievalCapability" },
+          "symbol": { "$ref": "#/components/schemas/RetrievalCapability" },
+          "semantic": {
+            "type": "object",
+            "required": ["configured", "queryable", "reason", "currentIndex", "latestIndex"],
+            "properties": {
+              "configured": { "type": "boolean" },
+              "queryable": { "type": "boolean" },
+              "reason": {
+                "type": ["string", "null"],
+                "enum": [
+                  "provider_disabled",
+                  "index_missing",
+                  "index_building",
+                  "index_failed",
+                  "model_mismatch",
+                  "provider_unavailable",
+                  "dimension_mismatch",
+                  null
+                ]
+              },
+              "currentIndex": {
+                "oneOf": [{ "$ref": "#/components/schemas/EmbeddingIndex" }, { "type": "null" }]
+              },
+              "latestIndex": {
+                "oneOf": [{ "$ref": "#/components/schemas/EmbeddingIndex" }, { "type": "null" }]
+              }
+            }
+          }
+        }
+      },
+      "CreateEmbeddingIndexResponse": {
+        "type": "object",
+        "required": ["embeddingIndex", "jobId", "reused"],
+        "properties": {
+          "embeddingIndex": { "$ref": "#/components/schemas/EmbeddingIndex" },
+          "jobId": { "oneOf": [{ "$ref": "#/components/schemas/Uuid" }, { "type": "null" }] },
+          "reused": { "type": "boolean" }
         }
       },
       "AskRequest": {
@@ -1556,11 +1827,12 @@
       },
       "AskResult": {
         "type": "object",
-        "required": ["messageId", "answer", "evidence"],
+        "required": ["messageId", "answer", "evidence", "trace"],
         "properties": {
           "messageId": { "$ref": "#/components/schemas/Uuid" },
           "answer": { "$ref": "#/components/schemas/GroundedAnswer" },
-          "evidence": { "type": "array", "items": { "$ref": "#/components/schemas/Evidence" } }
+          "evidence": { "type": "array", "items": { "$ref": "#/components/schemas/SearchHit" } },
+          "trace": { "$ref": "#/components/schemas/RetrievalTrace" }
         }
       },
       "CreateShareRequest": {
