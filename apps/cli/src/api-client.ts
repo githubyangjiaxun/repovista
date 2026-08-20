@@ -1,32 +1,25 @@
 import {
   type AskRequest,
+  type AskResult,
+  askResultSchema,
+  type CreateEmbeddingIndexResponse,
   type CreateRepositoryRequest,
   type CreateRepositoryResponse,
+  createEmbeddingIndexResponseSchema,
   createRepositoryResponseSchema,
-  type Evidence,
-  evidenceSchema,
-  type GroundedAnswer,
-  groundedAnswerSchema,
-  idSchema,
   type Job,
   jobSchema,
   type RepositorySummary,
   repositorySummarySchema,
+  type SearchResult,
   type Snapshot,
+  searchResultSchema,
   snapshotSchema,
 } from "@repovista/contracts";
 import { CLI_USER_AGENT } from "./version.js";
 
 const repositoryListSchema = repositorySummarySchema.array();
 const snapshotListSchema = snapshotSchema.array();
-const evidenceListSchema = evidenceSchema.array();
-
-export interface AskResult {
-  messageId: string;
-  answer: GroundedAnswer;
-  evidence: Evidence[];
-}
-
 export interface AskRepositoryRequest extends AskRequest {
   snapshotId?: string;
 }
@@ -112,15 +105,6 @@ function parseApiUrl(value: string): string {
   return parsed.toString().replace(/\/+$/, "");
 }
 
-function decodeAskResult(value: unknown): AskResult {
-  if (!isRecord(value)) throw new Error("Expected an object.");
-  return {
-    messageId: idSchema.parse(value.messageId),
-    answer: groundedAnswerSchema.parse(value.answer),
-    evidence: evidenceListSchema.parse(value.evidence),
-  };
-}
-
 export class RepoVistaClient {
   readonly apiUrl: string;
   private readonly fetchImplementation: typeof fetch;
@@ -188,7 +172,29 @@ export class RepoVistaClient {
     return this.requestEnvelope(
       `/v1/repositories/${encodeURIComponent(repositoryId)}/ask`,
       { method: "POST", body: JSON.stringify(input) },
-      decodeAskResult,
+      (value) => askResultSchema.parse(value),
+    );
+  }
+
+  searchSnapshot(
+    snapshotId: string,
+    query: string,
+    mode: "text" | "symbol" | "semantic" | "hybrid",
+    limit: number,
+  ): Promise<SearchResult> {
+    const parameters = new URLSearchParams({ q: query, mode, limit: String(limit) });
+    return this.requestEnvelope(
+      `/v1/snapshots/${encodeURIComponent(snapshotId)}/search?${parameters.toString()}`,
+      {},
+      (value) => searchResultSchema.parse(value),
+    );
+  }
+
+  createEmbeddingIndex(snapshotId: string): Promise<CreateEmbeddingIndexResponse> {
+    return this.requestEnvelope(
+      `/v1/snapshots/${encodeURIComponent(snapshotId)}/embeddings`,
+      { method: "POST" },
+      (value) => createEmbeddingIndexResponseSchema.parse(value),
     );
   }
 

@@ -30,6 +30,25 @@ const succeededJob = {
   total: 12,
 };
 
+const retrievalTrace = {
+  requestedMode: "hybrid",
+  usedChannels: ["text", "symbol"],
+  degraded: true,
+  degradationReason: "provider_disabled",
+  channels: [
+    { channel: "text", status: "used", candidateCount: 1, reason: null, latencyMs: 1 },
+    { channel: "symbol", status: "used", candidateCount: 1, reason: null, latencyMs: 1 },
+    {
+      channel: "semantic",
+      status: "unavailable",
+      candidateCount: 0,
+      reason: "provider_disabled",
+      latencyMs: 0,
+    },
+  ],
+  embeddingIndex: null,
+};
+
 const snapshot = {
   id: snapshotId,
   repositoryId,
@@ -199,8 +218,13 @@ describe("RepoVista CLI", () => {
           content: "await app.listen();",
           contentHash: "sha256:evidence",
           score: 1,
+          signals: [
+            { channel: "text", rank: 1, rawScore: 1 },
+            { channel: "symbol", rank: 1, rawScore: 1 },
+          ],
         },
       ],
+      trace: retrievalTrace,
     };
     const fetchImplementation = vi.fn<typeof fetch>(async () => envelope(result));
     const { dependencies, stdout } = harness(fetchImplementation as typeof fetch);
@@ -217,6 +241,111 @@ describe("RepoVista CLI", () => {
       question: "Where does the server start?",
       provider: "fake",
     });
+  });
+
+  it("searches an immutable snapshot with explicit mode and transparent ranking", async () => {
+    const result = {
+      query: "where is response compression",
+      trace: retrievalTrace,
+      results: [
+        {
+          id: "evidence-1",
+          snapshotId,
+          commitSha: snapshot.commitSha,
+          fileId,
+          path: "src/server.ts",
+          symbolId,
+          symbol: "start",
+          startLine: 10,
+          endLine: 14,
+          content: "app.register(compression);",
+          contentHash: "sha256:evidence",
+          score: 0.032,
+          signals: [
+            { channel: "text", rank: 2, rawScore: 0.2 },
+            { channel: "symbol", rank: 1, rawScore: 0.9 },
+          ],
+        },
+      ],
+    };
+    const fetchImplementation = vi.fn<typeof fetch>(async () => envelope(result));
+    const { dependencies, stdout } = harness(fetchImplementation as typeof fetch);
+
+    const exitCode = await runCli(
+      [
+        "search",
+        snapshotId,
+        "where",
+        "is",
+        "response",
+        "compression",
+        "--mode",
+        "hybrid",
+        "--limit",
+        "5",
+      ],
+      dependencies,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stdout.join("\n")).toContain("src/server.ts:10-14");
+    expect(stdout.join("\n")).toContain("text#2:0.2000");
+    expect(fetchImplementation.mock.calls[0]?.[0]).toBe(
+      `http://localhost:4000/v1/snapshots/${snapshotId}/search?q=where+is+response+compression&mode=hybrid&limit=5`,
+    );
+  });
+
+  it("queues an embedding index and waits for its job", async () => {
+    const embeddingIndex = {
+      id: "01900000-0000-7000-8000-000000000010",
+      snapshotId,
+      provider: "ollama",
+      model: "nomic-embed-text",
+      inputVersion: "code-chunk-v1",
+      status: "queued",
+      dimensions: null,
+      totalChunks: 12,
+      embeddedChunks: 0,
+      revision: 1,
+      jobId,
+      failure: null,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      readyAt: null,
+    };
+    const fetchImplementation = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(envelope({ embeddingIndex, jobId, reused: false }))
+      .mockResolvedValueOnce(envelope(queuedJob))
+      .mockResolvedValueOnce(envelope(succeededJob));
+    const { dependencies, stdout } = harness(fetchImplementation as typeof fetch);
+
+    const exitCode = await runCli(
+      ["embed", snapshotId, "--wait", "--poll-interval", "1ms", "--json"],
+      dependencies,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({
+      embeddingIndex: { id: embeddingIndex.id },
+      job: { status: "succeeded" },
+    });
+    expect(fetchImplementation.mock.calls[0]?.[0]).toBe(
+      `http://localhost:4000/v1/snapshots/${snapshotId}/embeddings`,
+    );
+  });
+
+  it("rejects invalid search modes and limits before contacting the API", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>();
+    const first = harness(fetchImplementation as typeof fetch);
+    expect(
+      await runCli(["search", snapshotId, "handler", "--mode", "magic"], first.dependencies),
+    ).toBe(2);
+    const second = harness(fetchImplementation as typeof fetch);
+    expect(
+      await runCli(["search", snapshotId, "handler", "--limit", "101"], second.dependencies),
+    ).toBe(2);
+    expect(fetchImplementation).not.toHaveBeenCalled();
   });
 
   it("checks API readiness without expecting a data envelope", async () => {

@@ -1,11 +1,14 @@
+import type { AskResult } from "@repovista/contracts";
 import {
   createRepositoryRequestSchema,
   idSchema,
   type Job,
   type RepositorySummary,
+  retrievalModeSchema,
+  type SearchResult,
   type Snapshot,
 } from "@repovista/contracts";
-import { ApiError, type AskResult, RepoVistaClient } from "./api-client.js";
+import { ApiError, RepoVistaClient } from "./api-client.js";
 import { CLI_VERSION } from "./version.js";
 
 const DEFAULT_API_URL = "http://localhost:4000";
@@ -27,6 +30,8 @@ const mainHelp = [
   "  repositories            List imported repositories",
   "  show <repository-id>    Show a repository and its snapshots",
   "  ask <repository-id>     Ask an evidence-backed question",
+  "  search <snapshot-id>    Search fixed snapshot evidence",
+  "  embed <snapshot-id>     Build a semantic embedding index",
   "  doctor                  Check API readiness",
   "",
   "Global options:",
@@ -67,6 +72,21 @@ const commandHelp: Record<string, string> = {
     "  --snapshot <id>         Ask against a specific immutable snapshot",
     "  --provider <name>       fake, ollama, or openai-compatible",
     "  --model <name>          Override the configured chat model",
+  ].join("\n"),
+  search: [
+    "Usage: repovista search <snapshot-id> <query...> [options]",
+    "",
+    "Options:",
+    "  --mode <name>           text, symbol, semantic, or hybrid (default: hybrid)",
+    "  --limit <n>             Maximum results from 1 to 100 (default: 20)",
+  ].join("\n"),
+  embed: [
+    "Usage: repovista embed <snapshot-id> [options]",
+    "",
+    "Options:",
+    "  --wait                  Wait for the embedding job to finish",
+    "  --poll-interval <n>     Poll interval while waiting (default: 2s)",
+    "  --timeout <n>           Maximum wait time (default: 15m)",
   ].join("\n"),
   doctor: "Usage: repovista doctor [--json]",
 };
@@ -313,6 +333,28 @@ function formatAnswer(result: AskResult): string {
   return lines.join("\n");
 }
 
+function formatSearch(result: SearchResult): string {
+  const lines = [
+    `Query: ${result.query}`,
+    `Mode: ${result.trace.requestedMode}`,
+    `Channels: ${result.trace.usedChannels.join(", ") || "none"}`,
+    ...(result.trace.degraded ? [`Degraded: ${result.trace.degradationReason ?? "unknown"}`] : []),
+  ];
+  for (const [index, hit] of result.results.entries()) {
+    const signals = hit.signals
+      .map((signal) => `${signal.channel}#${signal.rank}:${signal.rawScore.toFixed(4)}`)
+      .join(", ");
+    lines.push(
+      "",
+      `${index + 1}. ${hit.path}:${hit.startLine}-${hit.endLine}`,
+      `   Fusion: ${hit.score.toFixed(6)} · ${signals}`,
+      `   ${hit.content.replace(/\s+/g, " ").trim().slice(0, 240)}`,
+    );
+  }
+  if (result.results.length === 0) lines.push("", "No evidence matched the query.");
+  return lines.join("\n");
+}
+
 function writeJson(output: CliOutput, value: unknown): void {
   output.stdout(JSON.stringify(value, null, 2));
 }
@@ -434,6 +476,8 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
       repositories: {},
       show: {},
       ask: { model: "string", provider: "string", snapshot: "string" },
+      search: { limit: "string", mode: "string" },
+      embed: { poll_interval: "string", timeout: "string", wait: "boolean" },
       doctor: {},
     };
     const commandSpecification = extraSpecification[command];
@@ -525,6 +569,71 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
       if (json) writeJson(output, result);
       else output.stdout(formatAnswer(result));
       return 0;
+    }
+
+    if (command === "search") {
+      if (parsed.positionals.length < 2) {
+        throw new UsageError("search requires a snapshot ID and a query.");
+      }
+      const snapshotId = requireId(parsed.positionals[0], "Snapshot ID");
+      const query = parsed.positionals.slice(1).join(" ").trim();
+      if (query.length < 2 || query.length > 4_000) {
+        throw new UsageError("The query must contain between 2 and 4,000 characters.");
+      }
+      const modeResult = retrievalModeSchema.safeParse(
+        optionalString(parsed.options.mode) ?? "hybrid",
+      );
+      if (!modeResult.success) {
+        throw new UsageError("--mode must be text, symbol, semantic, or hybrid.");
+      }
+      const limitText = optionalString(parsed.options.limit) ?? "20";
+      if (!/^\d+$/.test(limitText))
+        throw new UsageError("--limit must be an integer from 1 to 100.");
+      const limit = Number.parseInt(limitText, 10);
+      if (limit < 1 || limit > 100)
+        throw new UsageError("--limit must be an integer from 1 to 100.");
+      const result = await client.searchSnapshot(snapshotId, query, modeResult.data, limit);
+      if (json) writeJson(output, result);
+      else output.stdout(formatSearch(result));
+      return 0;
+    }
+
+    if (command === "embed") {
+      if (parsed.positionals.length !== 1) {
+        throw new UsageError("embed requires exactly one snapshot ID.");
+      }
+      const snapshotId = requireId(parsed.positionals[0], "Snapshot ID");
+      const queued = await client.createEmbeddingIndex(snapshotId);
+      if (parsed.options.wait !== true || queued.jobId === null) {
+        if (json) writeJson(output, queued);
+        else {
+          output.stdout(
+            queued.embeddingIndex.status === "ready"
+              ? `Embedding index ${queued.embeddingIndex.id} is ready.`
+              : `Embedding index queued as job ${queued.jobId ?? "none"}.`,
+          );
+        }
+        return 0;
+      }
+      const job = await waitForJob(client, queued.jobId, {
+        json,
+        now,
+        output,
+        pollIntervalMs: parseDuration(
+          optionalString(parsed.options.poll_interval),
+          DEFAULT_POLL_INTERVAL_MS,
+          "--poll-interval",
+        ),
+        sleep,
+        timeoutMs: parseDuration(
+          optionalString(parsed.options.timeout),
+          DEFAULT_WAIT_TIMEOUT_MS,
+          "--timeout",
+        ),
+      });
+      if (json) writeJson(output, { ...queued, job });
+      else output.stdout(formatJob(job));
+      return unsuccessful(job) ? 3 : 0;
     }
 
     if (command === "status") {
