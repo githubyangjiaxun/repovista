@@ -445,9 +445,11 @@ function pullRequestImpact() {
 
 function corsHeaders(): Record<string, string> {
   return {
-    "Access-Control-Allow-Headers": "Content-Type, X-Request-ID",
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Headers": "Accept, Content-Type, X-RepoVista-CSRF, X-Request-ID",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Origin": webOrigin,
+    "Access-Control-Expose-Headers": "Content-Disposition, ETag, X-Request-ID",
     Vary: "Origin",
   };
 }
@@ -485,6 +487,21 @@ async function installMockApi(
     const url = new URL(request.url());
     if (request.method() === "OPTIONS") {
       await route.fulfill({ headers: corsHeaders(), status: 204 });
+      return;
+    }
+
+    // Every page is wrapped in AuthProvider. Keep the browser fixture explicit
+    // about the unauthenticated public-workspace contract so the auth probe does
+    // not turn otherwise unrelated API requests into CORS failures.
+    if (request.method() === "GET" && url.pathname === "/v1/auth/session") {
+      await json(route, {
+        authenticated: false,
+        user: null,
+        workspace: null,
+        workspaces: [],
+        csrfToken: null,
+        capabilities: { githubLogin: false, githubApp: false, privateRepositories: false },
+      });
       return;
     }
 
@@ -1059,7 +1076,7 @@ test("analyzes a repository and explores its evidence-backed result", async ({ c
   await expect(popup.getByText("Profile ollama · nomic-embed-text · 768d")).toBeVisible();
   await expect(popup.getByText("A deterministic reading path.")).toBeVisible();
   expect(state.shareRequests).toEqual([
-    { snapshotId, title: "acme/signal-hub architecture story" },
+    { snapshotId, title: "acme/signal-hub architecture story", visibility: "public" },
   ]);
 });
 

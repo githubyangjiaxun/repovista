@@ -42,4 +42,18 @@ describe("loadConfig", () => {
     expect(() => loadConfig({ EMBEDDING_INPUT_MAX_CHARS: "255" })).toThrow();
     expect(() => loadConfig({ EMBEDDING_REQUEST_TIMEOUT_MS: "999" })).toThrow();
   });
+
+  it("rejects insecure production authentication origins", () => {
+    expect(() => loadConfig({ APP_ENV: "production" })).toThrow(
+      /require HTTPS WEB_ORIGIN\/API_ORIGIN/,
+    );
+    expect(() =>
+      loadConfig({
+        APP_ENV: "production",
+        WEB_ORIGIN: "https://web.example",
+        API_ORIGIN: "https://api.example",
+        AUTH_COOKIE_SECURE: "true",
+      }),
+    ).not.toThrow();
+  });
 });

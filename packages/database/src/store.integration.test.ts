@@ -920,6 +920,525 @@ integration("RepoVistaStore with PostgreSQL", () => {
     });
   });
 
+  it("routes private webhooks only through the connected workspace and repository grant", async () => {
+    const suffix = randomUUID();
+    const userId = randomUUID();
+    const workspaceId = randomUUID();
+    const otherWorkspaceId = randomUUID();
+    const installationId = Number.parseInt(suffix.slice(0, 8), 16) + 10_000;
+    const otherInstallationId = installationId + 5_000_000_000;
+    const providerRepoId = String(Number.parseInt(suffix.slice(9, 17).replaceAll("-", ""), 16));
+    const deliveryIds: string[] = [];
+    let importedRepositoryId: string | null = null;
+    const payloadHash = (deliveryId: string) =>
+      `sha256:${createHash("sha256").update(deliveryId).digest("hex")}`;
+    const delivery = (name: string) => {
+      const id = `private-${name}-${suffix}`;
+      deliveryIds.push(id);
+      return id;
+    };
+
+    try {
+      await pool.query("INSERT INTO users (id, email, display_name) VALUES ($1, $2, $3)", [
+        userId,
+        `private-${suffix}@example.test`,
+        "Private Webhook Owner",
+      ]);
+      await pool.query(
+        "INSERT INTO workspaces (id, owner_id, name, slug, visibility, kind) " +
+          "VALUES ($1, $3, $4, $5, 'private', 'team'), ($2, $3, $6, $7, 'private', 'team')",
+        [
+          workspaceId,
+          otherWorkspaceId,
+          userId,
+          "Private webhook workspace",
+          `private-${suffix}`,
+          "Other webhook workspace",
+          `other-${suffix}`,
+        ],
+      );
+      await pool.query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $3, 'owner'), ($2, $3, 'owner')",
+        [workspaceId, otherWorkspaceId, userId],
+      );
+      await pool.query(
+        "INSERT INTO github_installations (installation_id, workspace_id, account_id, account_login, " +
+          "account_type, repository_selection, permissions_json, installed_by, last_synced_at) " +
+          "VALUES ($1, $3, $1, $6, 'Organization', 'selected', $8::jsonb, $5, now()), " +
+          "($2, $4, $2, $7, 'Organization', 'selected', $8::jsonb, $5, now())",
+        [
+          installationId,
+          otherInstallationId,
+          workspaceId,
+          otherWorkspaceId,
+          userId,
+          `private-acme-${suffix.slice(0, 8)}`,
+          `other-acme-${suffix.slice(0, 8)}`,
+          JSON.stringify({ contents: "read", metadata: "read", pull_requests: "read" }),
+        ],
+      );
+
+      const imported = await store.createRepositoryImport({
+        workspaceId,
+        identity: {
+          owner: "private-acme",
+          name: `service-${suffix}`,
+          canonicalUrl: `https://github.com/private-acme/service-${suffix}`,
+          cloneUrl: `https://github.com/private-acme/service-${suffix}.git`,
+        },
+        visibility: "private",
+        providerRepoId,
+        defaultBranch: "main",
+        githubInstallationId: installationId,
+        actorUserId: userId,
+        actorKind: "session",
+        requestedRef: "main",
+        ignore: [],
+        parserVersion: "integration-private-webhook-v1",
+      });
+      importedRepositoryId = imported.repositoryId;
+      repositoryIds.add(imported.repositoryId);
+
+      const push = {
+        owner: "private-acme",
+        name: `service-${suffix}`,
+        canonicalUrl: `https://github.com/private-acme/service-${suffix}`,
+        cloneUrl: `https://github.com/private-acme/service-${suffix}.git`,
+        providerRepoId,
+        defaultBranch: "main",
+        after: "4123456789abcdef0123456789abcdef01234567",
+        ref: "refs/heads/main",
+        deleted: false,
+        isPrivate: true,
+        installationId,
+      };
+      const pushDelivery = delivery("push");
+      const enqueued = await store.processGitHubWebhook(
+        {
+          deliveryId: pushDelivery,
+          eventName: "push",
+          payloadSha256: payloadHash(pushDelivery),
+          push,
+        },
+        "integration-private-webhook-v1",
+      );
+      expect(enqueued).toMatchObject({
+        status: "enqueued",
+        repositoryId: imported.repositoryId,
+      });
+
+      const forgedDelivery = delivery("forged-workspace");
+      const forged = await store.processGitHubWebhook(
+        {
+          deliveryId: forgedDelivery,
+          eventName: "push",
+          payloadSha256: payloadHash(forgedDelivery),
+          push: { ...push, installationId: otherInstallationId },
+        },
+        "integration-private-webhook-v1",
+      );
+      expect(forged).toMatchObject({
+        status: "ignored",
+        reason: "repository_not_imported",
+      });
+      const forgedAudit = await pool.query<{ workspace_id: string; reason: string }>(
+        "SELECT workspace_id, metadata_json->>'reason' AS reason FROM audit_events " +
+          "WHERE resource_type = 'webhook' AND resource_id = $1",
+        [forgedDelivery],
+      );
+      expect(forgedAudit.rows[0]).toEqual({
+        workspace_id: otherWorkspaceId,
+        reason: "repository_not_imported",
+      });
+
+      const removedDelivery = delivery("removed");
+      await expect(
+        store.processGitHubWebhook(
+          {
+            deliveryId: removedDelivery,
+            eventName: "installation_repositories",
+            payloadSha256: payloadHash(removedDelivery),
+            push: null,
+            installationRepositories: {
+              action: "removed",
+              installationId,
+              providerRepoIds: [providerRepoId],
+            },
+          },
+          "integration-private-webhook-v1",
+        ),
+      ).resolves.toMatchObject({ status: "synchronized" });
+      const disabledDelivery = delivery("disabled");
+      await expect(
+        store.processGitHubWebhook(
+          {
+            deliveryId: disabledDelivery,
+            eventName: "push",
+            payloadSha256: payloadHash(disabledDelivery),
+            push,
+          },
+          "integration-private-webhook-v1",
+        ),
+      ).resolves.toMatchObject({ status: "ignored", reason: "auto_update_disabled" });
+
+      const addedDelivery = delivery("added");
+      await store.processGitHubWebhook(
+        {
+          deliveryId: addedDelivery,
+          eventName: "installation_repositories",
+          payloadSha256: payloadHash(addedDelivery),
+          push: null,
+          installationRepositories: {
+            action: "added",
+            installationId,
+            providerRepoIds: [providerRepoId],
+          },
+        },
+        "integration-private-webhook-v1",
+      );
+      const pullRequestDelivery = delivery("pull-request");
+      await expect(
+        store.processGitHubWebhook(
+          {
+            deliveryId: pullRequestDelivery,
+            eventName: "pull_request",
+            payloadSha256: payloadHash(pullRequestDelivery),
+            push: null,
+            pullRequest: {
+              action: "synchronize",
+              installationId,
+              providerRepoId,
+              owner: push.owner,
+              name: push.name,
+              canonicalUrl: push.canonicalUrl,
+              isPrivate: true,
+              number: 42,
+            },
+          },
+          "integration-private-webhook-v1",
+        ),
+      ).resolves.toMatchObject({
+        status: "synchronized",
+        repositoryId: imported.repositoryId,
+      });
+
+      const suspendDelivery = delivery("suspend");
+      await store.processGitHubWebhook(
+        {
+          deliveryId: suspendDelivery,
+          eventName: "installation",
+          payloadSha256: payloadHash(suspendDelivery),
+          push: null,
+          installation: {
+            action: "suspend",
+            installationId,
+            suspendedAt: new Date("2026-08-22T00:00:00.000Z"),
+          },
+        },
+        "integration-private-webhook-v1",
+      );
+      const suspendedPushDelivery = delivery("suspended-push");
+      await expect(
+        store.processGitHubWebhook(
+          {
+            deliveryId: suspendedPushDelivery,
+            eventName: "push",
+            payloadSha256: payloadHash(suspendedPushDelivery),
+            push,
+          },
+          "integration-private-webhook-v1",
+        ),
+      ).resolves.toMatchObject({ status: "ignored", reason: "installation_suspended" });
+
+      const deletedDelivery = delivery("deleted");
+      await store.processGitHubWebhook(
+        {
+          deliveryId: deletedDelivery,
+          eventName: "installation",
+          payloadSha256: payloadHash(deletedDelivery),
+          push: null,
+          installation: {
+            action: "deleted",
+            installationId,
+            suspendedAt: null,
+          },
+        },
+        "integration-private-webhook-v1",
+      );
+      expect(await store.getRepository(imported.repositoryId)).toMatchObject({
+        githubInstallationId: null,
+        autoUpdateEnabled: false,
+      });
+    } finally {
+      if (deliveryIds.length > 0) {
+        await pool.query(
+          "DELETE FROM github_webhook_deliveries WHERE delivery_id = ANY($1::text[])",
+          [deliveryIds],
+        );
+      }
+      await pool.query("DELETE FROM workspaces WHERE id = ANY($1::uuid[])", [
+        [workspaceId, otherWorkspaceId],
+      ]);
+      await pool.query("DELETE FROM users WHERE id = $1", [userId]);
+      if (importedRepositoryId) repositoryIds.delete(importedRepositoryId);
+    }
+  });
+
+  it("manages team members with owner, self-protection, and credential revocation guards", async () => {
+    const suffix = randomUUID();
+    const ownerUserId = randomUUID();
+    const targetUserId = randomUUID();
+    let workspaceId: string | null = null;
+    try {
+      await pool.query(
+        "INSERT INTO users (id, email, display_name) VALUES ($1, $3, $4), ($2, $5, $6)",
+        [
+          ownerUserId,
+          targetUserId,
+          `owner-${suffix}@example.test`,
+          "Workspace Owner",
+          `member-${suffix}@example.test`,
+          "Workspace Member",
+        ],
+      );
+      await pool.query(
+        "INSERT INTO user_identities " +
+          "(id, user_id, provider, provider_user_id, login, profile_url) VALUES " +
+          "($1, $3, 'github', $5, $7, $9), ($2, $4, 'github', $6, $8, $10)",
+        [
+          randomUUID(),
+          randomUUID(),
+          ownerUserId,
+          targetUserId,
+          String(Number.parseInt(suffix.slice(0, 8), 16) + 100_000),
+          String(Number.parseInt(suffix.slice(9, 13), 16) + 200_000),
+          `owner-${suffix.slice(0, 8)}`,
+          `member-${suffix.slice(0, 8)}`,
+          `https://github.com/owner-${suffix.slice(0, 8)}`,
+          `https://github.com/member-${suffix.slice(0, 8)}`,
+        ],
+      );
+      const workspace = await store.createWorkspace(ownerUserId, `Team ${suffix.slice(0, 8)}`);
+      workspaceId = workspace.id;
+
+      expect(await store.listWorkspaceMembers(workspace.id)).toMatchObject([
+        { userId: ownerUserId, role: "owner" },
+      ]);
+      const member = await store.addWorkspaceMember(
+        workspace.id,
+        ownerUserId,
+        `member-${suffix.slice(0, 8)}`,
+        "viewer",
+      );
+      expect(member).toMatchObject({ userId: targetUserId, role: "viewer" });
+      await expect(
+        store.addWorkspaceMember(
+          workspace.id,
+          ownerUserId,
+          `member-${suffix.slice(0, 8)}`,
+          "viewer",
+        ),
+      ).rejects.toMatchObject({ code: "WORKSPACE_MEMBER_EXISTS" });
+      await expect(
+        store.updateWorkspaceMemberRole(workspace.id, ownerUserId, ownerUserId, "editor"),
+      ).rejects.toMatchObject({ code: "WORKSPACE_OWNER_PROTECTED" });
+      await expect(
+        store.removeWorkspaceMember(workspace.id, ownerUserId, ownerUserId),
+      ).rejects.toMatchObject({ code: "WORKSPACE_OWNER_PROTECTED" });
+
+      expect(
+        await store.updateWorkspaceMemberRole(workspace.id, ownerUserId, targetUserId, "editor"),
+      ).toMatchObject({ userId: targetUserId, role: "editor" });
+      expect(
+        await store.updateWorkspaceMemberRole(workspace.id, ownerUserId, targetUserId, "owner"),
+      ).toMatchObject({ userId: targetUserId, role: "owner" });
+
+      const sessionId = randomUUID();
+      await pool.query(
+        "INSERT INTO auth_sessions " +
+          "(id, user_id, active_workspace_id, token_hash, csrf_token_hash, expires_at) " +
+          "VALUES ($1, $2, $3, $4, $5, now() + interval '1 hour')",
+        [
+          sessionId,
+          targetUserId,
+          workspace.id,
+          `sha256:${"1".repeat(64)}`,
+          `sha256:${"2".repeat(64)}`,
+        ],
+      );
+      await store.createApiToken({
+        workspaceId: workspace.id,
+        userId: targetUserId,
+        name: "member-token",
+        tokenPrefix: "rv_member12",
+        tokenHash: `sha256:${"3".repeat(64)}`,
+        scopes: ["repo:read"],
+        expiresAt: null,
+      });
+
+      await store.removeWorkspaceMember(workspace.id, ownerUserId, targetUserId);
+      expect(await store.listWorkspaceMembers(workspace.id)).toMatchObject([
+        { userId: ownerUserId, role: "owner" },
+      ]);
+      const credentials = await pool.query<{ sessions: string; tokens: string }>(
+        "SELECT " +
+          "(SELECT count(*) FROM auth_sessions WHERE id = $1)::text AS sessions, " +
+          "(SELECT count(*) FROM api_tokens WHERE workspace_id = $2 AND created_by = $3)::text AS tokens",
+        [sessionId, workspace.id, targetUserId],
+      );
+      expect(credentials.rows[0]).toEqual({ sessions: "0", tokens: "0" });
+      const audit = await pool.query<{ action: string }>(
+        "SELECT action FROM audit_events WHERE workspace_id = $1 AND resource_id = $2 ORDER BY id",
+        [workspace.id, targetUserId],
+      );
+      expect(audit.rows.map((row) => row.action)).toEqual([
+        "workspace.member_add",
+        "workspace.member_role",
+        "workspace.member_role",
+        "workspace.member_remove",
+      ]);
+    } finally {
+      if (workspaceId) await pool.query("DELETE FROM workspaces WHERE id = $1", [workspaceId]);
+      await pool.query("DELETE FROM users WHERE id = ANY($1::uuid[])", [
+        [ownerUserId, targetUserId],
+      ]);
+    }
+  });
+
+  it("enforces signup policy, identity ownership, and expiring authentication state", async () => {
+    const suffix = randomUUID();
+    const providerUserId = String(Number.parseInt(suffix.slice(0, 8), 16) + 9_000_000_000);
+    const login = `auth-${suffix.slice(0, 8)}`;
+    const sessionHash = `sha256:${"4".repeat(64)}`;
+    const secondSessionHash = `sha256:${"5".repeat(64)}`;
+    const csrfHash = `sha256:${"6".repeat(64)}`;
+    let userId: string | null = null;
+    let personalWorkspaceId: string | null = null;
+    let competingUserId: string | null = null;
+    try {
+      const input = {
+        profile: {
+          providerUserId,
+          login,
+          displayName: "Authentication User",
+          avatarUrl: null,
+          email: `auth-${suffix}@example.test`,
+          profileUrl: `https://github.com/${login}`,
+        },
+        sessionTokenHash: sessionHash,
+        csrfTokenHash: csrfHash,
+        expiresAt: new Date(Date.now() + 60 * 60 * 1_000),
+      };
+      await expect(
+        store.createSessionFromGitHub({ ...input, allowSignup: false }),
+      ).rejects.toMatchObject({ code: "AUTH_SIGNUP_DISABLED" });
+
+      const created = await store.createSessionFromGitHub({ ...input, allowSignup: true });
+      userId = created.user.id;
+      personalWorkspaceId = created.workspace.id;
+      expect(created).toMatchObject({
+        principal: { workspaceId: personalWorkspaceId, role: "owner" },
+        user: { login },
+        workspace: { kind: "personal", visibility: "private" },
+      });
+      expect(await store.resolveSession(sessionHash)).toMatchObject({
+        user: { id: userId, login },
+      });
+
+      const existing = await store.createSessionFromGitHub({
+        ...input,
+        allowSignup: false,
+        sessionTokenHash: secondSessionHash,
+      });
+      expect(existing.user.id).toBe(userId);
+      await pool.query("UPDATE users SET status = 'disabled' WHERE id = $1", [userId]);
+      expect(await store.resolveSession(secondSessionHash)).toBeNull();
+      await pool.query("UPDATE users SET status = 'active' WHERE id = $1", [userId]);
+
+      competingUserId = randomUUID();
+      const competingLogin = `taken-${suffix.slice(0, 8)}`;
+      await pool.query("INSERT INTO users (id, email, display_name) VALUES ($1, $2, $3)", [
+        competingUserId,
+        `taken-${suffix}@example.test`,
+        "Competing User",
+      ]);
+      await pool.query(
+        "INSERT INTO user_identities " +
+          "(id, user_id, provider, provider_user_id, login, profile_url) " +
+          "VALUES ($1, $2, 'github', $3, $4, $5)",
+        [
+          randomUUID(),
+          competingUserId,
+          String(Number(providerUserId) + 1),
+          competingLogin,
+          `https://github.com/${competingLogin}`,
+        ],
+      );
+      await expect(
+        store.createSessionFromGitHub({
+          ...input,
+          allowSignup: false,
+          sessionTokenHash: `sha256:${"7".repeat(64)}`,
+          profile: { ...input.profile, login: competingLogin },
+        }),
+      ).rejects.toMatchObject({ code: "GITHUB_IDENTITY_CONFLICT" });
+
+      const expiredOAuthHash = `sha256:${"8".repeat(64)}`;
+      await pool.query(
+        "INSERT INTO oauth_login_states (state_hash, return_to, created_at, expires_at) " +
+          "VALUES ($1, '/expired', now() - interval '2 hours', now() - interval '1 hour')",
+        [expiredOAuthHash],
+      );
+      const currentOAuthHash = `sha256:${"9".repeat(64)}`;
+      await store.createOAuthState(
+        currentOAuthHash,
+        "/repositories",
+        new Date(Date.now() + 60_000),
+      );
+      const oauthStates = await pool.query<{ expired: string; current: string }>(
+        "SELECT " +
+          "(SELECT count(*) FROM oauth_login_states WHERE state_hash = $1)::text AS expired, " +
+          "(SELECT count(*) FROM oauth_login_states WHERE state_hash = $2)::text AS current",
+        [expiredOAuthHash, currentOAuthHash],
+      );
+      expect(oauthStates.rows[0]).toEqual({ expired: "0", current: "1" });
+
+      const expiredInstallHash = `sha256:${"a".repeat(64)}`;
+      await pool.query(
+        "INSERT INTO github_installation_states " +
+          "(state_hash, workspace_id, user_id, return_to, created_at, expires_at) " +
+          "VALUES ($1, $2, $3, '/expired', now() - interval '2 hours', now() - interval '1 hour')",
+        [expiredInstallHash, personalWorkspaceId, userId],
+      );
+      const currentInstallHash = `sha256:${"b".repeat(64)}`;
+      await store.createInstallationState(
+        currentInstallHash,
+        personalWorkspaceId,
+        userId,
+        "/settings",
+        new Date(Date.now() + 60_000),
+      );
+      const installStates = await pool.query<{ expired: string; current: string }>(
+        "SELECT " +
+          "(SELECT count(*) FROM github_installation_states WHERE state_hash = $1)::text AS expired, " +
+          "(SELECT count(*) FROM github_installation_states WHERE state_hash = $2)::text AS current",
+        [expiredInstallHash, currentInstallHash],
+      );
+      expect(installStates.rows[0]).toEqual({ expired: "0", current: "1" });
+      await pool.query("DELETE FROM oauth_login_states WHERE state_hash = $1", [currentOAuthHash]);
+      await pool.query("DELETE FROM github_installation_states WHERE state_hash = $1", [
+        currentInstallHash,
+      ]);
+    } finally {
+      if (userId) await pool.query("DELETE FROM auth_sessions WHERE user_id = $1", [userId]);
+      if (personalWorkspaceId) {
+        await pool.query("DELETE FROM workspaces WHERE id = $1", [personalWorkspaceId]);
+      }
+      if (userId) await pool.query("DELETE FROM users WHERE id = $1", [userId]);
+      if (competingUserId) await pool.query("DELETE FROM users WHERE id = $1", [competingUserId]);
+    }
+  });
+
   it("persists PR impact evidence transactionally and paginates by a stable cursor", async () => {
     const suffix = randomUUID();
     const parserVersion = "integration-pr-impact-v1";

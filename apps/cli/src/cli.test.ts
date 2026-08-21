@@ -1,5 +1,9 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { runCli } from "./cli.js";
+import { emptyCliConfig, loadCliConfig, saveCliConfig, upsertCliProfile } from "./config.js";
 
 const repositoryId = "01900000-0000-7000-8000-000000000001";
 const snapshotId = "01900000-0000-7000-8000-000000000002";
@@ -7,6 +11,7 @@ const jobId = "01900000-0000-7000-8000-000000000003";
 const fileId = "01900000-0000-7000-8000-000000000004";
 const symbolId = "01900000-0000-7000-8000-000000000005";
 const messageId = "01900000-0000-7000-8000-000000000006";
+const userId = "01900000-0000-7000-8000-000000000010";
 
 const queuedJob = {
   id: jobId,
@@ -104,7 +109,7 @@ describe("RepoVista CLI", () => {
     const exitCode = await runCli(["--version"], dependencies);
 
     expect(exitCode).toBe(0);
-    expect(stdout).toEqual(["0.4.0"]);
+    expect(stdout).toEqual(["0.5.0"]);
     expect(stderr).toEqual([]);
     expect(fetchImplementation).not.toHaveBeenCalled();
   });
@@ -394,5 +399,117 @@ describe("RepoVista CLI", () => {
     expect(exitCode).toBe(2);
     expect(fetchImplementation).not.toHaveBeenCalled();
     expect(stderr.join("\n")).toContain("Job ID must be a valid UUID");
+  });
+
+  it("logs in from injected hidden input, persists a 0600 profile, and never prints the token", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "repovista-cli-auth-"));
+    const configPath = path.join(directory, "config.json");
+    const token = "rv_testtoken_abcdefghijklmnopqrstuvwxyz0123456789";
+    const fetchImplementation = vi.fn<typeof fetch>(async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      expect(headers.get("Authorization")).toBe(`Bearer ${token}`);
+      return envelope({
+        authenticated: true,
+        user: {
+          id: userId,
+          login: "octocat",
+          displayName: "Octocat",
+          avatarUrl: null,
+        },
+        workspace: {
+          id: repositoryId,
+          name: "Private workspace",
+          slug: "private-workspace",
+          kind: "team",
+          visibility: "private",
+          role: "owner",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+        workspaces: [],
+        csrfToken: null,
+        capabilities: { githubLogin: true, githubApp: true, privateRepositories: true },
+      });
+    });
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+
+    try {
+      const login = await runCli(["auth", "login", "--json"], {
+        configPath,
+        fetch: fetchImplementation,
+        readToken: async () => token,
+        output: { stdout: (line) => stdout.push(line), stderr: (line) => stderr.push(line) },
+      });
+
+      expect(login).toBe(0);
+      expect(stdout.join("\n")).not.toContain(token);
+      expect(stderr.join("\n")).not.toContain(token);
+      const persisted = await loadCliConfig(configPath);
+      expect(persisted.profiles[repositoryId]?.token).toBe(token);
+      expect((await readFile(configPath)).length).toBeGreaterThan(0);
+
+      stdout.length = 0;
+      stderr.length = 0;
+      const status = await runCli(["auth", "status", "--json"], {
+        configPath,
+        fetch: fetchImplementation,
+        output: { stdout: (line) => stdout.push(line), stderr: (line) => stderr.push(line) },
+      });
+      expect(status).toBe(0);
+      expect(stdout.join("\n")).not.toContain(token);
+      expect(stderr.join("\n")).not.toContain(token);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a token command-line argument and keeps workspace profiles token-free in output", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "repovista-cli-workspace-"));
+    const configPath = path.join(directory, "config.json");
+    const firstWorkspace = repositoryId;
+    const secondWorkspace = snapshotId;
+    let config = emptyCliConfig();
+    config = upsertCliProfile(config, {
+      workspaceId: firstWorkspace,
+      workspaceName: "Alpha",
+      apiUrl: "https://api.example",
+      token: "rv_alpha_abcdefghijklmnopqrstuvwxyz0123456789",
+      login: "alpha",
+    });
+    config = upsertCliProfile(config, {
+      workspaceId: secondWorkspace,
+      workspaceName: "Beta",
+      apiUrl: "https://api.example",
+      token: "rv_beta_abcdefghijklmnopqrstuvwxyz0123456789",
+      login: "beta",
+    });
+    try {
+      await saveCliConfig(configPath, config);
+      const output: string[] = [];
+      const usage = await runCli(["auth", "login", "--token", "rv_should_not_be_here"], {
+        configPath,
+        output: { stdout: (line) => output.push(line), stderr: (line) => output.push(line) },
+      });
+      expect(usage).toBe(2);
+      expect(output.join("\n")).toContain("Unknown option: --token");
+      expect(output.join("\n")).not.toContain("rv_should_not_be_here");
+
+      output.length = 0;
+      const listed = await runCli(["workspace", "list", "--json"], {
+        configPath,
+        output: { stdout: (line) => output.push(line), stderr: (line) => output.push(line) },
+      });
+      expect(listed).toBe(0);
+      expect(output.join("\n")).not.toContain("rv_alpha_");
+      expect(output.join("\n")).not.toContain("rv_beta_");
+      expect(JSON.parse(output.join("\n"))).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ workspaceId: firstWorkspace, active: false }),
+          expect.objectContaining({ workspaceId: secondWorkspace, active: true }),
+        ]),
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });

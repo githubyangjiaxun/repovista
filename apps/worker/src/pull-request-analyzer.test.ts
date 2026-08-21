@@ -14,6 +14,9 @@ const job: PullRequestAnalysisJob = {
   owner: "acme",
   name: "demo",
   cloneUrl: "https://github.com/acme/demo.git",
+  visibility: "public",
+  githubInstallationId: null,
+  githubInstallationSuspended: false,
   prNumber: 42,
   title: "Change greeting",
   canonicalUrl: "https://github.com/acme/demo/pull/42",
@@ -148,6 +151,26 @@ describe("executePullRequestAnalysisJob", () => {
       }),
     );
     expect(store.failPullRequestAnalysis).not.toHaveBeenCalled();
+  });
+
+  it("fails a private analysis when its installation was disconnected", async () => {
+    const store = createStore();
+    await expect(
+      executePullRequestAnalysisJob(
+        store,
+        { ...job, visibility: "private", githubInstallationId: null },
+        config,
+      ),
+    ).resolves.toBe("failed");
+    expect(store.failPullRequestAnalysis).toHaveBeenCalledWith(
+      job.id,
+      job.analysisId,
+      config.WORKER_ID,
+      "GITHUB_INSTALLATION_NOT_FOUND",
+      expect.any(String),
+      false,
+    );
+    expect(store.ensureSnapshotForCommit).not.toHaveBeenCalled();
   });
 
   it("rejects a snapshot whose fixed commit does not match the PR", async () => {

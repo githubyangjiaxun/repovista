@@ -18,6 +18,9 @@ const job = {
   cloneUrl: "https://github.com/acme/demo.git",
   owner: "acme",
   name: "demo",
+  visibility: "public" as const,
+  githubInstallationId: null,
+  githubInstallationSuspended: false,
   requestedRef: null,
   ignore: [],
   attemptCount: 1,
@@ -90,6 +93,7 @@ function createDependencies(overrides: Partial<IndexerDependencies> = {}): Index
     parseRepository: vi.fn(() => [parsedFile]),
     linkParsedImports: vi.fn((_files, parsedFiles) => [...parsedFiles]),
     removeWorkspace: vi.fn(async () => undefined),
+    installationToken: vi.fn(async () => "ghs_test_installation_token"),
     ...overrides,
   };
 }
@@ -224,6 +228,61 @@ describe("executeIndexJob", () => {
     expect(store.cancelJob).toHaveBeenCalledWith(job.id, job.snapshotId, config.WORKER_ID);
     expect(dependencies.cloneRepository).not.toHaveBeenCalled();
     expect(store.completeIndexJob).not.toHaveBeenCalled();
+  });
+
+  it("fails a disconnected private repository before creating clone credentials", async () => {
+    const store = createStore();
+    const dependencies = createDependencies();
+
+    await expect(
+      executeIndexJob(
+        store,
+        { ...job, visibility: "private", githubInstallationId: null },
+        config,
+        dependencies,
+      ),
+    ).resolves.toBe("failed");
+
+    expect(store.failJob).toHaveBeenCalledWith(
+      job.id,
+      job.snapshotId,
+      config.WORKER_ID,
+      "GITHUB_INSTALLATION_NOT_FOUND",
+      expect.any(String),
+      false,
+    );
+    expect(dependencies.installationToken).not.toHaveBeenCalled();
+    expect(dependencies.createWorkspace).not.toHaveBeenCalled();
+    expect(dependencies.cloneRepository).not.toHaveBeenCalled();
+  });
+
+  it("fails a suspended private installation before minting a token", async () => {
+    const store = createStore();
+    const dependencies = createDependencies();
+
+    await expect(
+      executeIndexJob(
+        store,
+        {
+          ...job,
+          visibility: "private",
+          githubInstallationId: 456,
+          githubInstallationSuspended: true,
+        },
+        config,
+        dependencies,
+      ),
+    ).resolves.toBe("failed");
+
+    expect(store.failJob).toHaveBeenCalledWith(
+      job.id,
+      job.snapshotId,
+      config.WORKER_ID,
+      "GITHUB_INSTALLATION_SUSPENDED",
+      expect.any(String),
+      false,
+    );
+    expect(dependencies.installationToken).not.toHaveBeenCalled();
   });
 
   it("records retryable domain failures and cleans the workspace", async () => {

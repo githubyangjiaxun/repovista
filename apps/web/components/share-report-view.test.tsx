@@ -23,6 +23,7 @@ const baseReport = {
   id: "01900000-0000-7000-8000-000000000204",
   slug: "acme-signal-hub-story",
   title: "acme/signal-hub architecture story",
+  visibility: "public" as const,
   repository: {
     id: repositoryId,
     owner: "acme",
@@ -193,5 +194,23 @@ describe("ShareReportView", () => {
     expect(screen.getByText("src/index.ts")).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Architecture metrics" })).not.toBeInTheDocument();
     expect(screen.queryByText("Provenance")).not.toBeInTheDocument();
+  });
+
+  it("labels private reports as workspace-only content", async () => {
+    const report: ShareReport = {
+      ...baseReport,
+      visibility: "private",
+      content: {
+        overview: "A private deterministic architecture tour.",
+        readingPath: [{ path: "src/private.ts", reason: "Private workspace evidence." }],
+        map: { nodes: [], edges: [], truncated: false },
+      },
+    };
+    vi.mocked(fetch).mockResolvedValue(success(report));
+
+    render(<ShareReportView slug={report.slug} />);
+
+    expect(await screen.findByText("Private workspace report")).toBeInTheDocument();
+    expect(screen.queryByText("Public architecture tour")).not.toBeInTheDocument();
   });
 });
