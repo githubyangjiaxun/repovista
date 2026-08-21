@@ -5,6 +5,34 @@ Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-22
+
+### Added
+
+- GitHub OAuth sessions with HttpOnly cookies, CSRF/origin checks, Workspace switching, member roles,
+  API token lifecycle, and append-only audit events.
+- GitHub App installation support for private repositories, installation-aware webhooks, short-lived
+  in-memory credentials, and temporary AskPass cloning without credential-bearing URLs or job events.
+- Workspace authorization for repository-derived resources, private share reports, Web Settings, and
+  CLI `auth`, `workspace`, `github`, and private-installation analysis commands.
+- OpenAPI security schemes and contracts for all 49 API operations, plus API/CLI/Web security tests.
+
+### Security
+
+- Cross-Workspace resource IDs resolve to stable Not Found responses; Bearer workspace discovery is
+  limited to the token's bound Workspace.
+- Private share pages send `noindex`/`noarchive` metadata, and installation disconnect/suspension
+  preserves historical snapshots while stopping new credentialed work.
+- Authenticated snapshot exports use credentialed Blob downloads across origins and mark private
+  artifacts `private, no-store`.
+
+### Verification
+
+- Final gates passed 21/21 typecheck tasks, 37/37 test tasks, 10/10 PostgreSQL integration tests,
+  6/6 Playwright journeys, the deterministic benchmark, all three Compose image builds, and Git
+  integrity checks. Real GitHub Private Fixture verification remains explicitly pending; details
+  are in [the v0.5 acceptance record](docs/releases/v0.5-验收记录.md).
+
 ## [0.4.0] - 2026-08-20
 
 ### Added

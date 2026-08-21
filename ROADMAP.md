@@ -31,4 +31,11 @@
 - [Done](./docs/releases/v0.4-开发计划.md) Evidence Retrieval Lab, shared grounded-Ask trace, and CLI search/index workflows.
 - [Done](./docs/releases/v0.4-开发计划.md) Commit-pinned Architecture Story v2 with deterministic hotspots, reading paths, evidence, and provenance.
 
+## v0.5 — Private GitHub App access and team Workspaces (implemented 2026-08-22)
+
+- [Done](./docs/releases/v0.5-开发计划.md) GitHub OAuth, HttpOnly sessions, CSRF, Workspace roles, API tokens, and audit events.
+- [Done](./docs/releases/v0.5-开发计划.md) GitHub App installation flow, short-lived in-memory installation credentials, and private repository import/clone.
+- [Done](./docs/releases/v0.5-开发计划.md) Workspace-aware access checks for repository-derived resources, private shares, and signed private webhooks.
+- [Done](./docs/releases/v0.5-开发计划.md) Web Settings/Import flows and CLI authentication, Workspace, Installation, and private analysis workflows.
+
 Roadmap ordering may change based on measured usage and contributor feedback.

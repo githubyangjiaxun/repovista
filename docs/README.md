@@ -1,6 +1,6 @@
 # RepoVista 工程文档
 
-状态：v0.4 已实现并完成自动化、真实 PostgreSQL、公共 Go 仓库、真实 Ollama、透明降级、Web Retrieval Lab、CLI 与 Architecture Story 验收（2026-08-20）
+状态：v0.5 已实现并完成认证、Workspace 隔离、GitHub App 私有仓库链路、CLI/Web 安全测试与 OpenAPI 同步（2026-08-22）
 
 本目录描述当前代码，而不是早期愿景。发生冲突时，事实来源优先级如下：
 
@@ -20,6 +20,7 @@
 | [ADR 0002](./decisions/0002-v02-update-pipeline.md) | v0.2 增量、多语言、Webhook 与导出的共同边界 |
 | [ADR 0003](./decisions/0003-pr-impact-and-editor.md) | v0.3 双快照影响分析、固定 Commit 证据与编辑器安全边界 |
 | [ADR 0004](./decisions/0004-transparent-hybrid-retrieval.md) | v0.4 派生向量索引、透明降级、RRF 与 Story 事实边界 |
+| [ADR 0005](./decisions/0005-private-repository-auth.md) | GitHub App、短期安装令牌、Session/API Token 与 Workspace 强隔离 |
 
 ## v0.2 实施计划
 
@@ -56,6 +57,17 @@
 | [v0.4 测试与发布计划](./operations/v0.4测试与发布计划.md) | 模型协议、数据库、真实 Ollama、检索质量、性能和发布门禁 |
 | [v0.4 验收记录](./releases/v0.4-验收记录.md) | 真实 go-chi/chi、Ollama、查询排名、降级、SQL Plan、Story、质量门禁与 Git 审计 |
 
+## v0.5 实施计划（已完成）
+
+| 文档 | 内容 |
+|---|---|
+| [版本开发计划](./releases/v0.5-开发计划.md) | 私有 GitHub App、OAuth、Workspace 权限、CLI/Web 与安全完成标准 |
+| [v0.5 后端开发文档](./backend/v0.5后端开发文档.md) | Principal、CSRF、Installation、Webhook、Worker 凭据链和 Access Query |
+| [v0.5 数据库设计](./database/v0.5数据库设计.md) | User/Session/Token/Workspace/Installation/Audit Migration 与事务不变量 |
+| [v0.5 前端开发文档](./frontend/v0.5前端开发文档.md) | Auth Header、Settings、私有 Import/Share、CSRF 与可访问性 |
+| [v0.5 测试与发布计划](./operations/v0.5测试与发布计划.md) | 授权隔离、凭据不泄露、PostgreSQL、CLI/Web/API 与部署门禁 |
+| [v0.5 验收记录](./releases/v0.5-验收记录.md) | 自动化安全矩阵、PostgreSQL、E2E、Docker、Benchmark、凭据扫描与真实 Fixture 边界 |
+
 ## 前端
 
 | 文档 | 内容 |
@@ -68,7 +80,7 @@
 | 文档 | 内容 |
 |---|---|
 | [后端开发文档](./backend/后端开发文档.md) | Fastify 请求边界、配置、错误和模块职责 |
-| [API 接口契约](./backend/API接口契约.md) | 29 个 v0.4 Operation、信封格式、SSE、Embedding、四模式检索、Ask、Story 与 PR Impact |
+| [API 接口契约](./backend/API接口契约.md) | 49 个 v0.5 Operation、Cookie/Bearer、Workspace、GitHub App、SSE、Retrieval、Story 与 PR Impact |
 | [任务与索引流水线](./backend/任务与索引流水线.md) | 租约任务、安全克隆、扫描、解析和持久化 |
 
 ## 数据与可信 AI

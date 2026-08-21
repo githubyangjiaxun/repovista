@@ -6,6 +6,7 @@ const specificationPath = new URL("../openapi/openapi.json", import.meta.url);
 const routeSourcePaths = [
   new URL("../apps/api/src/app.ts", import.meta.url),
   new URL("../apps/api/src/routes.ts", import.meta.url),
+  new URL("../apps/api/src/auth-routes.ts", import.meta.url),
 ];
 const HTTP_METHODS = new Set(["delete", "get", "head", "options", "patch", "post", "put"]);
 
@@ -68,7 +69,7 @@ for (const [route, pathItem] of Object.entries(specification.paths)) {
     }
     if (
       !operation.responses ||
-      !Object.keys(operation.responses).some((status) => /^2\d\d$/.test(status))
+      !Object.keys(operation.responses).some((status) => /^[23]\d\d$/.test(status))
     ) {
       fail(`${key} must document a successful 2xx response`);
     }

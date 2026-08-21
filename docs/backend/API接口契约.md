@@ -1,6 +1,6 @@
 # API 接口契约
 
-状态：v0.4 已实现并验收（2026-08-20）
+状态：v0.5 已实现并验收（2026-08-22）
 Base path：`/v1`
 机器事实来源：`openapi/openapi.json`
 
@@ -38,7 +38,17 @@ X-Request-ID: client-generated-id
 }
 ```
 
-Health Endpoint 直接返回 `{ "status": "ok" }`，不包信封。v0.4 仍没有 Authorization Header 约定。
+Health Endpoint 直接返回 `{ "status": "ok" }`，不包信封。v0.5 新增两种认证方式：浏览器使用
+HttpOnly `repovista_session` Cookie + `X-RepoVista-CSRF` Mutation Header，CLI/自动化使用
+`Authorization: Bearer rv_...`。Bearer Token 绑定单一 Workspace，不读取 Cookie，也不需要 CSRF；
+Cookie 与 Bearer 同时出现时统一返回 `AUTH_AMBIGUOUS`。完整机器契约见
+[`openapi/openapi.json`](../../openapi/openapi.json)。
+
+### v0.5 Auth/Workspace 路由
+
+认证、Workspace、成员、Token、Audit 和 GitHub Installation 路由均已纳入 OpenAPI，共 49 个
+Operation。所有 UUID 资源查询先做 Workspace Access Check；无权资源使用稳定 404，不把 ID 是否存在
+泄露给其他 Workspace。私有 Share 只能由所属 Workspace 成员读取。
 
 ## 2. Operation 列表
 
@@ -46,10 +56,19 @@ Health Endpoint 直接返回 `{ "status": "ok" }`，不包信封。v0.4 仍没�
 |---|---|---|
 | GET | `/v1/health/live` | 进程存活 |
 | GET | `/v1/health/ready` | 数据库可用 |
+| GET | `/v1/auth/github/start` / `/v1/auth/github/callback` | GitHub OAuth 登录 |
+| GET | `/v1/auth/session` / `POST /v1/auth/logout` | 读取/撤销当前会话 |
+| GET/POST | `/v1/workspaces` | 列出或创建 Workspace |
+| GET/POST/PATCH/DELETE | `/v1/workspaces/{workspaceId}/members[/{userId}]` | 成员读取与 Owner 管理 |
+| PUT | `/v1/auth/session/workspace` | 切换当前 Session Workspace |
+| GET | `/v1/audit-events` | 读取当前 Workspace 审计事件 |
+| GET/POST/DELETE | `/v1/auth/tokens[/{tokenId}]` | 创建、列出、撤销 CLI Token |
+| GET | `/v1/integrations/github/install-url` / `setup` | 连接 GitHub App Installation |
+| GET/DELETE | `/v1/integrations/github/installations[/{installationId}]` | Installation 与授权仓库 |
 | GET | `/v1/integrations/github` | 非敏感 GitHub 自动更新能力状态 |
 | POST | `/v1/integrations/github/webhooks` | 验签、筛选并幂等处理 GitHub 事件 |
 | POST | `/v1/repositories` | 创建/复用仓库并排队 Snapshot |
-| GET | `/v1/repositories` | 列出 Public Workspace 仓库 |
+| GET | `/v1/repositories` | 列出当前 Principal Workspace 仓库 |
 | GET | `/v1/repositories/{repositoryId}` | 仓库摘要和最新 Snapshot |
 | GET | `/v1/repositories/{repositoryId}/snapshots` | 列出不可变 Snapshot |
 | POST | `/v1/repositories/{repositoryId}/pull-requests` | 创建/复用固定 Base/Head 的 PR Impact Analysis |
@@ -74,7 +93,7 @@ Health Endpoint 直接返回 `{ "status": "ok" }`，不包信封。v0.4 仍没�
 | POST | `/v1/share-reports` | 创建 Architecture Story v2 |
 | GET | `/v1/share-reports/{slug}` | 读取 v1 Tour 或 v2 Story |
 
-共 29 个 Operation。
+共 49 个 Operation。
 
 ## 3. 创建分析
 

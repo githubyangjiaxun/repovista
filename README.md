@@ -2,9 +2,10 @@
 
 > Understand any codebase as a map, not a maze.
 
-RepoVista is an evidence-first repository explorer for public GitHub projects. It clones a fixed
-snapshot, extracts files and symbols with Tree-sitter, builds package/file/symbol graphs, and lets
-you ask questions whose answers are tied back to exact source ranges.
+RepoVista is an evidence-first repository explorer for public GitHub projects and securely connected
+private repositories. It clones a fixed snapshot, extracts files and symbols with Tree-sitter, builds
+package/file/symbol graphs, and lets you ask questions whose answers are tied back to exact source
+ranges.
 
 **AI explains the code. The code provides the evidence.**
 
@@ -25,6 +26,27 @@ an immutable commit and a deterministic index:
 The map, source browser, search, reading path, and share reports remain useful without a model API
 key. The default `fake` provider is a transparent deterministic evidence summarizer, so the full
 workflow can be evaluated locally before connecting Ollama or an OpenAI-compatible endpoint.
+
+## What v0.5 includes
+
+- GitHub OAuth login with HttpOnly sessions, CSRF protection, explicit Workspace switching, audited
+  member administration, and revocable Workspace-bound CLI API tokens.
+- GitHub App installation flow for selected private repositories. Installation and clone credentials
+  are short-lived, held only in server memory, and never placed in URLs, job events, logs, or the
+  database.
+- Workspace-aware authorization for repositories, snapshots, jobs, PR analyses, exports, answers,
+  and share reports. Private shares are members-only and marked `noindex`.
+- Authenticated Markdown/SVG Blob downloads for private snapshots, with private non-cacheable API
+  responses even when Web and API use different origins.
+- Web and CLI private-repository workflows: `auth login/status/logout`, `workspace list/use`,
+  `github installations/repos`, and `analyze --installation <id>`.
+- Signed installation, repository-grant, push, and pull-request webhook boundaries with audit events
+  and safe handling of disconnects or suspended installations.
+
+The public anonymous demo remains available. To enable login or private repositories, configure the
+GitHub OAuth/App values in `.env` and keep the repository private until you are ready to publish it.
+The reproducible automated release evidence and the explicitly pending real GitHub fixture are in
+the [v0.5 acceptance record](docs/releases/v0.5-验收记录.md).
 
 ## What v0.4 includes
 
@@ -73,10 +95,10 @@ The reproducible real-repository and pull-request verification details are recor
   idempotency and HMAC-SHA256 verification.
 - Deterministic Markdown architecture reports and CSP-protected SVG maps for every ready snapshot.
 
-Current scope is intentionally narrow: RepoVista accepts public
-`https://github.com/owner/repository` URLs. Private repositories, installation tokens, and OAuth
-remain out of scope. AI is an optional explanation layer; the map,
-source browser, search, and exports work without a model key.
+Public imports still accept `https://github.com/owner/repository` URLs. Private imports require a
+connected GitHub App installation and an authenticated Workspace member; users never paste a GitHub
+password or PAT into RepoVista. AI remains an optional explanation layer: the map, source browser,
+search, and exports work without a model key.
 
 ## Quick start
 
@@ -257,7 +279,10 @@ structured failures with deterministic network mocks. The independent VS Code pr
 
 Imported repositories are hostile input. RepoVista:
 
-- accepts only public HTTPS GitHub URLs in the current release;
+- accepts public HTTPS GitHub URLs and private repositories explicitly granted to a connected GitHub App;
+- separates browser HttpOnly sessions from revocable Workspace-bound Bearer tokens;
+- checks Workspace membership before every repository-derived resource lookup;
+- keeps private shares authenticated and sends `noindex` metadata;
 - disables Git hooks and interactive credential prompts;
 - never installs dependencies or executes repository code;
 - rejects symbolic links and repository-relative path traversal;
@@ -265,6 +290,9 @@ Imported repositories are hostile input. RepoVista:
 - enforces file count, total byte, individual file, and job-time limits;
 - treats repository text as data, not model instructions;
 - validates every model evidence ID against retrieved source before returning citations.
+
+Installation tokens and API token/session raw values are never persisted. Read [SECURITY.md](./SECURITY.md)
+for the threat model and deployment requirements.
 
 Read [SECURITY.md](./SECURITY.md) before reporting a vulnerability.
 
@@ -278,6 +306,8 @@ Read [SECURITY.md](./SECURITY.md) before reporting a vulnerability.
 - [Local development and deployment](./docs/operations/本地开发与部署.md)
 - [Testing and release gates](./docs/operations/测试与质量.md)
 - [v0.4 acceptance record](./docs/releases/v0.4-验收记录.md)
+- [v0.5 development plan](./docs/releases/v0.5-开发计划.md)
+- [v0.5 test and release plan](./docs/operations/v0.5测试与发布计划.md)
 - [Roadmap](./ROADMAP.md)
 
 The machine-readable API source of truth is [openapi/openapi.json](./openapi/openapi.json).

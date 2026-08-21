@@ -26,7 +26,7 @@ services:
       args:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
     environment:
-      APP_ENV: production
+      APP_ENV: ${APP_ENV:-development}
       API_PORT: 4000
       DATABASE_URL: postgresql://repovista:repovista@postgres:5432/repovista
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -41,10 +41,21 @@ services:
       OPENAI_COMPATIBLE_BASE_URL: ${OPENAI_COMPATIBLE_BASE_URL:-}
       CHAT_MODEL: ${CHAT_MODEL:-}
       GITHUB_APP_SLUG: ${GITHUB_APP_SLUG:-repovista-local}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
+      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_OAUTH_ORIGIN: ${GITHUB_OAUTH_ORIGIN:-https://github.com}
       GITHUB_API_ORIGIN: ${GITHUB_API_ORIGIN:-https://api.github.com}
       GITHUB_API_TOKEN: ${GITHUB_API_TOKEN:-}
       GITHUB_WEBHOOK_BODY_MAX_BYTES: ${GITHUB_WEBHOOK_BODY_MAX_BYTES:-1048576}
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+      AUTH_SESSION_TTL_SECONDS: ${AUTH_SESSION_TTL_SECONDS:-2592000}
+      AUTH_OAUTH_STATE_TTL_SECONDS: ${AUTH_OAUTH_STATE_TTL_SECONDS:-600}
+      AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      AUTH_TOKEN_TTL_DAYS: ${AUTH_TOKEN_TTL_DAYS:-90}
+      AUTH_ALLOW_SIGNUP: ${AUTH_ALLOW_SIGNUP:-true}
       RUN_MIGRATIONS_ON_START: "true"
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
     depends_on:
@@ -73,7 +84,7 @@ services:
       args:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
     environment:
-      APP_ENV: production
+      APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: postgresql://repovista:repovista@postgres:5432/repovista
       JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-30}
       JOB_POLL_INTERVAL_MS: ${JOB_POLL_INTERVAL_MS:-1000}
@@ -89,6 +100,9 @@ services:
       OPENAI_COMPATIBLE_BASE_URL: ${OPENAI_COMPATIBLE_BASE_URL:-}
       RUN_MIGRATIONS_ON_START: "false"
       WORKER_ID: ${WORKER_ID:-compose-worker}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
+      GITHUB_API_ORIGIN: ${GITHUB_API_ORIGIN:-https://api.github.com}
     depends_on:
       api:
         condition: service_healthy
