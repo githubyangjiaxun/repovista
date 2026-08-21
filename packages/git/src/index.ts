@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -184,16 +184,55 @@ export interface CloneRepositoryOptions {
   destination: string;
   ref?: string | null;
   timeoutMs: number;
+  credentials?: {
+    username: "x-access-token";
+    password: string;
+  };
 }
 
-function gitEnvironment(): NodeJS.ProcessEnv {
+function gitEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return {
     ...process.env,
     GIT_ALLOW_PROTOCOL: "https",
     GIT_CONFIG_GLOBAL: os.devNull,
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_TERMINAL_PROMPT: "0",
+    ...overrides,
   };
+}
+
+function redactCredential(value: string, secret: string | undefined): string {
+  if (!secret) return value;
+  return value.split(secret).join("[REDACTED]");
+}
+
+async function withAskPass<T>(
+  credentials: CloneRepositoryOptions["credentials"],
+  callback: (environment: NodeJS.ProcessEnv) => Promise<T>,
+): Promise<T> {
+  if (!credentials) return callback(gitEnvironment());
+  if (!credentials.password || credentials.password.length > 1_000) {
+    throw new DomainError("REPOSITORY_CREDENTIAL_INVALID", "The repository credential is invalid.");
+  }
+  const directory = await mkdtemp(path.join(os.tmpdir(), "repovista-askpass-"));
+  const script = path.join(directory, "askpass.sh");
+  await writeFile(
+    script,
+    '#!/bin/sh\ncase "$1" in\n  *Username*) printf "%s\\n" "$REPOVISTA_GIT_USERNAME" ;;\n  *) printf "%s\\n" "$REPOVISTA_GIT_PASSWORD" ;;\nesac\n',
+    { encoding: "utf8", mode: 0o700 },
+  );
+  await chmod(directory, 0o700);
+  try {
+    return await callback(
+      gitEnvironment({
+        GIT_ASKPASS: script,
+        REPOVISTA_GIT_USERNAME: credentials.username,
+        REPOVISTA_GIT_PASSWORD: credentials.password,
+      }),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 function gitArgs(...args: string[]): string[] {
@@ -263,39 +302,43 @@ export async function cloneRepository(
   }
   args.push("--", options.cloneUrl, options.destination);
 
-  const environment = gitEnvironment();
   try {
-    if (options.ref && fullCommitSha.test(options.ref)) {
-      await cloneCommit(options, environment);
-    } else {
-      await executeFile("git", args, {
+    return await withAskPass(options.credentials, async (environment) => {
+      if (options.ref && fullCommitSha.test(options.ref)) {
+        await cloneCommit(options, environment);
+      } else {
+        await executeFile("git", args, {
+          env: environment,
+          timeout: options.timeoutMs,
+          maxBuffer: 10 * 1024 * 1024,
+        });
+      }
+      const commit = await executeFile("git", gitArgs("rev-parse", "HEAD"), {
+        cwd: options.destination,
         env: environment,
-        timeout: options.timeoutMs,
-        maxBuffer: 10 * 1024 * 1024,
+        timeout: 10_000,
       });
-    }
-    const commit = await executeFile("git", gitArgs("rev-parse", "HEAD"), {
-      cwd: options.destination,
-      env: environment,
-      timeout: 10_000,
+      const branch = await executeFile("git", gitArgs("branch", "--show-current"), {
+        cwd: options.destination,
+        env: environment,
+        timeout: 10_000,
+      });
+      const commitSha = commit.stdout.trim();
+      if (!fullCommitSha.test(commitSha)) {
+        throw new DomainError("REPOSITORY_COMMIT_INVALID", "Git returned an invalid commit SHA.");
+      }
+      return {
+        commitSha,
+        branch: branch.stdout.trim() || null,
+      };
     });
-    const branch = await executeFile("git", gitArgs("branch", "--show-current"), {
-      cwd: options.destination,
-      env: environment,
-      timeout: 10_000,
-    });
-    const commitSha = commit.stdout.trim();
-    if (!fullCommitSha.test(commitSha)) {
-      throw new DomainError("REPOSITORY_COMMIT_INVALID", "Git returned an invalid commit SHA.");
-    }
-    return {
-      commitSha,
-      branch: branch.stdout.trim() || null,
-    };
   } catch (error) {
-    throw new DomainError("REPOSITORY_CLONE_FAILED", "Unable to clone the public repository.", {
+    const secret = options.credentials?.password;
+    const message =
+      error instanceof Error ? redactCredential(error.message, secret) : "Repository clone failed.";
+    throw new DomainError("REPOSITORY_CLONE_FAILED", "Unable to clone the repository.", {
       retryable: true,
-      cause: error,
+      cause: new Error(message),
     });
   }
 }

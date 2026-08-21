@@ -15,7 +15,7 @@ export default async function NewRepositoryPage({
       <section className="new-repository-layout">
         <div className="new-repository-copy">
           <p className="eyebrow">Start with facts</p>
-          <h1>Turn a public repository into an explorable system.</h1>
+          <h1>Turn a repository into an explorable system.</h1>
           <p>
             RepoVista pins one Git commit, parses its source, builds deterministic relationships,
             and creates evidence that optional AI can explain.
@@ -38,8 +38,8 @@ export default async function NewRepositoryPage({
             <div>
               <LockKeyhole size={19} />
               <span>
-                <strong>Public GitHub repositories only</strong>
-                <small>HTTPS URLs without embedded credentials.</small>
+                <strong>Public URL or private GitHub App access</strong>
+                <small>Private credentials stay short-lived and server-side.</small>
               </span>
             </div>
           </div>

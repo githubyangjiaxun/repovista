@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import type {
+  ApiTokenMetadata,
+  AuthScope,
   EmbeddingIndex,
   EmbeddingProvider,
   Job,
@@ -12,6 +14,8 @@ import type {
   Snapshot,
   SnapshotSymbolEvidence,
   SourceFile,
+  WorkspaceRole,
+  WorkspaceSummary,
 } from "@repovista/contracts";
 import {
   embeddingIndexSchema,
@@ -28,37 +32,47 @@ import {
   type IndexedRepository,
   isDomainError,
   type JobProgress,
+  type Principal,
   PUBLIC_USER_ID,
   PUBLIC_WORKSPACE_ID,
 } from "@repovista/domain";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import type {
+  AuditEventInput,
+  AuditEventRecord,
   ClaimedEmbeddingJob,
   ClaimedIndexJob,
   CompletePullRequestAnalysisInput,
+  CreateApiTokenInput,
   CreateImportInput,
   CreateImportResult,
   CreatePullRequestAnalysisInput,
   CreatePullRequestAnalysisResult,
+  CreateSessionInput,
   EmbeddingChunkRecord,
   EmbeddingIndexInput,
   EmbeddingIndexResult,
   EmbeddingSearchOptions,
+  GitHubInstallationAccess,
+  GitHubInstallationInput,
   GitHubWebhookInput,
   GitHubWebhookProcessResult,
   IncrementalIndexBase,
+  InstallationState,
   JobEventRecord,
   ListSnapshotFilesOptions,
   PullRequestAnalysisCursor,
   PullRequestAnalysisJob,
   PullRequestAnalysisPage,
+  RepositoryAccess,
   RetrievalSearchRecord,
   RetrievalStatusOptions,
   RetrievalStatusResult,
   SaveAnswerInput,
   SaveEmbeddingBatchInput,
   SearchEvidenceRecord,
+  SessionIdentity,
   ShareReportContent,
   ShareReportRecord,
   SnapshotFilePage,
@@ -66,13 +80,17 @@ import type {
   SnapshotGraphData,
   SymbolEdgeRecord,
   SymbolRecord,
+  WorkspaceMemberRecord,
 } from "./types.js";
 
 interface RepositoryRow {
   id: string;
+  workspace_id: string;
   owner_name: string;
   repo_name: string;
   canonical_url: string;
+  visibility: "public" | "private";
+  github_installation_id: string | number | null;
   default_branch: string | null;
   latest_ready_snapshot_id: string | null;
   latest_snapshot_status: Snapshot["status"] | null;
@@ -81,6 +99,15 @@ interface RepositoryRow {
   last_webhook_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
+}
+
+interface WorkspaceMemberRow {
+  user_id: string;
+  login: string | null;
+  display_name: string;
+  avatar_url: string | null;
+  role: WorkspaceRole;
+  joined_at: Date | string;
 }
 
 interface SnapshotRow {
@@ -183,6 +210,17 @@ function iso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
 
+function mapWorkspaceMember(row: WorkspaceMemberRow): WorkspaceMemberRecord {
+  return {
+    userId: row.user_id,
+    login: row.login,
+    displayName: row.display_name,
+    avatarUrl: row.avatar_url,
+    role: row.role,
+    joinedAt: iso(row.joined_at),
+  };
+}
+
 function nullableIso(value: Date | string | null): string | null {
   return value === null ? null : iso(value);
 }
@@ -232,9 +270,13 @@ function encodeImpactCursor(cursor: PullRequestAnalysisCursor): string {
 function mapRepository(row: RepositoryRow): RepositorySummary {
   return {
     id: row.id,
+    workspaceId: row.workspace_id,
     owner: row.owner_name,
     name: row.repo_name,
     canonicalUrl: row.canonical_url,
+    visibility: row.visibility,
+    githubInstallationId:
+      row.github_installation_id === null ? null : Number(row.github_installation_id),
     defaultBranch: row.default_branch,
     latestSnapshotId: row.latest_ready_snapshot_id,
     latestSnapshotStatus: row.latest_snapshot_status,
@@ -423,10 +465,1047 @@ export class RepoVistaStore {
     await this.pool.query("SELECT 1");
   }
 
+  async createOAuthState(stateHash: string, returnTo: string, expiresAt: Date): Promise<void> {
+    await this.pool.query(
+      "WITH expired AS (DELETE FROM oauth_login_states WHERE expires_at <= now()) " +
+        "INSERT INTO oauth_login_states (state_hash, return_to, expires_at) VALUES ($1, $2, $3)",
+      [stateHash, returnTo, expiresAt],
+    );
+  }
+
+  async consumeOAuthState(stateHash: string): Promise<string | null> {
+    const result = await this.pool.query<{ return_to: string }>(
+      "DELETE FROM oauth_login_states WHERE state_hash = $1 AND expires_at > now() RETURNING return_to",
+      [stateHash],
+    );
+    return result.rows[0]?.return_to ?? null;
+  }
+
+  async createInstallationState(
+    stateHash: string,
+    workspaceId: string,
+    userId: string,
+    returnTo: string,
+    expiresAt: Date,
+  ): Promise<void> {
+    await this.pool.query(
+      "WITH expired AS (DELETE FROM github_installation_states WHERE expires_at <= now()) " +
+        "INSERT INTO github_installation_states " +
+        "(state_hash, workspace_id, user_id, return_to, expires_at) VALUES ($1, $2, $3, $4, $5)",
+      [stateHash, workspaceId, userId, returnTo, expiresAt],
+    );
+  }
+
+  async consumeInstallationState(stateHash: string): Promise<InstallationState | null> {
+    const result = await this.pool.query<{
+      workspace_id: string;
+      user_id: string;
+      return_to: string;
+    }>(
+      "DELETE FROM github_installation_states WHERE state_hash = $1 AND expires_at > now() " +
+        "RETURNING workspace_id, user_id, return_to",
+      [stateHash],
+    );
+    const row = result.rows[0];
+    return row
+      ? { workspaceId: row.workspace_id, userId: row.user_id, returnTo: row.return_to }
+      : null;
+  }
+
+  async createSessionFromGitHub(input: CreateSessionInput): Promise<SessionIdentity> {
+    return withTransaction(this.pool, async (client) => {
+      const identityResult = await client.query<{ user_id: string }>(
+        "SELECT user_id FROM user_identities WHERE provider = 'github' AND provider_user_id = $1 FOR UPDATE",
+        [input.profile.providerUserId],
+      );
+      const loginOwner = await client.query<{ provider_user_id: string }>(
+        "SELECT provider_user_id FROM user_identities WHERE provider = 'github' AND login = $1 FOR UPDATE",
+        [input.profile.login],
+      );
+      if (
+        loginOwner.rows[0] &&
+        loginOwner.rows[0].provider_user_id !== input.profile.providerUserId
+      ) {
+        throw new DomainError(
+          "GITHUB_IDENTITY_CONFLICT",
+          "The GitHub login is already linked to a different RepoVista identity.",
+        );
+      }
+      if (identityResult.rows.length === 0 && !input.allowSignup) {
+        throw new DomainError(
+          "AUTH_SIGNUP_DISABLED",
+          "New RepoVista account creation is disabled on this server.",
+        );
+      }
+      const userId = identityResult.rows[0]?.user_id ?? createId();
+      if (identityResult.rows.length === 0) {
+        await client.query(
+          "INSERT INTO users (id, email, display_name, avatar_url) VALUES ($1, $2, $3, $4)",
+          [userId, input.profile.email, input.profile.displayName, input.profile.avatarUrl],
+        );
+        await client.query(
+          "INSERT INTO user_identities (id, user_id, provider, provider_user_id, login, profile_url) " +
+            "VALUES ($1, $2, 'github', $3, $4, $5)",
+          [
+            createId(),
+            userId,
+            input.profile.providerUserId,
+            input.profile.login,
+            input.profile.profileUrl,
+          ],
+        );
+      } else {
+        await client.query(
+          "UPDATE users SET email = COALESCE($2, email), display_name = $3, avatar_url = $4, " +
+            "updated_at = now() WHERE id = $1",
+          [userId, input.profile.email, input.profile.displayName, input.profile.avatarUrl],
+        );
+        await client.query(
+          "UPDATE user_identities SET login = $2, profile_url = $3, updated_at = now() " +
+            "WHERE provider = 'github' AND provider_user_id = $1",
+          [input.profile.providerUserId, input.profile.login, input.profile.profileUrl],
+        );
+      }
+
+      let workspace = (
+        await client.query<{
+          id: string;
+          name: string;
+          slug: string;
+          kind: "personal";
+          visibility: "private";
+          created_at: Date | string;
+        }>(
+          "SELECT id, name, slug::text, kind, visibility, created_at FROM workspaces " +
+            "WHERE owner_id = $1 AND kind = 'personal' FOR UPDATE",
+          [userId],
+        )
+      ).rows[0];
+      if (!workspace) {
+        const workspaceId = createId();
+        const normalizedLogin = input.profile.login.toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+        const slug = `${normalizedLogin || "workspace"}-${userId.replaceAll("-", "").slice(-8)}`;
+        workspace = (
+          await client.query<{
+            id: string;
+            name: string;
+            slug: string;
+            kind: "personal";
+            visibility: "private";
+            created_at: Date | string;
+          }>(
+            "INSERT INTO workspaces (id, owner_id, name, slug, visibility, kind) " +
+              "VALUES ($1, $2, $3, $4, 'private', 'personal') " +
+              "RETURNING id, name, slug::text, kind, visibility, created_at",
+            [workspaceId, userId, `${input.profile.login}'s workspace`, slug],
+          )
+        ).rows[0];
+        if (!workspace)
+          throw new DomainError("WORKSPACE_CREATE_FAILED", "The workspace was not created.");
+        await client.query(
+          "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
+          [workspace.id, userId],
+        );
+      }
+
+      const sessionId = createId();
+      await client.query(
+        "INSERT INTO auth_sessions (id, user_id, active_workspace_id, token_hash, csrf_token_hash, expires_at) " +
+          "VALUES ($1, $2, $3, $4, $5, $6)",
+        [
+          sessionId,
+          userId,
+          workspace.id,
+          input.sessionTokenHash,
+          input.csrfTokenHash,
+          input.expiresAt,
+        ],
+      );
+      await this.appendAuditEvent(client, {
+        workspaceId: workspace.id,
+        actorUserId: userId,
+        actorKind: "session",
+        action: "auth.login",
+        resourceType: "session",
+        resourceId: sessionId,
+      });
+      return {
+        principal: {
+          kind: "session",
+          userId,
+          workspaceId: workspace.id,
+          role: "owner",
+          scopes: ["repo:read", "repo:write", "workspace:admin"],
+          sessionId,
+          tokenId: null,
+          csrfTokenHash: input.csrfTokenHash,
+        },
+        user: {
+          id: userId,
+          login: input.profile.login,
+          displayName: input.profile.displayName,
+          avatarUrl: input.profile.avatarUrl,
+        },
+        workspace: {
+          id: workspace.id,
+          name: workspace.name,
+          slug: workspace.slug,
+          kind: workspace.kind,
+          visibility: workspace.visibility,
+          role: "owner",
+          createdAt: iso(workspace.created_at),
+        },
+      };
+    });
+  }
+
+  async resolveSession(tokenHash: string): Promise<SessionIdentity | null> {
+    const result = await this.pool.query<{
+      session_id: string;
+      user_id: string;
+      csrf_token_hash: string;
+      display_name: string;
+      avatar_url: string | null;
+      login: string | null;
+      workspace_id: string;
+      workspace_name: string;
+      workspace_slug: string;
+      workspace_kind: "public" | "personal" | "team";
+      workspace_visibility: "public" | "private";
+      role: WorkspaceRole;
+      workspace_created_at: Date | string;
+    }>(
+      "SELECT s.id AS session_id, s.user_id, s.csrf_token_hash, u.display_name, u.avatar_url, " +
+        "i.login::text, w.id AS workspace_id, w.name AS workspace_name, w.slug::text AS workspace_slug, " +
+        "w.kind AS workspace_kind, w.visibility AS workspace_visibility, m.role, " +
+        "w.created_at AS workspace_created_at FROM auth_sessions s " +
+        "JOIN users u ON u.id = s.user_id AND u.status = 'active' " +
+        "JOIN workspaces w ON w.id = s.active_workspace_id " +
+        "JOIN workspace_members m ON m.workspace_id = w.id AND m.user_id = s.user_id " +
+        "LEFT JOIN user_identities i ON i.user_id = u.id AND i.provider = 'github' " +
+        "WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.expires_at > now() LIMIT 1",
+      [tokenHash],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      principal: {
+        kind: "session",
+        userId: row.user_id,
+        workspaceId: row.workspace_id,
+        role: row.role,
+        scopes: ["repo:read", "repo:write", "workspace:admin"],
+        sessionId: row.session_id,
+        tokenId: null,
+        csrfTokenHash: row.csrf_token_hash,
+      },
+      user: {
+        id: row.user_id,
+        login: row.login,
+        displayName: row.display_name,
+        avatarUrl: row.avatar_url,
+      },
+      workspace: {
+        id: row.workspace_id,
+        name: row.workspace_name,
+        slug: row.workspace_slug,
+        kind: row.workspace_kind,
+        visibility: row.workspace_visibility,
+        role: row.role,
+        createdAt: iso(row.workspace_created_at),
+      },
+    };
+  }
+
+  async resolveApiToken(tokenHash: string): Promise<Principal | null> {
+    const result = await this.pool.query<{
+      id: string;
+      workspace_id: string;
+      created_by: string;
+      role: WorkspaceRole;
+      scopes_json: AuthScope[];
+    }>(
+      "SELECT t.id, t.workspace_id, t.created_by, m.role, t.scopes_json " +
+        "FROM api_tokens t JOIN users u ON u.id = t.created_by AND u.status = 'active' " +
+        "JOIN workspace_members m ON m.workspace_id = t.workspace_id AND m.user_id = t.created_by " +
+        "WHERE t.token_hash = $1 AND t.revoked_at IS NULL " +
+        "AND (t.expires_at IS NULL OR t.expires_at > now()) LIMIT 1",
+      [tokenHash],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    void this.pool.query(
+      "UPDATE api_tokens SET last_used_at = now() WHERE id = $1 " +
+        "AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes')",
+      [row.id],
+    );
+    return {
+      kind: "token",
+      userId: row.created_by,
+      workspaceId: row.workspace_id,
+      role: row.role,
+      scopes: row.scopes_json,
+      sessionId: null,
+      tokenId: row.id,
+      csrfTokenHash: null,
+    };
+  }
+
+  async revokeSession(sessionId: string, userId: string): Promise<void> {
+    const result = await this.pool.query<{ active_workspace_id: string }>(
+      "UPDATE auth_sessions SET revoked_at = now() WHERE id = $1 AND user_id = $2 " +
+        "AND revoked_at IS NULL RETURNING active_workspace_id",
+      [sessionId, userId],
+    );
+    const workspaceId = result.rows[0]?.active_workspace_id;
+    if (workspaceId) {
+      await this.recordAuditEvent({
+        workspaceId,
+        actorUserId: userId,
+        actorKind: "session",
+        action: "auth.logout",
+        resourceType: "session",
+        resourceId: sessionId,
+      });
+    }
+  }
+
+  async listUserWorkspaces(userId: string): Promise<WorkspaceSummary[]> {
+    const result = await this.pool.query<{
+      id: string;
+      name: string;
+      slug: string;
+      kind: "public" | "personal" | "team";
+      visibility: "public" | "private";
+      role: WorkspaceRole;
+      created_at: Date | string;
+    }>(
+      "SELECT w.id, w.name, w.slug::text, w.kind, w.visibility, m.role, w.created_at " +
+        "FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id " +
+        "WHERE m.user_id = $1 ORDER BY (w.kind = 'personal') DESC, w.name",
+      [userId],
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      slug: row.slug,
+      kind: row.kind,
+      visibility: row.visibility,
+      role: row.role,
+      createdAt: iso(row.created_at),
+    }));
+  }
+
+  async switchSessionWorkspace(
+    sessionId: string,
+    userId: string,
+    workspaceId: string,
+  ): Promise<WorkspaceSummary> {
+    return withTransaction(this.pool, async (client) => {
+      const result = await client.query<{
+        id: string;
+        name: string;
+        slug: string;
+        kind: "public" | "personal" | "team";
+        visibility: "public" | "private";
+        role: WorkspaceRole;
+        created_at: Date | string;
+      }>(
+        "UPDATE auth_sessions s SET active_workspace_id = $3 " +
+          "FROM workspaces w, workspace_members m WHERE s.id = $1 AND s.user_id = $2 " +
+          "AND s.revoked_at IS NULL AND s.expires_at > now() AND w.id = $3 " +
+          "AND m.workspace_id = w.id AND m.user_id = s.user_id " +
+          "RETURNING w.id, w.name, w.slug::text, w.kind, w.visibility, m.role, w.created_at",
+        [sessionId, userId, workspaceId],
+      );
+      const row = result.rows[0];
+      if (!row) throw new DomainError("WORKSPACE_NOT_FOUND", "The workspace is not available.");
+      await this.appendAuditEvent(client, {
+        workspaceId: row.id,
+        actorUserId: userId,
+        actorKind: "session",
+        action: "workspace.switch",
+        resourceType: "workspace",
+        resourceId: row.id,
+      });
+      return {
+        id: row.id,
+        name: row.name,
+        slug: row.slug,
+        kind: row.kind,
+        visibility: row.visibility,
+        role: row.role,
+        createdAt: iso(row.created_at),
+      };
+    });
+  }
+
+  async createWorkspace(userId: string, name: string): Promise<WorkspaceSummary> {
+    const workspaceId = createId();
+    const base =
+      name
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, "-")
+        .replace(/^-+|-+$/g, "") || "workspace";
+    const slug = `${base.slice(0, 70)}-${workspaceId.replaceAll("-", "").slice(-8)}`;
+    return withTransaction(this.pool, async (client) => {
+      const result = await client.query<{
+        id: string;
+        name: string;
+        slug: string;
+        kind: "team";
+        visibility: "private";
+        created_at: Date | string;
+      }>(
+        "INSERT INTO workspaces (id, owner_id, name, slug, visibility, kind) " +
+          "VALUES ($1, $2, $3, $4, 'private', 'team') " +
+          "RETURNING id, name, slug::text, kind, visibility, created_at",
+        [workspaceId, userId, name, slug],
+      );
+      const row = result.rows[0];
+      if (!row) throw new DomainError("WORKSPACE_CREATE_FAILED", "The workspace was not created.");
+      await client.query(
+        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, 'owner')",
+        [workspaceId, userId],
+      );
+      await this.appendAuditEvent(client, {
+        workspaceId,
+        actorUserId: userId,
+        actorKind: "session",
+        action: "workspace.create",
+        resourceType: "workspace",
+        resourceId: workspaceId,
+      });
+      return { ...row, role: "owner" as const, slug: row.slug, createdAt: iso(row.created_at) };
+    });
+  }
+
+  async listWorkspaceMembers(workspaceId: string): Promise<WorkspaceMemberRecord[]> {
+    const result = await this.pool.query<WorkspaceMemberRow>(
+      "SELECT m.user_id, i.login::text, u.display_name, u.avatar_url, m.role, m.joined_at " +
+        "FROM workspace_members m JOIN users u ON u.id = m.user_id " +
+        "LEFT JOIN user_identities i ON i.user_id = u.id AND i.provider = 'github' " +
+        "WHERE m.workspace_id = $1 " +
+        "ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'editor' THEN 1 ELSE 2 END, " +
+        "COALESCE(i.login::text, u.display_name)",
+      [workspaceId],
+    );
+    return result.rows.map(mapWorkspaceMember);
+  }
+
+  async addWorkspaceMember(
+    workspaceId: string,
+    actorUserId: string,
+    login: string,
+    role: WorkspaceRole,
+  ): Promise<WorkspaceMemberRecord> {
+    return withTransaction(this.pool, async (client) => {
+      const access = await client.query<{
+        kind: "public" | "personal" | "team";
+        role: WorkspaceRole;
+      }>(
+        "SELECT w.kind, m.role FROM workspaces w " +
+          "JOIN workspace_members m ON m.workspace_id = w.id AND m.user_id = $2 " +
+          "WHERE w.id = $1 FOR UPDATE OF w, m",
+        [workspaceId, actorUserId],
+      );
+      const actor = access.rows[0];
+      if (!actor) throw new DomainError("WORKSPACE_NOT_FOUND", "The workspace is not available.");
+      if (actor.role !== "owner") {
+        throw new DomainError("WORKSPACE_FORBIDDEN", "Workspace owner access is required.");
+      }
+      if (actor.kind !== "team") {
+        throw new DomainError(
+          "WORKSPACE_MEMBERS_IMMUTABLE",
+          "Only team workspaces can manage members.",
+        );
+      }
+      const identity = await client.query<WorkspaceMemberRow>(
+        "SELECT u.id AS user_id, i.login::text, u.display_name, u.avatar_url, $2::text AS role, " +
+          "now() AS joined_at FROM user_identities i JOIN users u ON u.id = i.user_id " +
+          "WHERE i.provider = 'github' AND i.login = $1",
+        [login, role],
+      );
+      const target = identity.rows[0];
+      if (!target) {
+        throw new DomainError(
+          "WORKSPACE_MEMBER_IDENTITY_NOT_FOUND",
+          "The GitHub user must sign in to RepoVista before being added.",
+        );
+      }
+      const inserted = await client.query<{ joined_at: Date | string }>(
+        "INSERT INTO workspace_members (workspace_id, user_id, role) VALUES ($1, $2, $3) " +
+          "ON CONFLICT (workspace_id, user_id) DO NOTHING RETURNING joined_at",
+        [workspaceId, target.user_id, role],
+      );
+      const joinedAt = inserted.rows[0]?.joined_at;
+      if (!joinedAt) {
+        throw new DomainError(
+          "WORKSPACE_MEMBER_EXISTS",
+          "The GitHub user is already a member of this workspace.",
+        );
+      }
+      await this.appendAuditEvent(client, {
+        workspaceId,
+        actorUserId,
+        actorKind: "session",
+        action: "workspace.member_add",
+        resourceType: "member",
+        resourceId: target.user_id,
+        metadata: { role },
+      });
+      return mapWorkspaceMember({ ...target, role, joined_at: joinedAt });
+    });
+  }
+
+  async updateWorkspaceMemberRole(
+    workspaceId: string,
+    actorUserId: string,
+    targetUserId: string,
+    role: WorkspaceRole,
+  ): Promise<WorkspaceMemberRecord> {
+    return withTransaction(this.pool, async (client) => {
+      const locked = await client.query<{
+        kind: "public" | "personal" | "team";
+        owner_id: string;
+        user_id: string;
+        role: WorkspaceRole;
+      }>(
+        "SELECT w.kind, w.owner_id, m.user_id, m.role FROM workspaces w " +
+          "JOIN workspace_members m ON m.workspace_id = w.id " +
+          "WHERE w.id = $1 FOR UPDATE OF w, m",
+        [workspaceId],
+      );
+      const actor = locked.rows.find((member) => member.user_id === actorUserId);
+      const target = locked.rows.find((member) => member.user_id === targetUserId);
+      if (!actor) throw new DomainError("WORKSPACE_NOT_FOUND", "The workspace is not available.");
+      if (actor.role !== "owner") {
+        throw new DomainError("WORKSPACE_FORBIDDEN", "Workspace owner access is required.");
+      }
+      if (actor.kind !== "team") {
+        throw new DomainError(
+          "WORKSPACE_MEMBERS_IMMUTABLE",
+          "Only team workspaces can manage members.",
+        );
+      }
+      if (!target) {
+        throw new DomainError("WORKSPACE_MEMBER_NOT_FOUND", "The workspace member does not exist.");
+      }
+      if (targetUserId === actorUserId && target.role !== role) {
+        throw new DomainError(
+          "WORKSPACE_OWNER_PROTECTED",
+          "An owner cannot change their own workspace role.",
+        );
+      }
+      const owners = locked.rows.filter((member) => member.role === "owner");
+      if (target.role === "owner" && role !== "owner" && owners.length <= 1) {
+        throw new DomainError(
+          "WORKSPACE_LAST_OWNER",
+          "A workspace must retain at least one owner.",
+        );
+      }
+      if (target.role !== role) {
+        await client.query(
+          "UPDATE workspace_members SET role = $3 WHERE workspace_id = $1 AND user_id = $2",
+          [workspaceId, targetUserId, role],
+        );
+        if (target.owner_id === targetUserId && role !== "owner") {
+          const replacement = owners.find((member) => member.user_id !== targetUserId);
+          if (!replacement) {
+            throw new DomainError(
+              "WORKSPACE_LAST_OWNER",
+              "A workspace must retain at least one owner.",
+            );
+          }
+          await client.query("UPDATE workspaces SET owner_id = $2 WHERE id = $1", [
+            workspaceId,
+            replacement.user_id,
+          ]);
+        }
+        await this.appendAuditEvent(client, {
+          workspaceId,
+          actorUserId,
+          actorKind: "session",
+          action: "workspace.member_role",
+          resourceType: "member",
+          resourceId: targetUserId,
+          metadata: { from: target.role, to: role },
+        });
+      }
+      const result = await client.query<WorkspaceMemberRow>(
+        "SELECT m.user_id, i.login::text, u.display_name, u.avatar_url, m.role, m.joined_at " +
+          "FROM workspace_members m JOIN users u ON u.id = m.user_id " +
+          "LEFT JOIN user_identities i ON i.user_id = u.id AND i.provider = 'github' " +
+          "WHERE m.workspace_id = $1 AND m.user_id = $2",
+        [workspaceId, targetUserId],
+      );
+      const updated = result.rows[0];
+      if (!updated) {
+        throw new DomainError("WORKSPACE_MEMBER_NOT_FOUND", "The workspace member does not exist.");
+      }
+      return mapWorkspaceMember(updated);
+    });
+  }
+
+  async removeWorkspaceMember(
+    workspaceId: string,
+    actorUserId: string,
+    targetUserId: string,
+  ): Promise<void> {
+    await withTransaction(this.pool, async (client) => {
+      const locked = await client.query<{
+        kind: "public" | "personal" | "team";
+        owner_id: string;
+        user_id: string;
+        role: WorkspaceRole;
+      }>(
+        "SELECT w.kind, w.owner_id, m.user_id, m.role FROM workspaces w " +
+          "JOIN workspace_members m ON m.workspace_id = w.id " +
+          "WHERE w.id = $1 FOR UPDATE OF w, m",
+        [workspaceId],
+      );
+      const actor = locked.rows.find((member) => member.user_id === actorUserId);
+      const target = locked.rows.find((member) => member.user_id === targetUserId);
+      if (!actor) throw new DomainError("WORKSPACE_NOT_FOUND", "The workspace is not available.");
+      if (actor.role !== "owner") {
+        throw new DomainError("WORKSPACE_FORBIDDEN", "Workspace owner access is required.");
+      }
+      if (actor.kind !== "team") {
+        throw new DomainError(
+          "WORKSPACE_MEMBERS_IMMUTABLE",
+          "Only team workspaces can manage members.",
+        );
+      }
+      if (!target) {
+        throw new DomainError("WORKSPACE_MEMBER_NOT_FOUND", "The workspace member does not exist.");
+      }
+      if (targetUserId === actorUserId) {
+        throw new DomainError(
+          "WORKSPACE_OWNER_PROTECTED",
+          "An owner cannot remove themselves from the active workspace.",
+        );
+      }
+      const owners = locked.rows.filter((member) => member.role === "owner");
+      if (target.role === "owner" && owners.length <= 1) {
+        throw new DomainError(
+          "WORKSPACE_LAST_OWNER",
+          "A workspace must retain at least one owner.",
+        );
+      }
+      if (target.owner_id === targetUserId) {
+        const replacement = owners.find((member) => member.user_id !== targetUserId);
+        if (!replacement) {
+          throw new DomainError(
+            "WORKSPACE_LAST_OWNER",
+            "A workspace must retain at least one owner.",
+          );
+        }
+        await client.query("UPDATE workspaces SET owner_id = $2 WHERE id = $1", [
+          workspaceId,
+          replacement.user_id,
+        ]);
+      }
+      await client.query(
+        "DELETE FROM auth_sessions WHERE user_id = $1 AND active_workspace_id = $2",
+        [targetUserId, workspaceId],
+      );
+      await client.query("DELETE FROM workspace_members WHERE workspace_id = $1 AND user_id = $2", [
+        workspaceId,
+        targetUserId,
+      ]);
+      await this.appendAuditEvent(client, {
+        workspaceId,
+        actorUserId,
+        actorKind: "session",
+        action: "workspace.member_remove",
+        resourceType: "member",
+        resourceId: targetUserId,
+        metadata: { role: target.role },
+      });
+    });
+  }
+
+  async listApiTokens(workspaceId: string): Promise<ApiTokenMetadata[]> {
+    const result = await this.pool.query<{
+      id: string;
+      name: string;
+      token_prefix: string;
+      scopes_json: AuthScope[];
+      expires_at: Date | string | null;
+      last_used_at: Date | string | null;
+      revoked_at: Date | string | null;
+      created_at: Date | string;
+    }>(
+      "SELECT id, name, token_prefix, scopes_json, expires_at, last_used_at, revoked_at, created_at " +
+        "FROM api_tokens WHERE workspace_id = $1 ORDER BY created_at DESC",
+      [workspaceId],
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      tokenPrefix: row.token_prefix,
+      scopes: row.scopes_json,
+      expiresAt: nullableIso(row.expires_at),
+      lastUsedAt: nullableIso(row.last_used_at),
+      revokedAt: nullableIso(row.revoked_at),
+      createdAt: iso(row.created_at),
+    }));
+  }
+
+  async createApiToken(input: CreateApiTokenInput): Promise<ApiTokenMetadata> {
+    const id = createId();
+    const result = await this.pool.query<{
+      id: string;
+      name: string;
+      token_prefix: string;
+      scopes_json: AuthScope[];
+      expires_at: Date | string | null;
+      created_at: Date | string;
+    }>(
+      "INSERT INTO api_tokens (id, workspace_id, created_by, name, token_prefix, token_hash, scopes_json, expires_at) " +
+        "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8) " +
+        "RETURNING id, name, token_prefix, scopes_json, expires_at, created_at",
+      [
+        id,
+        input.workspaceId,
+        input.userId,
+        input.name,
+        input.tokenPrefix,
+        input.tokenHash,
+        JSON.stringify(input.scopes),
+        input.expiresAt,
+      ],
+    );
+    const row = result.rows[0];
+    if (!row) throw new DomainError("AUTH_TOKEN_CREATE_FAILED", "The API token was not created.");
+    await this.recordAuditEvent({
+      workspaceId: input.workspaceId,
+      actorUserId: input.userId,
+      actorKind: "session",
+      action: "token.create",
+      resourceType: "token",
+      resourceId: id,
+      metadata: { scopes: input.scopes },
+    });
+    return {
+      id: row.id,
+      name: row.name,
+      tokenPrefix: row.token_prefix,
+      scopes: row.scopes_json,
+      expiresAt: nullableIso(row.expires_at),
+      lastUsedAt: null,
+      revokedAt: null,
+      createdAt: iso(row.created_at),
+    };
+  }
+
+  async revokeApiToken(
+    workspaceId: string,
+    tokenId: string,
+    actorUserId: string,
+  ): Promise<boolean> {
+    const result = await this.pool.query(
+      "UPDATE api_tokens SET revoked_at = now() WHERE id = $1 AND workspace_id = $2 AND revoked_at IS NULL",
+      [tokenId, workspaceId],
+    );
+    if ((result.rowCount ?? 0) > 0) {
+      await this.recordAuditEvent({
+        workspaceId,
+        actorUserId,
+        actorKind: "session",
+        action: "token.revoke",
+        resourceType: "token",
+        resourceId: tokenId,
+      });
+      return true;
+    }
+    return false;
+  }
+
+  async upsertGitHubInstallation(input: GitHubInstallationInput): Promise<void> {
+    const result = await this.pool.query(
+      "INSERT INTO github_installations (installation_id, workspace_id, account_id, account_login, " +
+        "account_type, repository_selection, permissions_json, installed_by, suspended_at, last_synced_at) " +
+        "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, now()) " +
+        "ON CONFLICT (installation_id) DO UPDATE SET account_id = EXCLUDED.account_id, " +
+        "account_login = EXCLUDED.account_login, account_type = EXCLUDED.account_type, " +
+        "repository_selection = EXCLUDED.repository_selection, permissions_json = EXCLUDED.permissions_json, " +
+        "suspended_at = EXCLUDED.suspended_at, last_synced_at = now(), updated_at = now() " +
+        "WHERE github_installations.workspace_id = EXCLUDED.workspace_id",
+      [
+        input.installationId,
+        input.workspaceId,
+        input.accountId,
+        input.accountLogin,
+        input.accountType,
+        input.repositorySelection,
+        JSON.stringify(input.permissions),
+        input.installedBy,
+        input.suspendedAt,
+      ],
+    );
+    if ((result.rowCount ?? 0) === 0) {
+      throw new DomainError(
+        "GITHUB_INSTALLATION_CONFLICT",
+        "The GitHub installation is connected to a different workspace.",
+      );
+    }
+    await this.recordAuditEvent({
+      workspaceId: input.workspaceId,
+      actorUserId: input.installedBy,
+      actorKind: "session",
+      action: "installation.connect",
+      resourceType: "installation",
+      resourceId: String(input.installationId),
+      metadata: {
+        accountLogin: input.accountLogin,
+        repositorySelection: input.repositorySelection,
+      },
+    });
+  }
+
+  async listGitHubInstallations(workspaceId: string): Promise<GitHubInstallationAccess[]> {
+    const result = await this.pool.query<{
+      installation_id: string | number;
+      workspace_id: string;
+      account_id: string | number;
+      account_login: string;
+      account_type: "User" | "Organization";
+      repository_selection: "all" | "selected";
+      suspended_at: Date | string | null;
+      last_synced_at: Date | string | null;
+    }>(
+      "SELECT installation_id, workspace_id, account_id, account_login::text, account_type, " +
+        "repository_selection, suspended_at, last_synced_at FROM github_installations " +
+        "WHERE workspace_id = $1 ORDER BY account_login",
+      [workspaceId],
+    );
+    return result.rows.map((row) => ({
+      installationId: Number(row.installation_id),
+      workspaceId: row.workspace_id,
+      accountId: Number(row.account_id),
+      accountLogin: row.account_login,
+      accountType: row.account_type,
+      repositorySelection: row.repository_selection,
+      suspendedAt: nullableIso(row.suspended_at),
+      lastSyncedAt: nullableIso(row.last_synced_at),
+      repositoryCount: null,
+    }));
+  }
+
+  async getGitHubInstallation(
+    workspaceId: string,
+    installationId: number,
+  ): Promise<GitHubInstallationAccess | null> {
+    return (
+      (await this.listGitHubInstallations(workspaceId)).find(
+        (item) => item.installationId === installationId,
+      ) ?? null
+    );
+  }
+
+  async disconnectGitHubInstallation(
+    workspaceId: string,
+    installationId: number,
+    actorUserId: string,
+  ): Promise<boolean> {
+    return withTransaction(this.pool, async (client) => {
+      await client.query(
+        "UPDATE repositories SET github_installation_id = NULL, auto_update_enabled = false, " +
+          "updated_at = now() WHERE workspace_id = $1 AND github_installation_id = $2",
+        [workspaceId, installationId],
+      );
+      const result = await client.query(
+        "DELETE FROM github_installations WHERE workspace_id = $1 AND installation_id = $2",
+        [workspaceId, installationId],
+      );
+      if ((result.rowCount ?? 0) === 0) return false;
+      await this.appendAuditEvent(client, {
+        workspaceId,
+        actorUserId,
+        actorKind: "session",
+        action: "installation.disconnect",
+        resourceType: "installation",
+        resourceId: String(installationId),
+      });
+      return true;
+    });
+  }
+
+  async getRepositoryAccess(
+    repositoryId: string,
+    principal: Principal,
+  ): Promise<RepositoryAccess | null> {
+    const result = await this.pool.query<{
+      repository_id: string;
+      workspace_id: string;
+      visibility: "public" | "private";
+      github_installation_id: string | number | null;
+    }>(
+      "SELECT r.id AS repository_id, r.workspace_id, r.visibility, r.github_installation_id " +
+        "FROM repositories r WHERE r.id = $1 AND (r.workspace_id = $2 OR " +
+        "(r.workspace_id = $3 AND r.visibility = 'public'))",
+      [repositoryId, principal.workspaceId, PUBLIC_WORKSPACE_ID],
+    );
+    const row = result.rows[0];
+    return row
+      ? {
+          repositoryId: row.repository_id,
+          workspaceId: row.workspace_id,
+          visibility: row.visibility,
+          githubInstallationId:
+            row.github_installation_id === null ? null : Number(row.github_installation_id),
+          role: principal.role,
+        }
+      : null;
+  }
+
+  private async joinedRepositoryAccess(
+    source: "snapshot" | "job" | "analysis",
+    resourceId: string,
+    principal: Principal,
+  ): Promise<RepositoryAccess | null> {
+    const joins = {
+      snapshot:
+        "FROM repository_snapshots resource JOIN repositories r ON r.id = resource.repository_id",
+      job: "FROM analysis_jobs resource JOIN repositories r ON r.id = resource.repository_id",
+      analysis:
+        "FROM pull_request_analyses resource JOIN repositories r ON r.id = resource.repository_id",
+    } as const;
+    const result = await this.pool.query<{
+      repository_id: string;
+      workspace_id: string;
+      visibility: "public" | "private";
+      github_installation_id: string | number | null;
+    }>(
+      "SELECT r.id AS repository_id, r.workspace_id, r.visibility, r.github_installation_id " +
+        joins[source] +
+        " WHERE resource.id = $1 AND (r.workspace_id = $2 OR " +
+        "(r.workspace_id = $3 AND r.visibility = 'public'))",
+      [resourceId, principal.workspaceId, PUBLIC_WORKSPACE_ID],
+    );
+    const row = result.rows[0];
+    return row
+      ? {
+          repositoryId: row.repository_id,
+          workspaceId: row.workspace_id,
+          visibility: row.visibility,
+          githubInstallationId:
+            row.github_installation_id === null ? null : Number(row.github_installation_id),
+          role: principal.role,
+        }
+      : null;
+  }
+
+  async getSnapshotAccess(
+    snapshotId: string,
+    principal: Principal,
+  ): Promise<RepositoryAccess | null> {
+    return this.joinedRepositoryAccess("snapshot", snapshotId, principal);
+  }
+
+  async getJobAccess(jobId: string, principal: Principal): Promise<RepositoryAccess | null> {
+    return this.joinedRepositoryAccess("job", jobId, principal);
+  }
+
+  async getPullRequestAnalysisAccess(
+    analysisId: string,
+    principal: Principal,
+  ): Promise<RepositoryAccess | null> {
+    return this.joinedRepositoryAccess("analysis", analysisId, principal);
+  }
+
+  async getShareReportAccess(slug: string, principal: Principal): Promise<RepositoryAccess | null> {
+    const result = await this.pool.query<{
+      repository_id: string;
+      workspace_id: string;
+      repository_visibility: "public" | "private";
+      report_visibility: "private" | "unlisted" | "public";
+      github_installation_id: string | number | null;
+    }>(
+      "SELECT r.id AS repository_id, r.workspace_id, r.visibility AS repository_visibility, " +
+        "share.visibility AS report_visibility, r.github_installation_id " +
+        "FROM share_reports share JOIN repositories r ON r.id = share.repository_id " +
+        "WHERE share.slug = $1 AND share.revoked_at IS NULL " +
+        "AND (share.expires_at IS NULL OR share.expires_at > now()) AND (" +
+        "(share.visibility = 'public' AND r.workspace_id = $3 AND r.visibility = 'public') " +
+        "OR r.workspace_id = $2)",
+      [slug, principal.workspaceId, PUBLIC_WORKSPACE_ID],
+    );
+    const row = result.rows[0];
+    return row
+      ? {
+          repositoryId: row.repository_id,
+          workspaceId: row.workspace_id,
+          visibility: row.repository_visibility,
+          githubInstallationId:
+            row.github_installation_id === null ? null : Number(row.github_installation_id),
+          role: principal.role,
+        }
+      : null;
+  }
+
+  async recordAuditEvent(input: AuditEventInput): Promise<void> {
+    await this.appendAuditEvent(this.pool, input);
+  }
+
+  async listAuditEvents(workspaceId: string, limit = 100): Promise<AuditEventRecord[]> {
+    const boundedLimit = Math.max(1, Math.min(200, limit));
+    const result = await this.pool.query<{
+      id: string | number;
+      actor_kind: AuditEventRecord["actorKind"];
+      actor_login: string | null;
+      action: string;
+      resource_type: string;
+      resource_id: string;
+      metadata_json: Record<string, unknown>;
+      created_at: Date | string;
+    }>(
+      "SELECT audit.id, audit.actor_kind, identity.login::text AS actor_login, audit.action, " +
+        "audit.resource_type, audit.resource_id, audit.metadata_json, audit.created_at " +
+        "FROM audit_events audit LEFT JOIN user_identities identity " +
+        "ON identity.user_id = audit.actor_user_id AND identity.provider = 'github' " +
+        "WHERE audit.workspace_id = $1 ORDER BY audit.id DESC LIMIT $2",
+      [workspaceId, boundedLimit],
+    );
+    return result.rows.map((row) => ({
+      id: Number(row.id),
+      actorKind: row.actor_kind,
+      actorLogin: row.actor_login,
+      action: row.action,
+      resourceType: row.resource_type,
+      resourceId: row.resource_id,
+      metadata: row.metadata_json ?? {},
+      createdAt: iso(row.created_at),
+    }));
+  }
+
   async createRepositoryImport(input: CreateImportInput): Promise<CreateImportResult> {
     return withTransaction(this.pool, async (client) => {
-      const existingRepository = await client.query<{ id: string }>(
-        "SELECT id FROM repositories WHERE workspace_id = $1 AND canonical_url = $2",
+      if (input.githubInstallationId) {
+        const installation = await client.query<{ installation_id: string | number }>(
+          "SELECT installation_id FROM github_installations WHERE installation_id = $1 " +
+            "AND workspace_id = $2 AND suspended_at IS NULL FOR SHARE",
+          [input.githubInstallationId, input.workspaceId],
+        );
+        if (!installation.rows[0]) {
+          throw new DomainError(
+            "GITHUB_INSTALLATION_NOT_FOUND",
+            "The GitHub installation is not available to this workspace.",
+          );
+        }
+      }
+      if ((input.visibility ?? "public") === "private" && !input.githubInstallationId) {
+        throw new DomainError(
+          "GITHUB_INSTALLATION_NOT_FOUND",
+          "A private repository requires a connected GitHub installation.",
+        );
+      }
+      const existingRepository = await client.query<{
+        id: string;
+        github_installation_id: string | number | null;
+      }>(
+        "SELECT id, github_installation_id FROM repositories WHERE workspace_id = $1 AND canonical_url = $2 FOR UPDATE",
         [input.workspaceId, input.identity.canonicalUrl],
       );
 
@@ -434,22 +1513,52 @@ export class RepoVistaStore {
       if (existingRepository.rowCount === 0) {
         await client.query(
           "INSERT INTO repositories (" +
-            "id, workspace_id, provider, canonical_url, clone_url, owner_name, repo_name, visibility, ignore_patterns" +
-            ") VALUES ($1, $2, 'github', $3, $4, $5, $6, 'public', $7::jsonb)",
+            "id, workspace_id, provider, provider_repo_id, canonical_url, clone_url, owner_name, repo_name, " +
+            "default_branch, visibility, github_installation_id, auto_update_enabled, ignore_patterns" +
+            ") VALUES ($1, $2, 'github', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)",
           [
             repositoryId,
             input.workspaceId,
+            input.providerRepoId ?? null,
             input.identity.canonicalUrl,
             input.identity.cloneUrl,
             input.identity.owner,
             input.identity.name,
+            input.defaultBranch ?? null,
+            input.visibility ?? "public",
+            input.githubInstallationId ?? null,
+            Boolean(input.githubInstallationId),
             JSON.stringify(input.ignore),
           ],
         );
       } else {
+        const existingInstallation = existingRepository.rows[0]?.github_installation_id;
+        if (
+          existingInstallation !== null &&
+          input.githubInstallationId &&
+          Number(existingInstallation) !== input.githubInstallationId
+        ) {
+          throw new DomainError(
+            "GITHUB_INSTALLATION_CONFLICT",
+            "The repository is connected through a different GitHub installation.",
+          );
+        }
         await client.query(
-          "UPDATE repositories SET ignore_patterns = $2::jsonb, updated_at = now() WHERE id = $1",
-          [repositoryId, JSON.stringify(input.ignore)],
+          "UPDATE repositories SET provider_repo_id = COALESCE($2, provider_repo_id), clone_url = $3, " +
+            "default_branch = COALESCE($4, default_branch), visibility = $5, " +
+            "github_installation_id = COALESCE($6, github_installation_id), " +
+            "auto_update_enabled = CASE WHEN $6::bigint IS NULL THEN auto_update_enabled ELSE true END, " +
+            "ignore_patterns = $7::jsonb, " +
+            "updated_at = now() WHERE id = $1",
+          [
+            repositoryId,
+            input.providerRepoId ?? null,
+            input.identity.cloneUrl,
+            input.defaultBranch ?? null,
+            input.visibility ?? "public",
+            input.githubInstallationId ?? null,
+            JSON.stringify(input.ignore),
+          ],
         );
       }
 
@@ -501,6 +1610,15 @@ export class RepoVistaStore {
         phase: "queued",
         progress: 0,
         snapshotId,
+      });
+      await this.appendAuditEvent(client, {
+        workspaceId: input.workspaceId,
+        actorUserId: input.actorUserId ?? null,
+        actorKind: input.actorKind ?? "anonymous",
+        action: "repository.import",
+        resourceType: "repository",
+        resourceId: repositoryId,
+        metadata: { visibility: input.visibility ?? "public" },
       });
 
       return { repositoryId, snapshotId, jobId, status: "queued" as const };
@@ -1499,6 +2617,9 @@ export class RepoVistaStore {
         owner_name: string;
         repo_name: string;
         clone_url: string;
+        visibility: "public" | "private";
+        github_installation_id: string | number | null;
+        installation_suspended_at: Date | string | null;
         pr_number: number;
         title: string;
         canonical_url: string;
@@ -1508,9 +2629,11 @@ export class RepoVistaStore {
         algorithm_version: string;
         provider_files_json: PullRequestFileChange[];
       }>(
-        "SELECT r.owner_name, r.repo_name, r.clone_url, a.pr_number, a.title, a.canonical_url, " +
+        "SELECT r.owner_name, r.repo_name, r.clone_url, r.visibility, r.github_installation_id, " +
+          "gi.suspended_at AS installation_suspended_at, a.pr_number, a.title, a.canonical_url, " +
           "a.base_sha, a.head_sha, a.parser_version, a.algorithm_version, a.provider_files_json " +
           "FROM pull_request_analyses a JOIN repositories r ON r.id = a.repository_id " +
+          "LEFT JOIN github_installations gi ON gi.installation_id = r.github_installation_id " +
           "WHERE a.id = $1",
         [row.analysis_id],
       );
@@ -1538,6 +2661,10 @@ export class RepoVistaStore {
         owner: info.owner_name,
         name: info.repo_name,
         cloneUrl: info.clone_url,
+        visibility: info.visibility,
+        githubInstallationId:
+          info.github_installation_id === null ? null : Number(info.github_installation_id),
+        githubInstallationSuspended: info.installation_suspended_at !== null,
         prNumber: info.pr_number,
         title: info.title,
         canonicalUrl: info.canonical_url,
@@ -1554,7 +2681,8 @@ export class RepoVistaStore {
 
   async listRepositories(workspaceId: string): Promise<RepositorySummary[]> {
     const result = await this.pool.query<RepositoryRow>(
-      "SELECT r.id, r.owner_name, r.repo_name, r.canonical_url, r.default_branch, " +
+      "SELECT r.id, r.workspace_id, r.owner_name, r.repo_name, r.canonical_url, " +
+        "r.visibility, r.github_installation_id, r.default_branch, " +
         "r.latest_ready_snapshot_id, s.status AS latest_snapshot_status, " +
         "s.commit_sha AS latest_commit_sha, r.auto_update_enabled, r.last_webhook_at, " +
         "r.created_at, r.updated_at " +
@@ -1568,7 +2696,8 @@ export class RepoVistaStore {
 
   async getRepository(repositoryId: string): Promise<RepositorySummary | null> {
     const result = await this.pool.query<RepositoryRow>(
-      "SELECT r.id, r.owner_name, r.repo_name, r.canonical_url, r.default_branch, " +
+      "SELECT r.id, r.workspace_id, r.owner_name, r.repo_name, r.canonical_url, " +
+        "r.visibility, r.github_installation_id, r.default_branch, " +
         "r.latest_ready_snapshot_id, s.status AS latest_snapshot_status, " +
         "s.commit_sha AS latest_commit_sha, r.auto_update_enabled, r.last_webhook_at, " +
         "r.created_at, r.updated_at " +
@@ -1586,45 +2715,18 @@ export class RepoVistaStore {
     parserVersion: string,
   ): Promise<GitHubWebhookProcessResult> {
     return withTransaction(this.pool, async (client) => {
-      const push = input.push;
-      if (input.eventName === "push" && !push) {
-        throw new DomainError(
-          "GITHUB_WEBHOOK_PAYLOAD_INVALID",
-          "A push webhook requires a validated push payload.",
-        );
-      }
-      const ignoredReason =
-        input.eventName === "ping"
-          ? "ping"
-          : input.eventName !== "push"
-            ? "event_not_supported"
-            : push?.isPrivate
-              ? "private_repository"
-              : push?.deleted
-                ? "deleted_ref"
-                : push?.ref !== `refs/heads/${push?.defaultBranch}`
-                  ? "non_default_branch"
-                  : !/^[a-f0-9]{40}$/i.test(push?.after ?? "")
-                    ? "invalid_commit"
-                    : null;
       const inserted = await client.query<{ delivery_id: string }>(
         "INSERT INTO github_webhook_deliveries " +
           "(delivery_id, event_name, payload_sha256, status, reason) " +
-          "VALUES ($1, $2, $3, $4, $5) " +
+          "VALUES ($1, $2, $3, 'ignored', 'processing') " +
           "ON CONFLICT (delivery_id) DO NOTHING RETURNING delivery_id",
-        [
-          input.deliveryId,
-          input.eventName,
-          input.payloadSha256,
-          ignoredReason ? "ignored" : "enqueued",
-          ignoredReason,
-        ],
+        [input.deliveryId, input.eventName, input.payloadSha256],
       );
       if (inserted.rowCount === 0) {
         const existing = await client.query<{
           delivery_id: string;
           payload_sha256: string;
-          status: "enqueued" | "ignored";
+          status: "enqueued" | "ignored" | "synchronized";
           reason: string | null;
           repository_id: string | null;
           snapshot_id: string | null;
@@ -1659,57 +2761,426 @@ export class RepoVistaStore {
         };
       }
 
-      if (ignoredReason) {
+      const finish = async (
+        status: "enqueued" | "ignored" | "synchronized",
+        reason: string | null,
+        workspaceId: string | null = null,
+        repositoryId: string | null = null,
+        snapshotId: string | null = null,
+        jobId: string | null = null,
+      ): Promise<GitHubWebhookProcessResult> => {
+        await client.query(
+          "UPDATE github_webhook_deliveries SET status = $2, reason = $3, workspace_id = $4, " +
+            "repository_id = $5, snapshot_id = $6, job_id = $7, processed_at = now() " +
+            "WHERE delivery_id = $1",
+          [input.deliveryId, status, reason, workspaceId, repositoryId, snapshotId, jobId],
+        );
         return {
-          status: "ignored" as const,
+          status,
           duplicate: false,
           deliveryId: input.deliveryId,
-          reason: ignoredReason,
-          repositoryId: null,
-          snapshotId: null,
-          jobId: null,
+          reason,
+          repositoryId,
+          snapshotId,
+          jobId,
         };
+      };
+
+      const ignore = async (
+        reason: string,
+        workspaceId: string | null = null,
+        repositoryId: string | null = null,
+      ): Promise<GitHubWebhookProcessResult> => {
+        if (workspaceId) {
+          await this.appendAuditEvent(client, {
+            workspaceId,
+            actorUserId: null,
+            actorKind: "github",
+            action: "webhook.ignored",
+            resourceType: "webhook",
+            resourceId: input.deliveryId,
+            metadata: { event: input.eventName, reason },
+          });
+        }
+        return finish("ignored", reason, workspaceId, repositoryId);
+      };
+
+      const installation = async (installationId: number) => {
+        const result = await client.query<{
+          installation_id: string | number;
+          workspace_id: string;
+          suspended_at: Date | string | null;
+        }>(
+          "SELECT installation_id, workspace_id, suspended_at FROM github_installations " +
+            "WHERE installation_id = $1 FOR UPDATE",
+          [installationId],
+        );
+        const row = result.rows[0];
+        return row
+          ? {
+              installationId: Number(row.installation_id),
+              workspaceId: row.workspace_id,
+              suspendedAt: row.suspended_at,
+            }
+          : null;
+      };
+
+      type WebhookRepository = {
+        id: string;
+        workspaceId: string;
+        visibility: "public" | "private";
+        installationId: number | null;
+        providerRepoId: string | null;
+        owner: string;
+        name: string;
+        canonicalUrl: string;
+        autoUpdateEnabled: boolean;
+      };
+      const installedRepository = async (
+        workspaceId: string,
+        installationId: number,
+        providerRepoId: string,
+      ): Promise<WebhookRepository | null> => {
+        const result = await client.query<{
+          id: string;
+          workspace_id: string;
+          visibility: "public" | "private";
+          github_installation_id: string | number | null;
+          provider_repo_id: string | null;
+          owner_name: string;
+          repo_name: string;
+          canonical_url: string;
+          auto_update_enabled: boolean;
+        }>(
+          "SELECT id, workspace_id, visibility, github_installation_id, provider_repo_id, " +
+            "owner_name, repo_name, canonical_url, auto_update_enabled FROM repositories " +
+            "WHERE workspace_id = $1 AND github_installation_id = $2 " +
+            "AND provider = 'github' AND provider_repo_id = $3 FOR UPDATE",
+          [workspaceId, installationId, providerRepoId],
+        );
+        const row = result.rows[0];
+        return row
+          ? {
+              id: row.id,
+              workspaceId: row.workspace_id,
+              visibility: row.visibility,
+              installationId:
+                row.github_installation_id === null ? null : Number(row.github_installation_id),
+              providerRepoId: row.provider_repo_id,
+              owner: row.owner_name,
+              name: row.repo_name,
+              canonicalUrl: row.canonical_url,
+              autoUpdateEnabled: row.auto_update_enabled,
+            }
+          : null;
+      };
+      const identityMatches = (
+        repository: WebhookRepository,
+        identity: { owner: string; name: string; canonicalUrl: string },
+      ) =>
+        repository.owner.toLowerCase() === identity.owner.toLowerCase() &&
+        repository.name.toLowerCase() === identity.name.toLowerCase() &&
+        repository.canonicalUrl.toLowerCase() === identity.canonicalUrl.toLowerCase();
+
+      if (input.eventName === "ping") return ignore("ping");
+
+      if (input.eventName === "installation") {
+        if (!input.installation) {
+          throw new DomainError(
+            "GITHUB_WEBHOOK_PAYLOAD_INVALID",
+            "An installation webhook requires a validated installation payload.",
+          );
+        }
+        const payload = input.installation;
+        const connected = await installation(payload.installationId);
+        if (!connected) return ignore("installation_not_connected");
+        if (payload.action === "deleted") {
+          await client.query(
+            "UPDATE repositories SET github_installation_id = NULL, auto_update_enabled = false, " +
+              "updated_at = now() WHERE workspace_id = $1 AND github_installation_id = $2",
+            [connected.workspaceId, payload.installationId],
+          );
+          await client.query(
+            "DELETE FROM github_installations WHERE workspace_id = $1 AND installation_id = $2",
+            [connected.workspaceId, payload.installationId],
+          );
+        } else {
+          await client.query(
+            "UPDATE github_installations SET suspended_at = $2, last_synced_at = now(), " +
+              "updated_at = now() WHERE installation_id = $1",
+            [
+              payload.installationId,
+              payload.action === "suspend"
+                ? (payload.suspendedAt ?? new Date())
+                : payload.action === "unsuspend"
+                  ? null
+                  : connected.suspendedAt,
+            ],
+          );
+        }
+        await this.appendAuditEvent(client, {
+          workspaceId: connected.workspaceId,
+          actorUserId: null,
+          actorKind: "github",
+          action: `installation.${payload.action}`,
+          resourceType: "installation",
+          resourceId: String(payload.installationId),
+        });
+        return finish("synchronized", null, connected.workspaceId);
       }
 
+      if (input.eventName === "installation_repositories") {
+        if (!input.installationRepositories) {
+          throw new DomainError(
+            "GITHUB_WEBHOOK_PAYLOAD_INVALID",
+            "An installation repositories webhook requires a validated payload.",
+          );
+        }
+        const payload = input.installationRepositories;
+        const connected = await installation(payload.installationId);
+        if (!connected) return ignore("installation_not_connected");
+        await client.query(
+          "UPDATE github_installations SET last_synced_at = now(), updated_at = now() " +
+            "WHERE installation_id = $1",
+          [payload.installationId],
+        );
+        if (payload.providerRepoIds.length > 0) {
+          await client.query(
+            "UPDATE repositories SET auto_update_enabled = $4, updated_at = now() " +
+              "WHERE workspace_id = $1 AND github_installation_id = $2 " +
+              "AND provider_repo_id = ANY($3::text[])",
+            [
+              connected.workspaceId,
+              payload.installationId,
+              payload.providerRepoIds,
+              payload.action === "added",
+            ],
+          );
+        }
+        await this.appendAuditEvent(client, {
+          workspaceId: connected.workspaceId,
+          actorUserId: null,
+          actorKind: "github",
+          action: `installation.repositories_${payload.action}`,
+          resourceType: "installation",
+          resourceId: String(payload.installationId),
+          metadata: { repositoryCount: payload.providerRepoIds.length },
+        });
+        return finish("synchronized", null, connected.workspaceId);
+      }
+
+      if (input.eventName === "pull_request") {
+        if (!input.pullRequest) {
+          throw new DomainError(
+            "GITHUB_WEBHOOK_PAYLOAD_INVALID",
+            "A pull request webhook requires a validated pull request payload.",
+          );
+        }
+        const payload = input.pullRequest;
+        let repository: WebhookRepository | null = null;
+        let workspaceId: string | null = null;
+        if (payload.installationId) {
+          const connected = await installation(payload.installationId);
+          workspaceId = connected?.workspaceId ?? null;
+          if (connected?.suspendedAt) {
+            return ignore("installation_suspended", connected.workspaceId);
+          }
+          if (connected) {
+            repository = await installedRepository(
+              connected.workspaceId,
+              payload.installationId,
+              payload.providerRepoId,
+            );
+          }
+        }
+        if (!repository && !payload.isPrivate) {
+          const publicResult = await client.query<{
+            id: string;
+            workspace_id: string;
+            visibility: "public" | "private";
+            github_installation_id: string | number | null;
+            provider_repo_id: string | null;
+            owner_name: string;
+            repo_name: string;
+            canonical_url: string;
+            auto_update_enabled: boolean;
+          }>(
+            "SELECT id, workspace_id, visibility, github_installation_id, provider_repo_id, " +
+              "owner_name, repo_name, canonical_url, auto_update_enabled FROM repositories " +
+              "WHERE workspace_id = $1 AND provider = 'github' " +
+              "AND (provider_repo_id = $2 OR canonical_url = $3) LIMIT 1 FOR UPDATE",
+            [PUBLIC_WORKSPACE_ID, payload.providerRepoId, payload.canonicalUrl],
+          );
+          const row = publicResult.rows[0];
+          repository = row
+            ? {
+                id: row.id,
+                workspaceId: row.workspace_id,
+                visibility: row.visibility,
+                installationId:
+                  row.github_installation_id === null ? null : Number(row.github_installation_id),
+                providerRepoId: row.provider_repo_id,
+                owner: row.owner_name,
+                name: row.repo_name,
+                canonicalUrl: row.canonical_url,
+                autoUpdateEnabled: row.auto_update_enabled,
+              }
+            : null;
+          workspaceId = repository?.workspaceId ?? workspaceId;
+        }
+        if (!repository) {
+          return ignore(
+            payload.isPrivate && !payload.installationId
+              ? "installation_missing"
+              : payload.isPrivate && !workspaceId
+                ? "installation_not_connected"
+                : "repository_not_imported",
+            workspaceId,
+          );
+        }
+        if (
+          repository.visibility !== (payload.isPrivate ? "private" : "public") ||
+          !identityMatches(repository, payload)
+        ) {
+          return ignore("repository_identity_mismatch", repository.workspaceId, repository.id);
+        }
+        if (payload.isPrivate && !repository.autoUpdateEnabled) {
+          return ignore("auto_update_disabled", repository.workspaceId, repository.id);
+        }
+        await this.appendAuditEvent(client, {
+          workspaceId: repository.workspaceId,
+          actorUserId: null,
+          actorKind: "github",
+          action: "pull_request.webhook",
+          resourceType: "repository",
+          resourceId: repository.id,
+          metadata: { action: payload.action, number: payload.number },
+        });
+        return finish("synchronized", null, repository.workspaceId, repository.id);
+      }
+
+      if (input.eventName !== "push") return ignore("event_not_supported");
+      const push = input.push;
       if (!push) {
         throw new DomainError(
           "GITHUB_WEBHOOK_PAYLOAD_INVALID",
-          "A supported webhook event did not contain repository data.",
+          "A push webhook requires a validated push payload.",
         );
       }
-      const repositoryResult = await client.query<{ id: string }>(
-        "INSERT INTO repositories (" +
-          "id, workspace_id, provider, provider_repo_id, canonical_url, clone_url, " +
-          "owner_name, repo_name, default_branch, visibility, auto_update_enabled, " +
-          "github_installation_id, last_webhook_at" +
-          ") VALUES ($1, $2, 'github', $3, $4, $5, $6, $7, $8, 'public', true, $9, now()) " +
-          "ON CONFLICT (workspace_id, canonical_url) DO UPDATE SET " +
-          "provider_repo_id = COALESCE(EXCLUDED.provider_repo_id, repositories.provider_repo_id), " +
-          "clone_url = EXCLUDED.clone_url, owner_name = EXCLUDED.owner_name, " +
-          "repo_name = EXCLUDED.repo_name, default_branch = EXCLUDED.default_branch, " +
-          "visibility = 'public', auto_update_enabled = true, " +
-          "github_installation_id = COALESCE(" +
-          "EXCLUDED.github_installation_id, repositories.github_installation_id), " +
-          "last_webhook_at = now(), updated_at = now() RETURNING id",
-        [
-          createId(),
-          PUBLIC_WORKSPACE_ID,
-          push.providerRepoId,
-          push.canonicalUrl,
-          push.cloneUrl,
-          push.owner,
-          push.name,
-          push.defaultBranch,
+      if (push.deleted) return ignore("deleted_ref");
+      if (push.ref !== `refs/heads/${push.defaultBranch}`) return ignore("non_default_branch");
+      if (!/^[a-f0-9]{40}$/i.test(push.after) || /^0{40}$/.test(push.after)) {
+        return ignore("invalid_commit");
+      }
+
+      let repositoryId: string;
+      let workspaceId: string;
+      if (push.isPrivate) {
+        if (!push.installationId) return ignore("installation_missing");
+        if (!push.providerRepoId) return ignore("repository_id_missing");
+        const connected = await installation(push.installationId);
+        if (!connected) return ignore("installation_not_connected");
+        if (connected.suspendedAt) {
+          return ignore("installation_suspended", connected.workspaceId);
+        }
+        const repository = await installedRepository(
+          connected.workspaceId,
           push.installationId,
-        ],
-      );
-      const repositoryId = repositoryResult.rows[0]?.id;
-      if (!repositoryId) {
-        throw new DomainError(
-          "GITHUB_WEBHOOK_PAYLOAD_INVALID",
-          "The webhook repository could not be persisted.",
-          { retryable: true },
+          push.providerRepoId,
         );
+        if (!repository) return ignore("repository_not_imported", connected.workspaceId);
+        if (repository.visibility !== "private" || !identityMatches(repository, push)) {
+          return ignore("repository_identity_mismatch", connected.workspaceId, repository.id);
+        }
+        if (!repository.autoUpdateEnabled) {
+          return ignore("auto_update_disabled", connected.workspaceId, repository.id);
+        }
+        repositoryId = repository.id;
+        workspaceId = connected.workspaceId;
+        await client.query(
+          "UPDATE repositories SET clone_url = $2, owner_name = $3, repo_name = $4, " +
+            "canonical_url = $5, default_branch = $6, last_webhook_at = now(), updated_at = now() " +
+            "WHERE id = $1",
+          [
+            repositoryId,
+            push.cloneUrl,
+            push.owner,
+            push.name,
+            push.canonicalUrl,
+            push.defaultBranch,
+          ],
+        );
+      } else {
+        let installed: WebhookRepository | null = null;
+        if (push.installationId && push.providerRepoId) {
+          const connected = await installation(push.installationId);
+          if (connected && !connected.suspendedAt) {
+            const candidate = await installedRepository(
+              connected.workspaceId,
+              push.installationId,
+              push.providerRepoId,
+            );
+            if (
+              candidate?.visibility === "public" &&
+              identityMatches(candidate, push) &&
+              candidate.autoUpdateEnabled
+            ) {
+              installed = candidate;
+            }
+          }
+        }
+        if (installed) {
+          repositoryId = installed.id;
+          workspaceId = installed.workspaceId;
+          await client.query(
+            "UPDATE repositories SET clone_url = $2, default_branch = $3, last_webhook_at = now(), " +
+              "updated_at = now() WHERE id = $1",
+            [repositoryId, push.cloneUrl, push.defaultBranch],
+          );
+        } else {
+          const existing = await client.query<{ id: string }>(
+            "SELECT id FROM repositories WHERE workspace_id = $1 AND provider = 'github' " +
+              "AND (($2::text IS NOT NULL AND provider_repo_id = $2) OR canonical_url = $3) " +
+              "ORDER BY CASE WHEN provider_repo_id = $2 THEN 0 ELSE 1 END LIMIT 1 FOR UPDATE",
+            [PUBLIC_WORKSPACE_ID, push.providerRepoId, push.canonicalUrl],
+          );
+          repositoryId = existing.rows[0]?.id ?? createId();
+          workspaceId = PUBLIC_WORKSPACE_ID;
+          if (existing.rows[0]) {
+            await client.query(
+              "UPDATE repositories SET provider_repo_id = COALESCE($2, provider_repo_id), " +
+                "canonical_url = $3, clone_url = $4, owner_name = $5, repo_name = $6, " +
+                "default_branch = $7, visibility = 'public', auto_update_enabled = true, " +
+                "last_webhook_at = now(), updated_at = now() WHERE id = $1",
+              [
+                repositoryId,
+                push.providerRepoId,
+                push.canonicalUrl,
+                push.cloneUrl,
+                push.owner,
+                push.name,
+                push.defaultBranch,
+              ],
+            );
+          } else {
+            await client.query(
+              "INSERT INTO repositories (id, workspace_id, provider, provider_repo_id, canonical_url, " +
+                "clone_url, owner_name, repo_name, default_branch, visibility, auto_update_enabled, " +
+                "last_webhook_at) VALUES ($1, $2, 'github', $3, $4, $5, $6, $7, $8, " +
+                "'public', true, now())",
+              [
+                repositoryId,
+                workspaceId,
+                push.providerRepoId,
+                push.canonicalUrl,
+                push.cloneUrl,
+                push.owner,
+                push.name,
+                push.defaultBranch,
+              ],
+            );
+          }
+        }
       }
 
       const snapshotId = createId();
@@ -1724,7 +3195,7 @@ export class RepoVistaStore {
         "INSERT INTO analysis_jobs (" +
           "id, workspace_id, repository_id, snapshot_id, job_type, status, idempotency_key" +
           ") VALUES ($1, $2, $3, $4, 'index_snapshot', 'queued', $5)",
-        [jobId, PUBLIC_WORKSPACE_ID, repositoryId, snapshotId, `github:${input.deliveryId}`],
+        [jobId, workspaceId, repositoryId, snapshotId, `github:${input.deliveryId}`],
       );
       await this.appendJobEvent(client, jobId, "queued", {
         phase: "queued",
@@ -1733,20 +3204,16 @@ export class RepoVistaStore {
         source: "github_webhook",
         deliveryId: input.deliveryId,
       });
-      await client.query(
-        "UPDATE github_webhook_deliveries SET repository_id = $2, snapshot_id = $3, job_id = $4, " +
-          "processed_at = now() WHERE delivery_id = $1",
-        [input.deliveryId, repositoryId, snapshotId, jobId],
-      );
-      return {
-        status: "enqueued" as const,
-        duplicate: false,
-        deliveryId: input.deliveryId,
-        reason: null,
-        repositoryId,
-        snapshotId,
-        jobId,
-      };
+      await this.appendAuditEvent(client, {
+        workspaceId,
+        actorUserId: null,
+        actorKind: "github",
+        action: "repository.webhook_push",
+        resourceType: "repository",
+        resourceId: repositoryId,
+        metadata: { private: push.isPrivate },
+      });
+      return finish("enqueued", null, workspaceId, repositoryId, snapshotId, jobId);
     });
   }
 
@@ -2844,10 +4311,15 @@ export class RepoVistaStore {
         repo_name: string;
         requested_ref: string | null;
         ignore_patterns: string[];
+        visibility: "public" | "private";
+        github_installation_id: string | number | null;
+        installation_suspended_at: Date | string | null;
       }>(
         "SELECT r.canonical_url, r.clone_url, r.owner_name, r.repo_name, " +
-          "s.requested_ref, r.ignore_patterns " +
+          "s.requested_ref, r.ignore_patterns, r.visibility, r.github_installation_id, " +
+          "gi.suspended_at AS installation_suspended_at " +
           "FROM repositories r JOIN repository_snapshots s ON s.repository_id = r.id " +
+          "LEFT JOIN github_installations gi ON gi.installation_id = r.github_installation_id " +
           "WHERE r.id = $1 AND s.id = $2",
         [job.repository_id, job.snapshot_id],
       );
@@ -2874,6 +4346,10 @@ export class RepoVistaStore {
         cloneUrl: detail.clone_url,
         owner: detail.owner_name,
         name: detail.repo_name,
+        visibility: detail.visibility,
+        githubInstallationId:
+          detail.github_installation_id === null ? null : Number(detail.github_installation_id),
+        githubInstallationSuspended: detail.installation_suspended_at !== null,
         requestedRef: detail.requested_ref,
         ignore: detail.ignore_patterns ?? [],
         attemptCount: job.attempt_count,
@@ -3646,6 +5122,11 @@ export class RepoVistaStore {
     snapshotId: string,
     title: string,
     content: ShareReportContent,
+    options: {
+      requestedVisibility?: "private" | "public";
+      actorUserId?: string | null;
+      actorKind?: Principal["kind"];
+    } = {},
   ): Promise<{ id: string; slug: string }> {
     const repository = await this.getRepository(repositoryId);
     const snapshot = await this.getSnapshot(snapshotId);
@@ -3662,6 +5143,10 @@ export class RepoVistaStore {
       );
     }
     const id = createId();
+    const visibility =
+      repository.workspaceId === PUBLIC_WORKSPACE_ID && repository.visibility === "public"
+        ? (options.requestedVisibility ?? "public")
+        : "private";
     const slug =
       repository.name.toLowerCase().replace(/[^a-z0-9-]+/g, "-") +
       "-" +
@@ -3676,7 +5161,7 @@ export class RepoVistaStore {
     await this.pool.query(
       "INSERT INTO share_reports (" +
         "id, repository_id, snapshot_id, slug, title, report_type, visibility, content_version, generated_content_json, created_by" +
-        ") VALUES ($1, $2, $3, $4, $5, $6, 'public', $7, $8::jsonb, $9)",
+        ") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)",
       [
         id,
         repositoryId,
@@ -3684,28 +5169,46 @@ export class RepoVistaStore {
         slug,
         title,
         content.version === 2 ? "architecture_story" : "architecture_tour",
+        visibility,
         content.version === 2 ? 2 : 1,
         JSON.stringify(content),
-        PUBLIC_USER_ID,
+        options.actorUserId ?? PUBLIC_USER_ID,
       ],
     );
+    await this.recordAuditEvent({
+      workspaceId: repository.workspaceId ?? PUBLIC_WORKSPACE_ID,
+      actorUserId: options.actorUserId ?? null,
+      actorKind: options.actorKind ?? "anonymous",
+      action: "share.create",
+      resourceType: "share",
+      resourceId: id,
+      metadata: { visibility },
+    });
     return { id, slug };
   }
 
-  async getShareReport(slug: string): Promise<ShareReportRecord | null> {
+  async getShareReport(
+    slug: string,
+    workspaceId = PUBLIC_WORKSPACE_ID,
+  ): Promise<ShareReportRecord | null> {
     const result = await this.pool.query<{
       id: string;
       repository_id: string;
       snapshot_id: string;
       slug: string;
       title: string;
+      visibility: "private" | "unlisted" | "public";
       generated_content_json: ShareReportContent;
       created_at: Date | string;
     }>(
-      "SELECT id, repository_id, snapshot_id, slug, title, generated_content_json, created_at " +
-        "FROM share_reports WHERE slug = $1 AND visibility = 'public' AND revoked_at IS NULL " +
-        "AND (expires_at IS NULL OR expires_at > now())",
-      [slug],
+      "SELECT share.id, share.repository_id, share.snapshot_id, share.slug, share.title, " +
+        "share.visibility, share.generated_content_json, share.created_at " +
+        "FROM share_reports share JOIN repositories r ON r.id = share.repository_id " +
+        "WHERE share.slug = $1 AND share.revoked_at IS NULL " +
+        "AND (share.expires_at IS NULL OR share.expires_at > now()) " +
+        "AND ((share.visibility = 'public' AND r.workspace_id = $3 AND r.visibility = 'public') " +
+        "OR r.workspace_id = $2)",
+      [slug, workspaceId, PUBLIC_WORKSPACE_ID],
     );
     const row = result.rows[0];
     if (!row) return null;
@@ -3718,11 +5221,31 @@ export class RepoVistaStore {
       id: row.id,
       slug: row.slug,
       title: row.title,
+      visibility: row.visibility,
       repository,
       snapshot,
       content: shareReportContentSchema.parse(row.generated_content_json),
       createdAt: iso(row.created_at),
     };
+  }
+
+  private async appendAuditEvent(
+    client: Pick<DatabaseClient, "query"> | Pick<DatabasePool, "query">,
+    input: AuditEventInput,
+  ): Promise<void> {
+    await client.query(
+      "INSERT INTO audit_events (workspace_id, actor_user_id, actor_kind, action, resource_type, resource_id, metadata_json) " +
+        "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)",
+      [
+        input.workspaceId,
+        input.actorUserId,
+        input.actorKind,
+        input.action,
+        input.resourceType,
+        input.resourceId,
+        JSON.stringify(input.metadata ?? {}),
+      ],
+    );
   }
 
   private async appendJobEvent(

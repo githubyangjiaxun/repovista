@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRight, GitBranch, Github, LoaderCircle, Plus } from "lucide-react";
+import { ArrowRight, GitBranch, Github, LoaderCircle, LockKeyhole, Plus } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { apiErrorMessage, apiFetch, type RepositorySummary } from "@/lib/api";
@@ -31,7 +31,10 @@ export function RepositoryList() {
         <div className="empty-repositories">
           <Github size={30} />
           <h2>No repositories yet</h2>
-          <p>Analyze a public GitHub repository to build the first immutable code map.</p>
+          <p>
+            Analyze a public URL or an installed private repository to build the first immutable
+            code map.
+          </p>
           <Link className="primary-button" href="/repositories/new">
             <Plus size={16} /> Analyze repository
           </Link>
@@ -52,7 +55,12 @@ export function RepositoryList() {
             </div>
             <div>
               <span>{repository.owner}</span>
-              <h2>{repository.name}</h2>
+              <h2>
+                {repository.name}
+                {repository.visibility === "private" ? (
+                  <LockKeyhole aria-label="Private repository" size={14} />
+                ) : null}
+              </h2>
               <p>
                 <GitBranch size={13} /> {repository.defaultBranch ?? "default branch"} ·{" "}
                 {repository.latestCommitSha?.slice(0, 7) ?? "waiting"}

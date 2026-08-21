@@ -44,6 +44,9 @@ importers:
       '@repovista/ai':
         specifier: workspace:*
         version: link:../../packages/ai
+      '@repovista/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
       '@repovista/config':
         specifier: workspace:*
         version: link:../../packages/config
@@ -65,6 +68,9 @@ importers:
       '@repovista/git':
         specifier: workspace:*
         version: link:../../packages/git
+      '@repovista/github':
+        specifier: workspace:*
+        version: link:../../packages/github
       '@repovista/graph':
         specifier: workspace:*
         version: link:../../packages/graph
@@ -92,6 +98,9 @@ importers:
       '@repovista/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      zod:
+        specifier: ^4.0.0
+        version: 4.4.3
 
   apps/web:
     dependencies:
@@ -162,6 +171,9 @@ importers:
       '@repovista/git':
         specifier: workspace:*
         version: link:../../packages/git
+      '@repovista/github':
+        specifier: workspace:*
+        version: link:../../packages/github
       '@repovista/graph':
         specifier: workspace:*
         version: link:../../packages/graph
@@ -195,6 +207,12 @@ importers:
       zod:
         specifier: ^4.0.0
         version: 4.4.3
+
+  packages/auth:
+    dependencies:
+      '@repovista/domain':
+        specifier: workspace:*
+        version: link:../domain
 
   packages/config:
     dependencies:
@@ -259,6 +277,18 @@ importers:
       '@repovista/domain':
         specifier: workspace:*
         version: link:../domain
+
+  packages/github:
+    dependencies:
+      '@repovista/config':
+        specifier: workspace:*
+        version: link:../config
+      '@repovista/domain':
+        specifier: workspace:*
+        version: link:../domain
+      zod:
+        specifier: ^4.0.0
+        version: 4.4.3
 
   packages/graph:
     dependencies:

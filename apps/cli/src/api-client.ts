@@ -1,12 +1,18 @@
 import {
   type AskRequest,
   type AskResult,
+  type AuthSession,
   askResultSchema,
+  authSessionSchema,
   type CreateEmbeddingIndexResponse,
   type CreateRepositoryRequest,
   type CreateRepositoryResponse,
   createEmbeddingIndexResponseSchema,
   createRepositoryResponseSchema,
+  type GitHubInstallation,
+  type GitHubInstallationRepositoryPage,
+  githubInstallationRepositoryPageSchema,
+  githubInstallationSchema,
   type Job,
   jobSchema,
   type RepositorySummary,
@@ -70,6 +76,7 @@ type Decoder<T> = (value: unknown) => T;
 
 export interface RepoVistaClientOptions {
   apiUrl: string;
+  apiToken?: string;
   fetch?: typeof fetch;
   requestTimeoutMs?: number;
 }
@@ -109,11 +116,13 @@ export class RepoVistaClient {
   readonly apiUrl: string;
   private readonly fetchImplementation: typeof fetch;
   private readonly requestTimeoutMs: number;
+  private readonly apiToken: string | null;
 
   constructor(options: RepoVistaClientOptions) {
     this.apiUrl = parseApiUrl(options.apiUrl);
     this.fetchImplementation = options.fetch ?? fetch;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
+    this.apiToken = options.apiToken ?? null;
   }
 
   async health(): Promise<{ status: "ok" }> {
@@ -124,6 +133,29 @@ export class RepoVistaClient {
       });
     }
     return { status: "ok" };
+  }
+
+  authSession(): Promise<AuthSession> {
+    return this.requestEnvelope("/v1/auth/session", {}, (value) => authSessionSchema.parse(value));
+  }
+
+  listGitHubInstallations(): Promise<GitHubInstallation[]> {
+    return this.requestEnvelope("/v1/integrations/github/installations", {}, (value) =>
+      githubInstallationSchema.array().parse(value),
+    );
+  }
+
+  listInstallationRepositories(
+    installationId: number,
+    page = 1,
+    pageSize = 50,
+  ): Promise<GitHubInstallationRepositoryPage> {
+    const parameters = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+    return this.requestEnvelope(
+      `/v1/integrations/github/installations/${installationId}/repositories?${parameters.toString()}`,
+      {},
+      (value) => githubInstallationRepositoryPageSchema.parse(value),
+    );
   }
 
   createRepository(input: CreateRepositoryRequest): Promise<CreateRepositoryResponse> {
@@ -229,6 +261,7 @@ export class RepoVistaClient {
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
     headers.set("User-Agent", CLI_USER_AGENT);
+    if (this.apiToken) headers.set("Authorization", `Bearer ${this.apiToken}`);
     if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     let response: Response;
     try {

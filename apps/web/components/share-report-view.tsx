@@ -8,6 +8,7 @@ import {
   GitCommitHorizontal,
   Github,
   LoaderCircle,
+  LockKeyhole,
   Sparkles,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -64,7 +65,15 @@ export function ShareReportView({ slug }: { slug: string }) {
     <main className="share-report">
       <header className="share-hero">
         <p className="eyebrow">
-          {story ? "Public architecture story" : "Public architecture tour"}
+          {report.visibility === "private" ? (
+            <>
+              <LockKeyhole size={14} /> Private workspace report
+            </>
+          ) : story ? (
+            "Public architecture story"
+          ) : (
+            "Public architecture tour"
+          )}
         </p>
         {story ? <span className="story-report-title">{report.title}</span> : null}
         <h1>{story?.headline ?? report.title}</h1>

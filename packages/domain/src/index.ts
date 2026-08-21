@@ -16,6 +16,20 @@ import { v7 as uuidv7 } from "uuid";
 export const PUBLIC_USER_ID = "00000000-0000-7000-8000-000000000001";
 export const PUBLIC_WORKSPACE_ID = "00000000-0000-7000-8000-000000000002";
 
+export type WorkspaceRole = "owner" | "editor" | "viewer";
+export type AuthScope = "repo:read" | "repo:write" | "workspace:admin";
+
+export interface Principal {
+  kind: "anonymous" | "session" | "token" | "github" | "system";
+  userId: string | null;
+  workspaceId: string;
+  role: WorkspaceRole;
+  scopes: readonly AuthScope[];
+  sessionId: string | null;
+  tokenId: string | null;
+  csrfTokenHash: string | null;
+}
+
 export function createId(): string {
   return uuidv7();
 }

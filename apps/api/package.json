@@ -1,6 +1,6 @@
 {
   "name": "@repovista/api",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "files": [
@@ -15,6 +15,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@repovista/auth": "workspace:*",
     "@fastify/cors": "^11.0.0",
     "@fastify/rate-limit": "^10.0.0",
     "@repovista/ai": "workspace:*",
@@ -26,6 +27,7 @@
     "@repovista/exporter": "workspace:*",
     "@repovista/git": "workspace:*",
     "@repovista/graph": "workspace:*",
+    "@repovista/github": "workspace:*",
     "@repovista/impact": "workspace:*",
     "@repovista/retrieval": "workspace:*",
     "@repovista/story": "workspace:*",

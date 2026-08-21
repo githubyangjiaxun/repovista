@@ -48,8 +48,8 @@ export default function HomePage() {
           <span className="hero-title-muted"> as a map, not a maze.</span>
         </h1>
         <p className="hero-copy">
-          Paste a public GitHub repository and explore its architecture, source relationships, and
-          verifiable AI guidance across TypeScript, JavaScript, and Python.
+          Paste a public GitHub repository or sign in for private GitHub App access, then explore
+          architecture, source relationships, and verifiable AI guidance.
         </p>
         <form action="/repositories/new" className="import-form">
           <label className="sr-only" htmlFor="repository-url">
@@ -68,8 +68,8 @@ export default function HomePage() {
           </button>
         </form>
         <p className="privacy-note">
-          Public repositories only. Imported code is never run. Signed default-branch pushes can
-          create incremental snapshots automatically.
+          Imported code is never run. Private access uses short-lived installation credentials, and
+          signed default-branch pushes can create incremental snapshots automatically.
         </p>
       </section>
 

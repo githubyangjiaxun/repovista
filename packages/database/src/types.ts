@@ -1,6 +1,10 @@
 import type {
+  AuditEvent,
+  AuthScope,
+  AuthSession,
   EmbeddingIndex,
   EmbeddingProvider,
+  GitHubInstallation,
   GitHubWebhookResult,
   GroundedAnswer,
   Job,
@@ -9,17 +13,108 @@ import type {
   ShareReportContent,
   Snapshot,
   SnapshotStats,
+  WorkspaceMember,
+  WorkspaceRole,
+  WorkspaceSummary,
 } from "@repovista/contracts";
-import type { GitHubRepositoryIdentity, IndexedRepository, ParsedFile } from "@repovista/domain";
+import type {
+  GitHubRepositoryIdentity,
+  IndexedRepository,
+  ParsedFile,
+  Principal,
+} from "@repovista/domain";
 import type { ImpactComputation } from "@repovista/impact";
 
 export interface CreateImportInput {
   workspaceId: string;
   identity: GitHubRepositoryIdentity;
+  visibility?: "public" | "private";
+  providerRepoId?: string | null;
+  defaultBranch?: string | null;
+  githubInstallationId?: number | null;
+  actorUserId?: string | null;
+  actorKind?: Principal["kind"];
   requestedRef?: string;
   ignore: string[];
   parserVersion: string;
 }
+
+export interface GitHubUserProfileInput {
+  providerUserId: string;
+  login: string;
+  displayName: string;
+  avatarUrl: string | null;
+  email: string | null;
+  profileUrl: string;
+}
+
+export interface CreateSessionInput {
+  profile: GitHubUserProfileInput;
+  allowSignup: boolean;
+  sessionTokenHash: string;
+  csrfTokenHash: string;
+  expiresAt: Date;
+}
+
+export interface SessionIdentity {
+  principal: Principal;
+  user: NonNullable<AuthSession["user"]>;
+  workspace: WorkspaceSummary;
+}
+
+export interface CreateApiTokenInput {
+  workspaceId: string;
+  userId: string;
+  name: string;
+  tokenPrefix: string;
+  tokenHash: string;
+  scopes: AuthScope[];
+  expiresAt: Date | null;
+}
+
+export interface GitHubInstallationInput {
+  installationId: number;
+  workspaceId: string;
+  accountId: number;
+  accountLogin: string;
+  accountType: "User" | "Organization";
+  repositorySelection: "all" | "selected";
+  permissions: Record<string, string>;
+  installedBy: string;
+  suspendedAt: Date | null;
+}
+
+export interface InstallationState {
+  workspaceId: string;
+  userId: string;
+  returnTo: string;
+}
+
+export type WorkspaceMemberRecord = WorkspaceMember;
+
+export interface RepositoryAccess {
+  repositoryId: string;
+  workspaceId: string;
+  visibility: "public" | "private";
+  githubInstallationId: number | null;
+  role: WorkspaceRole;
+}
+
+export interface GitHubInstallationAccess extends GitHubInstallation {
+  workspaceId: string;
+}
+
+export interface AuditEventInput {
+  workspaceId: string;
+  actorUserId: string | null;
+  actorKind: Principal["kind"];
+  action: string;
+  resourceType: string;
+  resourceId: string;
+  metadata?: Record<string, unknown>;
+}
+
+export type AuditEventRecord = AuditEvent;
 
 export interface CreateImportResult {
   repositoryId: string;
@@ -59,6 +154,9 @@ export interface PullRequestAnalysisJob {
   owner: string;
   name: string;
   cloneUrl: string;
+  visibility: "public" | "private";
+  githubInstallationId: number | null;
+  githubInstallationSuspended: boolean;
   prNumber: number;
   title: string;
   canonicalUrl: string;
@@ -138,6 +236,9 @@ export interface ClaimedIndexJob {
   cloneUrl: string;
   owner: string;
   name: string;
+  visibility: "public" | "private";
+  githubInstallationId: number | null;
+  githubInstallationSuspended: boolean;
   requestedRef: string | null;
   ignore: string[];
   attemptCount: number;
@@ -173,6 +274,26 @@ export interface GitHubWebhookInput {
     deleted: boolean;
     isPrivate: boolean;
     installationId: number | null;
+  } | null;
+  installation?: {
+    action: "created" | "deleted" | "suspend" | "unsuspend";
+    installationId: number;
+    suspendedAt: Date | null;
+  } | null;
+  installationRepositories?: {
+    action: "added" | "removed";
+    installationId: number;
+    providerRepoIds: string[];
+  } | null;
+  pullRequest?: {
+    action: "opened" | "reopened" | "synchronize";
+    installationId: number | null;
+    providerRepoId: string;
+    owner: string;
+    name: string;
+    canonicalUrl: string;
+    isPrivate: boolean;
+    number: number;
   } | null;
 }
 
@@ -349,6 +470,7 @@ export interface ShareReportRecord {
   id: string;
   slug: string;
   title: string;
+  visibility: "private" | "unlisted" | "public";
   repository: RepositorySummary;
   snapshot: Snapshot;
   content: ShareReportContent;

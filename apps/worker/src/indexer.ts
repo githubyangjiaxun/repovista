@@ -10,6 +10,7 @@ import {
   type ScannedFile,
 } from "@repovista/domain";
 import { cloneRepository, createWorkspace, removeWorkspace, scanWorkspace } from "@repovista/git";
+import { GitHubAppClient } from "@repovista/github";
 import { linkParsedImports } from "@repovista/graph";
 import { PARSER_VERSION, parseRepository } from "@repovista/parser";
 
@@ -122,6 +123,7 @@ export interface IndexerDependencies {
   parseRepository: typeof parseRepository;
   removeWorkspace: typeof removeWorkspace;
   scanWorkspace: typeof scanWorkspace;
+  installationToken: (installationId: number) => Promise<string>;
 }
 
 export type IndexJobOutcome = "cancelled" | "failed" | "lease-lost" | "succeeded";
@@ -133,6 +135,12 @@ const defaultDependencies: IndexerDependencies = {
   parseRepository,
   removeWorkspace,
   scanWorkspace,
+  installationToken: async () => {
+    throw new DomainError(
+      "GITHUB_APP_DISABLED",
+      "Private repository access is not configured for this worker.",
+    );
+  },
 };
 
 class CancellationRequested extends Error {
@@ -321,6 +329,18 @@ export async function executeIndexJob(
 
   try {
     await lease.checkpoint();
+    if (job.visibility === "private" && !job.githubInstallationId) {
+      throw new DomainError(
+        "GITHUB_INSTALLATION_NOT_FOUND",
+        "The private repository is no longer connected to a GitHub installation.",
+      );
+    }
+    if (job.visibility === "private" && job.githubInstallationSuspended) {
+      throw new DomainError(
+        "GITHUB_INSTALLATION_SUSPENDED",
+        "The GitHub installation for this private repository is suspended.",
+      );
+    }
     await store.updateJobProgress(job.id, job.snapshotId, {
       status: "running",
       snapshotStatus: "cloning",
@@ -330,11 +350,17 @@ export async function executeIndexJob(
     });
     workspace = await dependencies.createWorkspace(`repovista-${job.id.slice(0, 8)}-`);
     const repositoryDirectory = path.join(workspace, "repository");
+    const installationToken = job.githubInstallationId
+      ? await dependencies.installationToken(job.githubInstallationId)
+      : null;
     const clone = await dependencies.cloneRepository({
       cloneUrl: job.cloneUrl,
       destination: repositoryDirectory,
       ref: job.requestedRef,
       timeoutMs: config.JOB_TIMEOUT_SECONDS * 1_000,
+      credentials: installationToken
+        ? { username: "x-access-token", password: installationToken }
+        : undefined,
     });
 
     await lease.checkpoint();
@@ -479,11 +505,16 @@ export async function executeIndexJob(
 
 export async function executeNextIndexJob(
   store: IndexerStore,
-  config: IndexerConfig,
-  dependencies: IndexerDependencies = defaultDependencies,
+  config: AppConfig,
+  dependencies: Partial<IndexerDependencies> = {},
 ): Promise<boolean> {
   const job = await store.claimIndexJob(config.WORKER_ID, config.JOB_LEASE_SECONDS);
   if (!job) return false;
-  await executeIndexJob(store, job, config, dependencies);
+  const github = new GitHubAppClient(config);
+  await executeIndexJob(store, job, config, {
+    ...defaultDependencies,
+    installationToken: (installationId) => github.installationToken(installationId),
+    ...dependencies,
+  });
   return true;
 }

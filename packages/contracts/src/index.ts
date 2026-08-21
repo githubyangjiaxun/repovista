@@ -53,6 +53,7 @@ export type SupportedParserLanguage = z.infer<typeof supportedParserLanguageSche
 
 export const createRepositoryRequestSchema = z.object({
   url: z.url(),
+  installationId: z.number().int().positive().optional(),
   ref: z.string().trim().min(1).max(255).optional(),
   ignore: z.array(z.string().trim().min(1).max(500)).max(100).default([]),
 });
@@ -68,9 +69,12 @@ export type CreateRepositoryResponse = z.infer<typeof createRepositoryResponseSc
 
 export const repositorySummarySchema = z.object({
   id: idSchema,
+  workspaceId: idSchema.optional(),
   owner: z.string(),
   name: z.string(),
   canonicalUrl: z.url(),
+  visibility: z.enum(["public", "private"]).optional(),
+  githubInstallationId: z.number().int().positive().nullable().optional(),
   defaultBranch: z.string().nullable(),
   latestSnapshotId: idSchema.nullable(),
   latestSnapshotStatus: snapshotStatusSchema.nullable(),
@@ -84,14 +88,18 @@ export type RepositorySummary = z.infer<typeof repositorySummarySchema>;
 
 export const githubIntegrationStatusSchema = z.object({
   enabled: z.boolean(),
+  loginEnabled: z.boolean().optional(),
+  privateRepositories: z.boolean().optional(),
   appSlug: z.string().nullable(),
-  events: z.array(z.literal("ping").or(z.literal("push"))),
-  scope: z.literal("public-repositories"),
+  events: z.array(
+    z.enum(["ping", "installation", "installation_repositories", "push", "pull_request"]),
+  ),
+  scope: z.enum(["public-repositories", "selected-installation-repositories"]),
 });
 export type GitHubIntegrationStatus = z.infer<typeof githubIntegrationStatusSchema>;
 
 export const githubWebhookResultSchema = z.object({
-  status: z.enum(["enqueued", "ignored", "duplicate"]),
+  status: z.enum(["enqueued", "ignored", "synchronized", "duplicate"]),
   duplicate: z.boolean(),
   deliveryId: z.string(),
   reason: z.string().nullable(),
@@ -594,6 +602,7 @@ export type PullRequestImpactResponse = z.infer<typeof pullRequestImpactResponse
 export const createShareRequestSchema = z.object({
   snapshotId: idSchema,
   title: z.string().trim().min(1).max(200).optional(),
+  visibility: z.enum(["private", "public"]).optional(),
 });
 export type CreateShareRequest = z.infer<typeof createShareRequestSchema>;
 
@@ -685,6 +694,152 @@ export const shareReportContentSchema = z.union([
   architectureTourV1Schema,
 ]);
 export type ShareReportContent = z.infer<typeof shareReportContentSchema>;
+
+// v0.5 authentication and workspace contracts. Raw session/API tokens are
+// intentionally absent from response schemas; the token-create response is
+// modeled separately and is never persisted by the server.
+export const workspaceRoleSchema = z.enum(["owner", "editor", "viewer"]);
+export type WorkspaceRole = z.infer<typeof workspaceRoleSchema>;
+
+export const authScopeSchema = z.enum(["repo:read", "repo:write", "workspace:admin"]);
+export type AuthScope = z.infer<typeof authScopeSchema>;
+
+export const workspaceSummarySchema = z.object({
+  id: idSchema,
+  name: z.string(),
+  slug: z.string(),
+  kind: z.enum(["public", "personal", "team"]),
+  visibility: z.enum(["public", "private"]),
+  role: workspaceRoleSchema,
+  createdAt: z.iso.datetime(),
+});
+export type WorkspaceSummary = z.infer<typeof workspaceSummarySchema>;
+
+export const authUserSchema = z.object({
+  id: idSchema,
+  login: z.string().nullable(),
+  displayName: z.string(),
+  avatarUrl: z.url().nullable(),
+});
+export type AuthUser = z.infer<typeof authUserSchema>;
+
+export const authCapabilitiesSchema = z.object({
+  githubLogin: z.boolean(),
+  githubApp: z.boolean(),
+  privateRepositories: z.boolean(),
+});
+
+export const authSessionSchema = z.object({
+  authenticated: z.boolean(),
+  user: authUserSchema.nullable(),
+  workspace: workspaceSummarySchema.nullable(),
+  workspaces: z.array(workspaceSummarySchema),
+  csrfToken: z.string().nullable(),
+  capabilities: authCapabilitiesSchema,
+});
+export type AuthSession = z.infer<typeof authSessionSchema>;
+
+export const createWorkspaceRequestSchema = z.object({
+  name: z.string().trim().min(2).max(100),
+});
+export type CreateWorkspaceRequest = z.infer<typeof createWorkspaceRequestSchema>;
+
+export const switchWorkspaceRequestSchema = z.object({ workspaceId: idSchema });
+
+export const workspaceMemberSchema = z.object({
+  userId: idSchema,
+  login: z.string().nullable(),
+  displayName: z.string(),
+  avatarUrl: z.url().nullable(),
+  role: workspaceRoleSchema,
+  joinedAt: z.iso.datetime(),
+});
+export type WorkspaceMember = z.infer<typeof workspaceMemberSchema>;
+
+export const addWorkspaceMemberRequestSchema = z.object({
+  login: z
+    .string()
+    .trim()
+    .min(1)
+    .max(39)
+    .regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/),
+  role: workspaceRoleSchema.default("viewer"),
+});
+export type AddWorkspaceMemberRequest = z.infer<typeof addWorkspaceMemberRequestSchema>;
+
+export const updateWorkspaceMemberRequestSchema = z.object({
+  role: workspaceRoleSchema,
+});
+export type UpdateWorkspaceMemberRequest = z.infer<typeof updateWorkspaceMemberRequestSchema>;
+
+export const createApiTokenRequestSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  scopes: z.array(authScopeSchema).min(1).max(3).default(["repo:read"]),
+  expiresInDays: z.number().int().min(1).max(365).nullable().default(null),
+});
+export type CreateApiTokenRequest = z.infer<typeof createApiTokenRequestSchema>;
+
+export const apiTokenMetadataSchema = z.object({
+  id: idSchema,
+  name: z.string(),
+  tokenPrefix: z.string(),
+  scopes: z.array(authScopeSchema),
+  expiresAt: z.iso.datetime().nullable(),
+  lastUsedAt: z.iso.datetime().nullable(),
+  revokedAt: z.iso.datetime().nullable(),
+  createdAt: z.iso.datetime(),
+});
+export type ApiTokenMetadata = z.infer<typeof apiTokenMetadataSchema>;
+
+export const createApiTokenResponseSchema = z.object({
+  token: z.string().regex(/^rv_[A-Za-z0-9_-]{32,}$/),
+  metadata: apiTokenMetadataSchema,
+});
+export type CreateApiTokenResponse = z.infer<typeof createApiTokenResponseSchema>;
+
+export const githubInstallationSchema = z.object({
+  installationId: z.number().int().positive(),
+  accountId: z.number().int().positive(),
+  accountLogin: z.string(),
+  accountType: z.enum(["User", "Organization"]),
+  repositorySelection: z.enum(["all", "selected"]),
+  suspendedAt: z.iso.datetime().nullable(),
+  lastSyncedAt: z.iso.datetime().nullable(),
+  repositoryCount: z.number().int().nonnegative().nullable().default(null),
+});
+export type GitHubInstallation = z.infer<typeof githubInstallationSchema>;
+
+export const githubInstallationRepositorySchema = z.object({
+  id: z.number().int().positive(),
+  name: z.string(),
+  full_name: z.string(),
+  private: z.boolean(),
+  html_url: z.url(),
+  clone_url: z.url(),
+  default_branch: z.string(),
+  owner: z.object({ login: z.string() }),
+});
+export type GitHubInstallationRepository = z.infer<typeof githubInstallationRepositorySchema>;
+
+export const githubInstallationRepositoryPageSchema = z.object({
+  repositories: z.array(githubInstallationRepositorySchema),
+  totalCount: z.number().int().nonnegative(),
+});
+export type GitHubInstallationRepositoryPage = z.infer<
+  typeof githubInstallationRepositoryPageSchema
+>;
+
+export const auditEventSchema = z.object({
+  id: z.number().int().positive(),
+  actorKind: z.enum(["anonymous", "session", "token", "github", "system"]),
+  actorLogin: z.string().nullable(),
+  action: z.string(),
+  resourceType: z.string(),
+  resourceId: z.string(),
+  metadata: z.record(z.string(), z.unknown()),
+  createdAt: z.iso.datetime(),
+});
+export type AuditEvent = z.infer<typeof auditEventSchema>;
 
 export interface ApiSuccess<T> {
   data: T;

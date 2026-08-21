@@ -15,7 +15,7 @@ import {
   retrievalModeSchema,
 } from "@repovista/contracts";
 import type { RepoVistaStore, SearchEvidenceRecord } from "@repovista/database";
-import { DomainError, PUBLIC_WORKSPACE_ID } from "@repovista/domain";
+import { DomainError, type Principal } from "@repovista/domain";
 import { EMBEDDING_INPUT_VERSION } from "@repovista/embeddings";
 import {
   createMarkdownExport,
@@ -24,12 +24,14 @@ import {
   type SnapshotExportInput,
 } from "@repovista/exporter";
 import { parseGitHubUrl } from "@repovista/git";
+import type { GitHubAppClient } from "@repovista/github";
 import { buildGraphView, type GraphView } from "@repovista/graph";
 import { IMPACT_ALGORITHM_VERSION } from "@repovista/impact";
 import { buildArchitectureStory } from "@repovista/story";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { fetchPublicPullRequest } from "./github.js";
+import { resolveRequestAuth } from "./auth.js";
+import { fetchPullRequest } from "./github.js";
 import { type RetrievalDependencies, retrieveEvidence } from "./retrieval.js";
 
 const repositoryParamsSchema = z.object({ repositoryId: idSchema });
@@ -45,19 +47,46 @@ const githubWebhookHeadersSchema = z.object({
   signature: z.string().regex(/^sha256=[a-f0-9]{64}$/i),
 });
 
+const githubWebhookRepositorySchema = z.object({
+  id: z.union([z.number().int().positive(), z.string().regex(/^\d+$/)]),
+  name: z.string().min(1).max(100),
+  full_name: z.string().min(3).max(300),
+  html_url: z.url(),
+  default_branch: z.string().min(1).max(255).optional(),
+  private: z.boolean(),
+  owner: z.object({ login: z.string().min(1).max(100) }),
+});
+
 const githubPushPayloadSchema = z.object({
   after: z.string(),
   deleted: z.boolean().default(false),
   ref: z.string(),
-  repository: z.object({
-    id: z.union([z.number().int().positive(), z.string().regex(/^\d+$/)]).optional(),
-    name: z.string().min(1).max(100),
-    full_name: z.string().min(3).max(300),
-    html_url: z.url(),
+  repository: githubWebhookRepositorySchema.extend({
     default_branch: z.string().min(1).max(255),
-    private: z.boolean(),
-    owner: z.object({ login: z.string().min(1).max(100) }),
   }),
+  installation: z.object({ id: z.number().int().positive() }).optional(),
+});
+
+const githubInstallationPayloadSchema = z.object({
+  action: z.enum(["created", "deleted", "suspend", "unsuspend"]),
+  installation: z.object({
+    id: z.number().int().positive(),
+    suspended_at: z.iso.datetime().nullable().optional(),
+  }),
+});
+
+const githubInstallationRepositoriesPayloadSchema = z.object({
+  action: z.enum(["added", "removed"]),
+  installation: z.object({ id: z.number().int().positive() }),
+  repositories_added: z.array(z.object({ id: z.number().int().positive() })).default([]),
+  repositories_removed: z.array(z.object({ id: z.number().int().positive() })).default([]),
+});
+
+const githubPullRequestPayloadSchema = z.object({
+  action: z.enum(["opened", "reopened", "synchronize"]),
+  number: z.number().int().positive(),
+  pull_request: z.object({ number: z.number().int().positive() }),
+  repository: githubWebhookRepositorySchema,
   installation: z.object({ id: z.number().int().positive() }).optional(),
 });
 
@@ -123,6 +152,76 @@ function parseInput<T extends z.ZodType>(schema: T, value: unknown): z.infer<T> 
 
 function response<T>(request: FastifyRequest, data: T) {
   return { data, meta: { requestId: request.id } };
+}
+
+async function requestPrincipal(
+  request: FastifyRequest,
+  store: RepoVistaStore,
+): Promise<Principal> {
+  return (await resolveRequestAuth(request, store)).principal;
+}
+
+async function requireRepositoryAccess(
+  request: FastifyRequest,
+  store: RepoVistaStore,
+  repositoryId: string,
+): Promise<ReturnType<RepoVistaStore["getRepositoryAccess"]> extends Promise<infer T> ? T : never> {
+  const principal = await requestPrincipal(request, store);
+  const access =
+    typeof store.getRepositoryAccess === "function"
+      ? await store.getRepositoryAccess(repositoryId, principal)
+      : (await store.getRepository(repositoryId))
+        ? {
+            repositoryId,
+            workspaceId: principal.workspaceId,
+            visibility: "public" as const,
+            githubInstallationId: null,
+            role: principal.role,
+          }
+        : null;
+  if (!access)
+    throw new DomainError("REPOSITORY_NOT_FOUND", "The requested repository does not exist.");
+  return access as Awaited<ReturnType<RepoVistaStore["getRepositoryAccess"]>>;
+}
+
+async function requireSnapshotAccess(
+  request: FastifyRequest,
+  store: RepoVistaStore,
+  snapshotId: string,
+): Promise<Awaited<ReturnType<RepoVistaStore["getSnapshotAccess"]>>> {
+  const principal = await requestPrincipal(request, store);
+  const access =
+    typeof store.getSnapshotAccess === "function"
+      ? await store.getSnapshotAccess(snapshotId, principal)
+      : (await store.getSnapshot(snapshotId))
+        ? {
+            repositoryId: "legacy",
+            workspaceId: principal.workspaceId,
+            visibility: "public" as const,
+            githubInstallationId: null,
+            role: principal.role,
+          }
+        : null;
+  if (!access)
+    throw new DomainError("SNAPSHOT_NOT_FOUND", "The requested snapshot does not exist.");
+  return access;
+}
+
+function requireWritePrincipal(principal: Principal): void {
+  if (principal.kind === "anonymous") {
+    // Public Demo retains the v0.4 anonymous import/ask path.
+    return;
+  }
+  if (principal.role === "viewer") {
+    throw new DomainError("WORKSPACE_FORBIDDEN", "Workspace write access is required.");
+  }
+  if (
+    principal.kind === "token" &&
+    !principal.scopes.includes("repo:write") &&
+    !principal.scopes.includes("workspace:admin")
+  ) {
+    throw new DomainError("WORKSPACE_FORBIDDEN", "The API token does not allow this operation.");
+  }
 }
 
 function rawWebhookBody(request: FastifyRequest): Buffer {
@@ -343,10 +442,10 @@ async function loadSnapshotExport(
   };
 }
 
-function sendExport(reply: FastifyReply, artifact: ExportArtifact) {
+function sendExport(reply: FastifyReply, artifact: ExportArtifact, isPrivate: boolean) {
   const etag = `"sha256-${createHash("sha256").update(artifact.body).digest("base64url")}"`;
   reply
-    .header("Cache-Control", "public, max-age=0, must-revalidate")
+    .header("Cache-Control", isPrivate ? "private, no-store" : "public, max-age=0, must-revalidate")
     .header("Content-Disposition", `attachment; filename="${artifact.filename}"`)
     .header("Content-Type", artifact.contentType)
     .header("ETag", etag)
@@ -365,18 +464,31 @@ export function registerRoutes(
   dependencies: {
     config: AppConfig;
     store: RepoVistaStore;
+    github: GitHubAppClient;
     retrievalDependencies?: RetrievalDependencies;
   },
 ): void {
-  const { config, store, retrievalDependencies } = dependencies;
+  const { config, store, github, retrievalDependencies } = dependencies;
 
   app.get("/v1/integrations/github", async (request) =>
-    response(request, {
-      enabled: Boolean(config.GITHUB_WEBHOOK_SECRET),
-      appSlug: config.GITHUB_APP_SLUG || null,
-      events: ["ping", "push"],
-      scope: "public-repositories",
-    }),
+    response(
+      request,
+      github.enabled() || Boolean(config.GITHUB_APP_CLIENT_ID && config.GITHUB_APP_CLIENT_SECRET)
+        ? {
+            enabled: Boolean(config.GITHUB_WEBHOOK_SECRET),
+            loginEnabled: Boolean(config.GITHUB_APP_CLIENT_ID && config.GITHUB_APP_CLIENT_SECRET),
+            privateRepositories: github.enabled(),
+            appSlug: config.GITHUB_APP_SLUG || null,
+            events: ["ping", "installation", "installation_repositories", "push", "pull_request"],
+            scope: github.enabled() ? "selected-installation-repositories" : "public-repositories",
+          }
+        : {
+            enabled: Boolean(config.GITHUB_WEBHOOK_SECRET),
+            appSlug: config.GITHUB_APP_SLUG || null,
+            events: ["ping", "push"],
+            scope: "public-repositories",
+          },
+    ),
   );
 
   app.post("/v1/integrations/github/webhooks", async (request, reply) => {
@@ -393,6 +505,96 @@ export function registerRoutes(
     const payloadSha256 = `sha256:${createHash("sha256").update(rawBody).digest("hex")}`;
     const body = parseWebhookJson(rawBody);
 
+    if (headers.event === "installation") {
+      const payload = parseInput(githubInstallationPayloadSchema, body);
+      const result = await store.processGitHubWebhook(
+        {
+          deliveryId: headers.delivery,
+          eventName: headers.event,
+          payloadSha256,
+          push: null,
+          installation: {
+            action: payload.action,
+            installationId: payload.installation.id,
+            suspendedAt: payload.installation.suspended_at
+              ? new Date(payload.installation.suspended_at)
+              : null,
+          },
+          installationRepositories: null,
+          pullRequest: null,
+        },
+        PARSER_VERSION,
+      );
+      return response(request, result);
+    }
+
+    if (headers.event === "installation_repositories") {
+      const payload = parseInput(githubInstallationRepositoriesPayloadSchema, body);
+      const repositories =
+        payload.action === "added" ? payload.repositories_added : payload.repositories_removed;
+      const result = await store.processGitHubWebhook(
+        {
+          deliveryId: headers.delivery,
+          eventName: headers.event,
+          payloadSha256,
+          push: null,
+          installation: null,
+          installationRepositories: {
+            action: payload.action,
+            installationId: payload.installation.id,
+            providerRepoIds: repositories.map((repository) => String(repository.id)),
+          },
+          pullRequest: null,
+        },
+        PARSER_VERSION,
+      );
+      return response(request, result);
+    }
+
+    if (headers.event === "pull_request") {
+      const payload = parseInput(githubPullRequestPayloadSchema, body);
+      if (payload.number !== payload.pull_request.number) {
+        throw new DomainError(
+          "GITHUB_WEBHOOK_PAYLOAD_INVALID",
+          "The pull request number in the webhook payload is inconsistent.",
+        );
+      }
+      const identity = parseGitHubUrl(payload.repository.html_url);
+      if (
+        identity.owner.toLowerCase() !== payload.repository.owner.login.toLowerCase() ||
+        identity.name.toLowerCase() !== payload.repository.name.toLowerCase() ||
+        payload.repository.full_name.toLowerCase() !==
+          `${identity.owner}/${identity.name}`.toLowerCase()
+      ) {
+        throw new DomainError(
+          "GITHUB_WEBHOOK_PAYLOAD_INVALID",
+          "The repository identity in the webhook payload is inconsistent.",
+        );
+      }
+      const result = await store.processGitHubWebhook(
+        {
+          deliveryId: headers.delivery,
+          eventName: headers.event,
+          payloadSha256,
+          push: null,
+          installation: null,
+          installationRepositories: null,
+          pullRequest: {
+            action: payload.action,
+            installationId: payload.installation?.id ?? null,
+            providerRepoId: String(payload.repository.id),
+            owner: identity.owner,
+            name: identity.name,
+            canonicalUrl: identity.canonicalUrl,
+            isPrivate: payload.repository.private,
+            number: payload.number,
+          },
+        },
+        PARSER_VERSION,
+      );
+      return response(request, result);
+    }
+
     if (headers.event !== "push") {
       const result = await store.processGitHubWebhook(
         {
@@ -400,6 +602,9 @@ export function registerRoutes(
           eventName: headers.event,
           payloadSha256,
           push: null,
+          installation: null,
+          installationRepositories: null,
+          pullRequest: null,
         },
         PARSER_VERSION,
       );
@@ -437,6 +642,9 @@ export function registerRoutes(
           isPrivate: payload.repository.private,
           installationId: payload.installation?.id ?? null,
         },
+        installation: null,
+        installationRepositories: null,
+        pullRequest: null,
       },
       PARSER_VERSION,
     );
@@ -454,15 +662,69 @@ export function registerRoutes(
     async (request, reply) => {
       const body = parseInput(createRepositoryRequestSchema, request.body);
       const identity = parseGitHubUrl(body.url);
+      const auth = await resolveRequestAuth(request, store);
+      const principal = auth.principal;
+      requireWritePrincipal(principal);
       if (!config.repositoryAllowedHosts.includes(new URL(identity.canonicalUrl).hostname)) {
         throw new DomainError(
           "REPOSITORY_HOST_NOT_ALLOWED",
           "This Git host is not enabled by the server.",
         );
       }
+      let visibility: "public" | "private" = "public";
+      let providerRepoId: string | null = null;
+      let defaultBranch: string | null = null;
+      let githubInstallationId: number | null = null;
+      if (body.installationId) {
+        if (principal.kind === "anonymous") {
+          throw new DomainError(
+            "AUTH_REQUIRED",
+            "Authentication is required for private repositories.",
+          );
+        }
+        const installation = await store.getGitHubInstallation(
+          principal.workspaceId,
+          body.installationId,
+        );
+        if (!installation) {
+          throw new DomainError(
+            "GITHUB_INSTALLATION_NOT_FOUND",
+            "The GitHub installation is unavailable.",
+          );
+        }
+        if (installation.suspendedAt) {
+          throw new DomainError(
+            "GITHUB_INSTALLATION_SUSPENDED",
+            "The GitHub installation is suspended.",
+          );
+        }
+        const granted = await github.getInstallationRepository(
+          body.installationId,
+          identity.owner,
+          identity.name,
+        );
+        if (
+          granted.html_url.replace(/\/+$/, "").toLowerCase() !== identity.canonicalUrl.toLowerCase()
+        ) {
+          throw new DomainError(
+            "GITHUB_REPOSITORY_NOT_GRANTED",
+            "The repository is not granted to this installation.",
+          );
+        }
+        visibility = granted.private ? "private" : "public";
+        providerRepoId = String(granted.id);
+        defaultBranch = granted.default_branch;
+        githubInstallationId = body.installationId;
+      }
       const result = await store.createRepositoryImport({
-        workspaceId: PUBLIC_WORKSPACE_ID,
+        workspaceId: principal.workspaceId,
         identity,
+        visibility,
+        providerRepoId,
+        defaultBranch,
+        githubInstallationId,
+        actorUserId: principal.userId,
+        actorKind: principal.kind,
         requestedRef: requireSafeRef(body.ref),
         ignore: body.ignore.map((item) => requireSafePath(item, "ignore pattern")),
         parserVersion: PARSER_VERSION,
@@ -473,24 +735,27 @@ export function registerRoutes(
   );
 
   app.get("/v1/repositories", async (request) =>
-    response(request, await store.listRepositories(PUBLIC_WORKSPACE_ID)),
+    response(
+      request,
+      await store.listRepositories((await requestPrincipal(request, store)).workspaceId),
+    ),
   );
 
   app.get("/v1/repositories/:repositoryId", async (request) => {
     const { repositoryId } = parseInput(repositoryParamsSchema, request.params);
+    await requireRepositoryAccess(request, store, repositoryId);
     const repository = await store.getRepository(repositoryId);
-    if (!repository) {
+    if (!repository)
       throw new DomainError("REPOSITORY_NOT_FOUND", "The requested repository does not exist.");
-    }
     return response(request, repository);
   });
 
   app.get("/v1/repositories/:repositoryId/snapshots", async (request) => {
     const { repositoryId } = parseInput(repositoryParamsSchema, request.params);
+    await requireRepositoryAccess(request, store, repositoryId);
     const repository = await store.getRepository(repositoryId);
-    if (!repository) {
+    if (!repository)
       throw new DomainError("REPOSITORY_NOT_FOUND", "The requested repository does not exist.");
-    }
     return response(request, await store.listSnapshots(repositoryId));
   });
 
@@ -504,13 +769,26 @@ export function registerRoutes(
     async (request, reply) => {
       const { repositoryId } = parseInput(repositoryParamsSchema, request.params);
       const body = parseInput(createPullRequestAnalysisRequestSchema, request.body);
+      const auth = await resolveRequestAuth(request, store);
+      requireWritePrincipal(auth.principal);
+      const access = await requireRepositoryAccess(request, store, repositoryId);
       const repository = await store.getRepository(repositoryId);
       if (!repository) {
         throw new DomainError("REPOSITORY_NOT_FOUND", "The requested repository does not exist.");
       }
-      const metadata = await fetchPublicPullRequest(config, repository, body.number);
+      const installationToken =
+        access?.githubInstallationId && auth.principal.kind !== "anonymous"
+          ? await github.installationToken(access.githubInstallationId)
+          : undefined;
+      const metadata = await fetchPullRequest(
+        config,
+        { ...repository, visibility: repository.visibility },
+        body.number,
+        fetch,
+        installationToken,
+      );
       const result = await store.createPullRequestAnalysis({
-        workspaceId: PUBLIC_WORKSPACE_ID,
+        workspaceId: auth.principal.workspaceId,
         repositoryId,
         prNumber: metadata.number,
         title: metadata.title,
@@ -528,6 +806,14 @@ export function registerRoutes(
 
   app.get("/v1/pull-request-analyses/:analysisId", async (request) => {
     const { analysisId } = parseInput(pullRequestAnalysisParamsSchema, request.params);
+    const principal = await requestPrincipal(request, store);
+    if (
+      typeof store.getPullRequestAnalysisAccess === "function"
+        ? !(await store.getPullRequestAnalysisAccess(analysisId, principal))
+        : !(await store.getPullRequestAnalysis(analysisId))
+    ) {
+      throw new DomainError("PR_ANALYSIS_NOT_FOUND", "The pull request analysis does not exist.");
+    }
     const analysis = await store.getPullRequestAnalysis(analysisId);
     if (!analysis) {
       throw new DomainError("PR_ANALYSIS_NOT_FOUND", "The pull request analysis does not exist.");
@@ -537,6 +823,14 @@ export function registerRoutes(
 
   app.get("/v1/pull-request-analyses/:analysisId/impact", async (request) => {
     const { analysisId } = parseInput(pullRequestAnalysisParamsSchema, request.params);
+    const principal = await requestPrincipal(request, store);
+    if (
+      typeof store.getPullRequestAnalysisAccess === "function"
+        ? !(await store.getPullRequestAnalysisAccess(analysisId, principal))
+        : !(await store.getPullRequestAnalysis(analysisId))
+    ) {
+      throw new DomainError("PR_ANALYSIS_NOT_FOUND", "The pull request analysis does not exist.");
+    }
     const { cursor, limit } = parseInput(impactQuerySchema, request.query);
     const page = await store.getPullRequestImpactPage(analysisId, limit, cursor);
     if (!page) {
@@ -547,6 +841,14 @@ export function registerRoutes(
 
   app.get("/v1/pull-request-analyses/:analysisId/events", async (request, reply) => {
     const { analysisId } = parseInput(pullRequestAnalysisParamsSchema, request.params);
+    const principal = await requestPrincipal(request, store);
+    if (
+      typeof store.getPullRequestAnalysisAccess === "function"
+        ? !(await store.getPullRequestAnalysisAccess(analysisId, principal))
+        : !(await store.getPullRequestAnalysis(analysisId))
+    ) {
+      throw new DomainError("PR_ANALYSIS_NOT_FOUND", "The pull request analysis does not exist.");
+    }
     const query = parseInput(eventQuerySchema, request.query);
     const header = request.headers["last-event-id"];
     const headerId = typeof header === "string" ? Number.parseInt(header, 10) : Number.NaN;
@@ -581,6 +883,15 @@ export function registerRoutes(
 
   app.post("/v1/pull-request-analyses/:analysisId/rerun", async (request, reply) => {
     const { analysisId } = parseInput(pullRequestAnalysisParamsSchema, request.params);
+    const auth = await resolveRequestAuth(request, store);
+    requireWritePrincipal(auth.principal);
+    if (
+      typeof store.getPullRequestAnalysisAccess === "function"
+        ? !(await store.getPullRequestAnalysisAccess(analysisId, auth.principal))
+        : !(await store.getPullRequestAnalysis(analysisId))
+    ) {
+      throw new DomainError("PR_ANALYSIS_NOT_FOUND", "The pull request analysis does not exist.");
+    }
     const analysis = await store.getPullRequestAnalysis(analysisId);
     if (!analysis) {
       throw new DomainError("PR_ANALYSIS_NOT_FOUND", "The pull request analysis does not exist.");
@@ -589,9 +900,19 @@ export function registerRoutes(
     if (!repository) {
       throw new DomainError("REPOSITORY_NOT_FOUND", "The requested repository does not exist.");
     }
-    const metadata = await fetchPublicPullRequest(config, repository, analysis.prNumber);
+    const installationToken =
+      repository.githubInstallationId && auth.principal.kind !== "anonymous"
+        ? await github.installationToken(repository.githubInstallationId)
+        : undefined;
+    const metadata = await fetchPullRequest(
+      config,
+      { ...repository, visibility: repository.visibility },
+      analysis.prNumber,
+      fetch,
+      installationToken,
+    );
     const result = await store.createPullRequestAnalysis({
-      workspaceId: PUBLIC_WORKSPACE_ID,
+      workspaceId: auth.principal.workspaceId,
       repositoryId: repository.id,
       prNumber: metadata.number,
       title: metadata.title,
@@ -609,6 +930,7 @@ export function registerRoutes(
 
   app.get("/v1/snapshots/:snapshotId", async (request) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    await requireSnapshotAccess(request, store, snapshotId);
     const snapshot = await store.getSnapshot(snapshotId);
     if (!snapshot) {
       throw new DomainError("SNAPSHOT_NOT_FOUND", "The requested snapshot does not exist.");
@@ -618,19 +940,28 @@ export function registerRoutes(
 
   app.get("/v1/snapshots/:snapshotId/exports/markdown", async (request, reply) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    await requireSnapshotAccess(request, store, snapshotId);
     const input = await loadSnapshotExport(store, snapshotId, "package");
-    return sendExport(reply, createMarkdownExport(input));
+    return sendExport(
+      reply,
+      createMarkdownExport(input),
+      input.repository.visibility === "private",
+    );
   });
 
   app.get("/v1/snapshots/:snapshotId/exports/svg", async (request, reply) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    await requireSnapshotAccess(request, store, snapshotId);
     const { level } = parseInput(svgExportQuerySchema, request.query);
     const input = await loadSnapshotExport(store, snapshotId, level);
-    return sendExport(reply, createSvgExport(input));
+    return sendExport(reply, createSvgExport(input), input.repository.visibility === "private");
   });
 
   app.post("/v1/snapshots/:snapshotId/cancel", async (request, reply) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    const auth = await resolveRequestAuth(request, store);
+    requireWritePrincipal(auth.principal);
+    await requireSnapshotAccess(request, store, snapshotId);
     const snapshot = await store.getSnapshot(snapshotId);
     if (!snapshot) {
       throw new DomainError("SNAPSHOT_NOT_FOUND", "The requested snapshot does not exist.");
@@ -647,6 +978,14 @@ export function registerRoutes(
 
   app.get("/v1/jobs/:jobId", async (request) => {
     const { jobId } = parseInput(jobParamsSchema, request.params);
+    const principal = await requestPrincipal(request, store);
+    if (
+      typeof store.getJobAccess === "function"
+        ? !(await store.getJobAccess(jobId, principal))
+        : !(await store.getJob(jobId))
+    ) {
+      throw new DomainError("JOB_NOT_FOUND", "The requested job does not exist.");
+    }
     const job = await store.getJob(jobId);
     if (!job) throw new DomainError("JOB_NOT_FOUND", "The requested job does not exist.");
     return response(request, job);
@@ -654,6 +993,14 @@ export function registerRoutes(
 
   app.get("/v1/jobs/:jobId/events", async (request, reply) => {
     const { jobId } = parseInput(jobParamsSchema, request.params);
+    const principal = await requestPrincipal(request, store);
+    if (
+      typeof store.getJobAccess === "function"
+        ? !(await store.getJobAccess(jobId, principal))
+        : !(await store.getJob(jobId))
+    ) {
+      throw new DomainError("JOB_NOT_FOUND", "The requested job does not exist.");
+    }
     const query = parseInput(eventQuerySchema, request.query);
     const header = request.headers["last-event-id"];
     const headerId = typeof header === "string" ? Number.parseInt(header, 10) : Number.NaN;
@@ -687,6 +1034,7 @@ export function registerRoutes(
 
   app.get("/v1/snapshots/:snapshotId/map", async (request) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    await requireSnapshotAccess(request, store, snapshotId);
     const query = parseInput(mapQuerySchema, request.query);
     const graphData = await store.getSnapshotGraphData(snapshotId);
     if (!graphData) {
@@ -713,6 +1061,7 @@ export function registerRoutes(
 
   app.get("/v1/snapshots/:snapshotId/files", async (request) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    await requireSnapshotAccess(request, store, snapshotId);
     const query = parseInput(filesQuerySchema, request.query);
     const snapshot = await store.getSnapshot(snapshotId);
     requireReadySnapshot(snapshot);
@@ -728,6 +1077,7 @@ export function registerRoutes(
 
   app.get("/v1/snapshots/:snapshotId/source", async (request) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    await requireSnapshotAccess(request, store, snapshotId);
     const query = parseInput(sourceQuerySchema, request.query);
     if (query.startLine && query.endLine && query.endLine < query.startLine) {
       throw new DomainError("SOURCE_RANGE_INVALID", "endLine must be greater than startLine.");
@@ -749,6 +1099,7 @@ export function registerRoutes(
 
   app.get("/v1/snapshots/:snapshotId/symbols/:symbolId", async (request) => {
     const { snapshotId, symbolId } = parseInput(snapshotSymbolParamsSchema, request.params);
+    await requireSnapshotAccess(request, store, snapshotId);
     const snapshot = await store.getSnapshot(snapshotId);
     requireReadySnapshot(snapshot);
     const symbol = await store.getSnapshotSymbolEvidence(snapshotId, symbolId);
@@ -763,6 +1114,7 @@ export function registerRoutes(
 
   app.get("/v1/snapshots/:snapshotId/retrieval", async (request) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    await requireSnapshotAccess(request, store, snapshotId);
     return response(
       request,
       await store.getRetrievalStatus({
@@ -776,6 +1128,9 @@ export function registerRoutes(
 
   app.post("/v1/snapshots/:snapshotId/embeddings", async (request, reply) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    const auth = await resolveRequestAuth(request, store);
+    requireWritePrincipal(auth.principal);
+    await requireSnapshotAccess(request, store, snapshotId);
     if (config.EMBEDDING_PROVIDER === "none" || !config.EMBEDDING_MODEL) {
       throw new DomainError(
         "EMBEDDING_PROVIDER_DISABLED",
@@ -784,7 +1139,7 @@ export function registerRoutes(
     }
     const result = await store.createOrRetryEmbeddingIndex({
       snapshotId,
-      workspaceId: PUBLIC_WORKSPACE_ID,
+      workspaceId: auth.principal.workspaceId,
       provider: config.EMBEDDING_PROVIDER,
       model: config.EMBEDDING_MODEL,
       inputVersion: EMBEDDING_INPUT_VERSION,
@@ -795,6 +1150,7 @@ export function registerRoutes(
 
   app.get("/v1/snapshots/:snapshotId/search", async (request) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    await requireSnapshotAccess(request, store, snapshotId);
     const query = parseInput(searchQuerySchema, request.query);
     const result = await retrieveEvidence(
       store,
@@ -815,6 +1171,9 @@ export function registerRoutes(
     async (request) => {
       const { repositoryId } = parseInput(repositoryParamsSchema, request.params);
       const body = parseInput(askBodySchema, request.body);
+      const auth = await resolveRequestAuth(request, store);
+      requireWritePrincipal(auth.principal);
+      await requireRepositoryAccess(request, store, repositoryId);
       const repository = await store.getRepository(repositoryId);
       if (!repository) {
         throw new DomainError("REPOSITORY_NOT_FOUND", "The requested repository does not exist.");
@@ -855,7 +1214,7 @@ export function registerRoutes(
       const draft = await provider.generate({ question: body.question, evidence, model });
       const answer = verifyModelAnswer(draft, evidence, provider.id, model);
       const messageId = await store.saveAnswer({
-        workspaceId: PUBLIC_WORKSPACE_ID,
+        workspaceId: auth.principal.workspaceId,
         repositoryId,
         snapshotId,
         question: body.question,
@@ -876,6 +1235,9 @@ export function registerRoutes(
     },
     async (request, reply) => {
       const body = parseInput(createShareRequestSchema, request.body);
+      const auth = await resolveRequestAuth(request, store);
+      requireWritePrincipal(auth.principal);
+      await requireSnapshotAccess(request, store, body.snapshotId);
       const graphData = await store.getSnapshotGraphData(body.snapshotId);
       if (!graphData) {
         throw new DomainError("SNAPSHOT_NOT_FOUND", "The requested snapshot does not exist.");
@@ -909,12 +1271,14 @@ export function registerRoutes(
               }
             : null,
       });
-      const report = await store.createShareReport(
-        repository.id,
-        graphData.snapshot.id,
-        title,
-        story,
-      );
+      const report =
+        auth.principal.kind === "anonymous" && body.visibility === undefined
+          ? await store.createShareReport(repository.id, graphData.snapshot.id, title, story)
+          : await store.createShareReport(repository.id, graphData.snapshot.id, title, story, {
+              requestedVisibility: body.visibility,
+              actorUserId: auth.principal.userId,
+              actorKind: auth.principal.kind,
+            });
       reply.code(201);
       return response(request, report);
     },
@@ -922,7 +1286,26 @@ export function registerRoutes(
 
   app.get("/v1/share-reports/:slug", async (request) => {
     const { slug } = parseInput(shareParamsSchema, request.params);
-    const report = await store.getShareReport(slug);
+    const principal = await requestPrincipal(request, store);
+    const reportAccess =
+      typeof store.getShareReportAccess === "function"
+        ? await store.getShareReportAccess(slug, principal)
+        : (await store.getShareReport(slug))
+          ? {
+              repositoryId: "legacy",
+              workspaceId: principal.workspaceId,
+              visibility: "public" as const,
+              githubInstallationId: null,
+              role: principal.role,
+            }
+          : null;
+    if (!reportAccess)
+      throw new DomainError("SHARE_REPORT_NOT_FOUND", "The share report does not exist.");
+    // The access query may authorize a public report from the public workspace
+    // while the caller's active workspace is private. Fetch using the
+    // repository workspace returned by the same access check, never by the
+    // caller-selected workspace.
+    const report = await store.getShareReport(slug, reportAccess.workspaceId);
     if (!report) {
       throw new DomainError("SHARE_REPORT_NOT_FOUND", "The share report does not exist.");
     }

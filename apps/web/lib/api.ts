@@ -1,4 +1,6 @@
 import type {
+  ApiTokenMetadata,
+  AuthSession,
   AskResult as ContractAskResult,
   CreateEmbeddingIndexResponse,
   GitHubIntegrationStatus,
@@ -16,6 +18,8 @@ import type {
   Snapshot,
   SnapshotSymbolEvidence,
   SourceFile,
+  WorkspaceMember,
+  WorkspaceSummary,
 } from "@repovista/contracts";
 
 export const apiOrigin =
@@ -53,6 +57,12 @@ export class ApiError extends Error {
   }
 }
 
+let csrfToken: string | null = null;
+
+export function setApiCsrfToken(value: string | null): void {
+  csrfToken = value;
+}
+
 export function apiErrorMessage(cause: unknown, fallback: string): string {
   if (!(cause instanceof ApiError)) return fallback;
   return `${cause.message}${cause.requestId ? ` Request ID: ${cause.requestId}` : ""}`;
@@ -75,6 +85,80 @@ export function snapshotExportUrl(
   return `${apiOrigin}/v1/snapshots/${encodedSnapshotId}${suffix}`;
 }
 
+export type SnapshotExportFormat = "markdown" | "svg";
+
+export interface SnapshotExportDownload {
+  blob: Blob;
+  filename: string;
+}
+
+function defaultExportFilename(
+  snapshotId: string,
+  format: SnapshotExportFormat,
+  level: "package" | "file" | "symbol",
+): string {
+  const extension = format === "markdown" ? "md" : "svg";
+  const suffix = format === "svg" ? `-${level}` : "";
+  return `repovista-${snapshotId}${suffix}.${extension}`;
+}
+
+function contentDispositionFilename(value: string | null): string | null {
+  if (!value) return null;
+  const encoded = value.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const plain =
+    value.match(/filename\s*=\s*"([^"]+)"/i)?.[1] ?? value.match(/filename\s*=\s*([^;]+)/i)?.[1];
+  let candidate = plain;
+  if (encoded) {
+    try {
+      candidate = decodeURIComponent(encoded);
+    } catch {
+      candidate = encoded;
+    }
+  }
+  if (!candidate) return null;
+  const safe = Array.from(candidate, (character) => {
+    const code = character.charCodeAt(0);
+    return character === "/" || character === "\\" || code < 0x20 || code === 0x7f
+      ? "_"
+      : character;
+  })
+    .join("")
+    .trim();
+  return safe || null;
+}
+
+/**
+ * Fetch an export as an authenticated browser request. Direct cross-origin
+ * anchor navigation cannot reliably carry the active workspace cookie, while
+ * this request explicitly opts into credentials and turns the response into a
+ * local Blob download.
+ */
+export async function fetchSnapshotExport(
+  snapshotId: string,
+  format: SnapshotExportFormat,
+  level: "package" | "file" | "symbol" = "package",
+): Promise<SnapshotExportDownload> {
+  const response = await fetch(snapshotExportUrl(snapshotId, format, level), {
+    credentials: "include",
+    headers: { Accept: format === "markdown" ? "text/markdown" : "image/svg+xml" },
+  });
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as ApiFailure | null;
+    const failure = payload && "error" in payload ? payload.error : undefined;
+    throw new ApiError(failure?.message ?? `Export failed with status ${response.status}.`, {
+      code: failure?.code ?? "EXPORT_FAILED",
+      requestId: failure?.requestId ?? response.headers.get("x-request-id") ?? undefined,
+      retryable: failure?.retryable,
+    });
+  }
+  return {
+    blob: await response.blob(),
+    filename:
+      contentDispositionFilename(response.headers.get("content-disposition")) ??
+      defaultExportFilename(snapshotId, format, level),
+  };
+}
+
 export function vscodeEvidenceUrl(input: {
   repositoryId: string;
   snapshotId: string;
@@ -95,14 +179,18 @@ export function vscodeEvidenceUrl(input: {
 }
 
 export async function apiFetch<T>(pathname: string, init: RequestInit = {}): Promise<T> {
+  const method = (init.method ?? "GET").toUpperCase();
+  const mutation = !["GET", "HEAD", "OPTIONS"].includes(method);
+  const headers = new Headers(init.headers);
+  headers.set("Accept", "application/json");
+  if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (mutation && csrfToken) headers.set("X-RepoVista-CSRF", csrfToken);
   const response = await fetch(`${apiOrigin}${pathname}`, {
     ...init,
-    headers: {
-      Accept: "application/json",
-      ...(init.body ? { "Content-Type": "application/json" } : {}),
-      ...init.headers,
-    },
+    credentials: "include",
+    headers,
   });
+  if (response.status === 204) return undefined as T;
   const payload = (await response.json().catch(() => null)) as ApiEnvelope<T> | ApiFailure | null;
   if (!response.ok) {
     const failure = payload && "error" in payload ? payload.error : undefined;
@@ -159,11 +247,14 @@ export interface ShareReport {
   id: string;
   slug: string;
   title: string;
+  visibility: "private" | "unlisted" | "public";
   repository: RepositorySummary;
   snapshot: Snapshot;
   content: ShareReportContent;
   createdAt: string;
 }
+
+export type { ApiTokenMetadata, AuthSession, WorkspaceMember, WorkspaceSummary };
 
 export type {
   GitHubIntegrationStatus,

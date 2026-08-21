@@ -107,6 +107,18 @@ export async function executePullRequestAnalysisJob(
   lease.start();
   try {
     await lease.checkpoint();
+    if (job.visibility === "private" && !job.githubInstallationId) {
+      throw new DomainError(
+        "GITHUB_INSTALLATION_NOT_FOUND",
+        "The private repository is no longer connected to a GitHub installation.",
+      );
+    }
+    if (job.visibility === "private" && job.githubInstallationSuspended) {
+      throw new DomainError(
+        "GITHUB_INSTALLATION_SUSPENDED",
+        "The GitHub installation for this private repository is suspended.",
+      );
+    }
     if (await store.isCancellationRequested(job.id)) {
       await store.cancelPullRequestAnalysis(job.id, job.analysisId, config.WORKER_ID);
       return "cancelled";

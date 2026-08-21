@@ -41,12 +41,17 @@ function safeGitHubPath(value: string): string {
   return normalized;
 }
 
-function githubHeaders(config: Pick<AppConfig, "GITHUB_API_TOKEN">): HeadersInit {
+function githubHeaders(
+  config: Pick<AppConfig, "GITHUB_API_TOKEN">,
+  accessToken?: string,
+): HeadersInit {
   return {
     Accept: "application/vnd.github+json",
-    "User-Agent": "RepoVista/0.3",
+    "User-Agent": "RepoVista/0.5",
     "X-GitHub-Api-Version": "2022-11-28",
-    ...(config.GITHUB_API_TOKEN ? { Authorization: `Bearer ${config.GITHUB_API_TOKEN}` } : {}),
+    ...(accessToken || config.GITHUB_API_TOKEN
+      ? { Authorization: `Bearer ${accessToken ?? config.GITHUB_API_TOKEN}` }
+      : {}),
   };
 }
 
@@ -109,7 +114,7 @@ async function githubRequest(
   }
 }
 
-export interface PublicPullRequestMetadata {
+export interface PullRequestMetadata {
   number: number;
   title: string;
   url: string;
@@ -118,16 +123,22 @@ export interface PublicPullRequestMetadata {
   files: PullRequestFileChange[];
 }
 
-export async function fetchPublicPullRequest(
+export async function fetchPullRequest(
   config: Pick<AppConfig, "GITHUB_API_ORIGIN" | "GITHUB_API_TOKEN">,
-  repository: { owner: string; name: string; canonicalUrl: string },
+  repository: {
+    owner: string;
+    name: string;
+    canonicalUrl: string;
+    visibility?: "public" | "private";
+  },
   number: number,
   fetcher: typeof fetch = fetch,
-): Promise<PublicPullRequestMetadata> {
+  accessToken?: string,
+): Promise<PullRequestMetadata> {
   const origin = config.GITHUB_API_ORIGIN.replace(/\/$/, "");
   const encodedOwner = encodeURIComponent(repository.owner);
   const encodedName = encodeURIComponent(repository.name);
-  const headers = githubHeaders(config);
+  const headers = githubHeaders(config, accessToken);
   const response = await githubRequest(
     fetcher,
     `${origin}/repos/${encodedOwner}/${encodedName}/pulls/${number}`,
@@ -144,14 +155,14 @@ export async function fetchPublicPullRequest(
   const pullRequest = parsed.data;
   if (
     pullRequest.number !== number ||
-    pullRequest.base.repo.private ||
+    pullRequest.base.repo.private !== (repository.visibility === "private") ||
     pullRequest.base.repo.full_name.toLowerCase() !==
       `${repository.owner}/${repository.name}`.toLowerCase() ||
     pullRequest.html_url !== `${repository.canonicalUrl}/pull/${number}`
   ) {
     throw new DomainError(
       "GITHUB_PULL_REQUEST_INVALID",
-      "The pull request does not belong to the selected public repository.",
+      "The pull request does not belong to the selected repository.",
     );
   }
 
@@ -209,3 +220,6 @@ export async function fetchPublicPullRequest(
     files,
   };
 }
+
+/** Backwards-compatible public-only wrapper used by v0.4 fixtures. */
+export const fetchPublicPullRequest = fetchPullRequest;

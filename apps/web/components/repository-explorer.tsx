@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, type MouseEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { ArchitectureMap } from "@/components/architecture-map";
 import { AutomationStatus } from "@/components/automation-status";
 import { RetrievalLab } from "@/components/retrieval-lab";
@@ -40,10 +40,12 @@ import {
   apiErrorMessage,
   apiFetch,
   type CreateRepositoryResult,
+  fetchSnapshotExport,
   type GitHubIntegrationStatus,
   type GraphResponse,
   type RepositorySummary,
   type Snapshot,
+  type SnapshotExportFormat,
   type SnapshotFilePage,
   type SnapshotFileSummary,
   type SourceFile,
@@ -108,6 +110,7 @@ export function RepositoryExplorer({
   const [loading, setLoading] = useState(true);
   const [graphLoading, setGraphLoading] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [exporting, setExporting] = useState<SnapshotExportFormat | null>(null);
   const [reindexing, setReindexing] = useState(false);
   const [prNumber, setPrNumber] = useState("");
   const [creatingImpact, setCreatingImpact] = useState(false);
@@ -261,6 +264,7 @@ export function RepositoryExplorer({
         body: JSON.stringify({
           snapshotId: snapshot.id,
           title: `${repository.owner}/${repository.name} architecture story`,
+          visibility: repository.visibility === "private" ? "private" : "public",
         }),
       });
       const destination = `/share/${report.slug}`;
@@ -291,6 +295,33 @@ export function RepositoryExplorer({
     } catch (cause) {
       setError(apiErrorMessage(cause, "Unable to start reindexing."));
       setReindexing(false);
+    }
+  }
+
+  async function downloadExport(
+    event: MouseEvent<HTMLAnchorElement>,
+    format: SnapshotExportFormat,
+    level: "package" | "file" | "symbol" = "package",
+  ) {
+    event.preventDefault();
+    if (!snapshot) return;
+    setExporting(format);
+    setError(null);
+    try {
+      const artifact = await fetchSnapshotExport(snapshot.id, format, level);
+      const objectUrl = URL.createObjectURL(artifact.blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = artifact.filename;
+      anchor.rel = "noopener";
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    } catch (cause) {
+      setError(apiErrorMessage(cause, "Unable to download the snapshot export."));
+    } finally {
+      setExporting(null);
     }
   }
 
@@ -591,19 +622,31 @@ export function RepositoryExplorer({
                     className="secondary-button"
                     download
                     href={snapshotExportUrl(snapshot.id, "markdown")}
+                    onClick={(event) => void downloadExport(event, "markdown")}
                     rel="noopener noreferrer"
                     target="_blank"
                   >
-                    <FileCode2 size={15} aria-hidden /> Download Markdown
+                    {exporting === "markdown" ? (
+                      <LoaderCircle className="spin" size={15} />
+                    ) : (
+                      <FileCode2 size={15} aria-hidden />
+                    )}{" "}
+                    Download Markdown
                   </a>
                   <a
                     className="secondary-button"
                     download
                     href={snapshotExportUrl(snapshot.id, "svg", "package")}
+                    onClick={(event) => void downloadExport(event, "svg", "package")}
                     rel="noopener noreferrer"
                     target="_blank"
                   >
-                    <MapIcon size={15} aria-hidden /> Download SVG
+                    {exporting === "svg" ? (
+                      <LoaderCircle className="spin" size={15} />
+                    ) : (
+                      <MapIcon size={15} aria-hidden />
+                    )}{" "}
+                    Download SVG
                   </a>
                 </div>
               </article>
