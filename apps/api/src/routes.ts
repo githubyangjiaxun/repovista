@@ -26,6 +26,7 @@ import {
 import { parseGitHubUrl } from "@repovista/git";
 import type { GitHubAppClient } from "@repovista/github";
 import { buildGraphView, type GraphView } from "@repovista/graph";
+import { buildGuardrailReport, buildSarifReport } from "@repovista/guardrails";
 import { IMPACT_ALGORITHM_VERSION } from "@repovista/impact";
 import { buildArchitectureStory } from "@repovista/story";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -457,6 +458,26 @@ function sendExport(reply: FastifyReply, artifact: ExportArtifact, isPrivate: bo
     );
   }
   return reply.send(artifact.body);
+}
+
+async function loadGuardrailReport(store: RepoVistaStore, snapshotId: string) {
+  const graphData = await store.getSnapshotGraphData(snapshotId);
+  if (!graphData) {
+    throw new DomainError("SNAPSHOT_NOT_FOUND", "The requested snapshot does not exist.");
+  }
+  requireReadySnapshot(graphData.snapshot);
+  return buildGuardrailReport({
+    snapshot: {
+      id: graphData.snapshot.id,
+      commitSha: graphData.snapshot.commitSha,
+      parserVersion: graphData.snapshot.parserVersion,
+      requestedAt: graphData.snapshot.requestedAt,
+      readyAt: graphData.snapshot.readyAt,
+    },
+    files: graphData.files,
+    symbols: graphData.symbols,
+    edges: graphData.edges,
+  });
 }
 
 export function registerRoutes(
@@ -955,6 +976,35 @@ export function registerRoutes(
     const { level } = parseInput(svgExportQuerySchema, request.query);
     const input = await loadSnapshotExport(store, snapshotId, level);
     return sendExport(reply, createSvgExport(input), input.repository.visibility === "private");
+  });
+
+  app.get("/v1/snapshots/:snapshotId/guardrails", async (request) => {
+    const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    await requireSnapshotAccess(request, store, snapshotId);
+    return response(request, await loadGuardrailReport(store, snapshotId));
+  });
+
+  app.get("/v1/snapshots/:snapshotId/guardrails/sarif", async (request, reply) => {
+    const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    const access = await requireSnapshotAccess(request, store, snapshotId);
+    const report = await loadGuardrailReport(store, snapshotId);
+    const body = JSON.stringify(buildSarifReport(report), null, 2);
+    const etag = `"sha256-${createHash("sha256").update(body).digest("base64url")}"`;
+    return reply
+      .header(
+        "Cache-Control",
+        access?.visibility === "private"
+          ? "private, no-store"
+          : "public, max-age=0, must-revalidate",
+      )
+      .header(
+        "Content-Disposition",
+        `attachment; filename="repovista-${snapshotId}-guardrails.sarif"`,
+      )
+      .header("Content-Type", "application/sarif+json; charset=utf-8")
+      .header("ETag", etag)
+      .header("X-Content-Type-Options", "nosniff")
+      .send(body);
   });
 
   app.post("/v1/snapshots/:snapshotId/cancel", async (request, reply) => {

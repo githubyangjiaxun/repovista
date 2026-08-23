@@ -26,6 +26,7 @@
     "@repovista/embeddings": "workspace:*",
     "@repovista/exporter": "workspace:*",
     "@repovista/git": "workspace:*",
+    "@repovista/guardrails": "workspace:*",
     "@repovista/graph": "workspace:*",
     "@repovista/github": "workspace:*",
     "@repovista/impact": "workspace:*",

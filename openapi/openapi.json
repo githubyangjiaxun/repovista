@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RepoVista API",
-    "version": "0.5.0",
-    "description": "Evidence-first repository indexing with private GitHub App access, Workspace authorization, auditable sessions, API tokens, versioned semantic indexes, transparent hybrid retrieval, deterministic architecture stories, pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, and grounded answers."
+    "version": "0.6.0",
+    "description": "Evidence-first repository indexing with private GitHub App access, Workspace authorization, deterministic Architecture Guardrails and SARIF, auditable sessions, API tokens, versioned semantic indexes, transparent hybrid retrieval, architecture stories, pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, and grounded answers."
   },
   "servers": [
     {
@@ -720,6 +720,100 @@
           },
           "400": {
             "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/guardrails": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SnapshotId"
+        }
+      ],
+      "get": {
+        "operationId": "getSnapshotGuardrails",
+        "summary": "Evaluate deterministic architecture guardrails for an immutable snapshot",
+        "tags": ["Snapshots"],
+        "responses": {
+          "200": {
+            "description": "Commit-pinned Architecture Guardrails report",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/GuardrailReport"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/guardrails/sarif": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SnapshotId"
+        }
+      ],
+      "get": {
+        "operationId": "exportSnapshotGuardrailsSarif",
+        "summary": "Download Architecture Guardrails as SARIF 2.1.0",
+        "tags": ["Snapshots"],
+        "responses": {
+          "200": {
+            "description": "Commit-pinned SARIF report without source contents",
+            "headers": {
+              "Content-Disposition": {
+                "description": "Safe attachment filename",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "description": "Digest of the deterministic response body",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/sarif+json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["version", "runs"],
+                  "properties": {
+                    "version": {
+                      "const": "2.1.0"
+                    },
+                    "runs": {
+                      "type": "array"
+                    }
+                  }
+                }
+              }
+            }
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -3190,6 +3284,196 @@
           },
           "truncated": {
             "type": "boolean"
+          }
+        }
+      },
+      "GuardrailEvidence": {
+        "type": "object",
+        "required": ["path", "startLine", "endLine", "description"],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "startLine": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "endLine": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "description": {
+            "type": "string"
+          }
+        }
+      },
+      "GuardrailFinding": {
+        "type": "object",
+        "required": [
+          "id",
+          "fingerprint",
+          "ruleId",
+          "severity",
+          "title",
+          "message",
+          "path",
+          "startLine",
+          "endLine",
+          "metric",
+          "evidence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "ruleId": {
+            "type": "string",
+            "enum": [
+              "dependency_cycle",
+              "large_file",
+              "large_symbol",
+              "high_fan_in",
+              "unresolved_import",
+              "parse_failure"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["error", "warning", "info"]
+          },
+          "title": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "startLine": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "endLine": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "metric": {
+            "type": "object",
+            "additionalProperties": {
+              "type": ["number", "string"]
+            }
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "$ref": "#/components/schemas/GuardrailEvidence"
+            }
+          }
+        }
+      },
+      "GuardrailReport": {
+        "type": "object",
+        "required": [
+          "algorithmVersion",
+          "snapshot",
+          "generatedAt",
+          "status",
+          "summary",
+          "thresholds",
+          "findings"
+        ],
+        "properties": {
+          "algorithmVersion": {
+            "type": "string"
+          },
+          "snapshot": {
+            "type": "object",
+            "required": ["id", "commitSha", "parserVersion"],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              "commitSha": {
+                "type": "string",
+                "pattern": "^[a-fA-F0-9]{7,64}$"
+              },
+              "parserVersion": {
+                "type": "string"
+              }
+            }
+          },
+          "generatedAt": {
+            "$ref": "#/components/schemas/DateTime"
+          },
+          "status": {
+            "type": "string",
+            "enum": ["pass", "warn", "fail"]
+          },
+          "summary": {
+            "type": "object",
+            "required": ["total", "errors", "warnings", "infos"],
+            "properties": {
+              "total": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "errors": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "warnings": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "infos": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "thresholds": {
+            "type": "object",
+            "required": [
+              "cycleMaxLength",
+              "largeFileLines",
+              "largeFileBytes",
+              "largeSymbolLines",
+              "highFanIn"
+            ],
+            "properties": {
+              "cycleMaxLength": {
+                "type": "integer",
+                "minimum": 2
+              },
+              "largeFileLines": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "largeFileBytes": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "largeSymbolLines": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "highFanIn": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GuardrailFinding"
+            }
           }
         }
       },

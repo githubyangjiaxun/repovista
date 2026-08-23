@@ -74,6 +74,9 @@ importers:
       '@repovista/graph':
         specifier: workspace:*
         version: link:../../packages/graph
+      '@repovista/guardrails':
+        specifier: workspace:*
+        version: link:../../packages/guardrails
       '@repovista/impact':
         specifier: workspace:*
         version: link:../../packages/impact

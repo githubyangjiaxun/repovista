@@ -1278,6 +1278,73 @@ describe("RepoVista API", () => {
     expect(result.headers["cache-control"]).toBe("private, no-store");
   });
 
+  it("returns deterministic guardrails and a source-free SARIF export", async () => {
+    const store = createStore();
+    const graphData = await store.getSnapshotGraphData(snapshotId);
+    if (!graphData) throw new Error("Expected graph data fixture.");
+    vi.mocked(store.getSnapshotGraphData).mockResolvedValue({
+      ...graphData,
+      files: graphData.files.map((file) => ({ ...file, lineCount: 801, byteSize: 120_000 })),
+    });
+    const { app } = createTestApp(store);
+    openApps.push(app);
+
+    const report = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/guardrails`,
+    });
+    const sarif = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/guardrails/sarif`,
+    });
+
+    expect(report.statusCode).toBe(200);
+    expect(report.json().data).toMatchObject({
+      algorithmVersion: "architecture-guardrails-v1",
+      status: "warn",
+      snapshot: { id: snapshotId, commitSha: snapshot.commitSha },
+      summary: { total: 1, warnings: 1 },
+    });
+    expect(report.json().data.findings[0]).toMatchObject({
+      ruleId: "large_file",
+      path: "src/index.ts",
+    });
+    expect(sarif.statusCode).toBe(200);
+    expect(sarif.headers["content-type"]).toBe("application/sarif+json; charset=utf-8");
+    expect(sarif.headers["content-disposition"]).toBe(
+      `attachment; filename="repovista-${snapshotId}-guardrails.sarif"`,
+    );
+    expect(sarif.headers["cache-control"]).toBe("public, max-age=0, must-revalidate");
+    expect(sarif.json()).toMatchObject({ version: "2.1.0" });
+    expect(sarif.body).not.toContain("export function hello");
+  });
+
+  it("marks private Guardrails SARIF as non-cacheable", async () => {
+    const store = createStore();
+    const privateStore = store as unknown as {
+      getSnapshotAccess: ReturnType<typeof vi.fn>;
+    };
+    privateStore.getSnapshotAccess = vi.fn(async () => ({
+      repositoryId,
+      workspaceId,
+      visibility: "private" as const,
+      githubInstallationId: null,
+      role: "owner" as const,
+    }));
+    const auth = authenticateOwner(store);
+    const { app } = createTestApp(store);
+    openApps.push(app);
+
+    const result = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/guardrails/sarif`,
+      headers: { cookie: auth.cookie },
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.headers["cache-control"]).toBe("private, no-store");
+  });
+
   it("rejects export requests until the exact snapshot is ready", async () => {
     const store = createStore();
     const graphData = await store.getSnapshotGraphData(snapshotId);
