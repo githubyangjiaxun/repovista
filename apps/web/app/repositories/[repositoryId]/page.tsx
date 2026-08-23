@@ -2,7 +2,7 @@ import type { RetrievalMode } from "@repovista/contracts";
 import { RepositoryExplorer } from "@/components/repository-explorer";
 
 const retrievalModes = new Set<RetrievalMode>(["text", "symbol", "semantic", "hybrid"]);
-const workspaceTabs = new Set(["overview", "map", "search", "ask"]);
+const workspaceTabs = new Set(["overview", "map", "guardrails", "search", "ask"]);
 
 function one(value: string | string[] | undefined): string | undefined {
   return typeof value === "string" ? value : undefined;
@@ -27,7 +27,9 @@ export default async function RepositoryPage({
       }
       initialSearchQuery={one(query.q) ?? ""}
       initialTab={
-        tab && workspaceTabs.has(tab) ? (tab as "overview" | "map" | "search" | "ask") : "overview"
+        tab && workspaceTabs.has(tab)
+          ? (tab as "overview" | "map" | "guardrails" | "search" | "ask")
+          : "overview"
       }
       repositoryId={repositoryId}
       snapshotId={typeof query.snapshotId === "string" ? query.snapshotId : undefined}

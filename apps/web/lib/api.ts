@@ -5,6 +5,7 @@ import type {
   CreateEmbeddingIndexResponse,
   GitHubIntegrationStatus,
   GraphResponse,
+  GuardrailReport,
   Job,
   PullRequestAnalysis,
   PullRequestFileChange,
@@ -92,6 +93,11 @@ export interface SnapshotExportDownload {
   filename: string;
 }
 
+export interface GuardrailSarifDownload {
+  blob: Blob;
+  filename: string;
+}
+
 function defaultExportFilename(
   snapshotId: string,
   format: SnapshotExportFormat,
@@ -156,6 +162,31 @@ export async function fetchSnapshotExport(
     filename:
       contentDispositionFilename(response.headers.get("content-disposition")) ??
       defaultExportFilename(snapshotId, format, level),
+  };
+}
+
+export async function fetchGuardrailSarif(snapshotId: string): Promise<GuardrailSarifDownload> {
+  const response = await fetch(
+    `${apiOrigin}/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/sarif`,
+    {
+      credentials: "include",
+      headers: { Accept: "application/sarif+json" },
+    },
+  );
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as ApiFailure | null;
+    const failure = payload && "error" in payload ? payload.error : undefined;
+    throw new ApiError(failure?.message ?? `SARIF export failed with status ${response.status}.`, {
+      code: failure?.code ?? "GUARDRAIL_EXPORT_FAILED",
+      requestId: failure?.requestId ?? response.headers.get("x-request-id") ?? undefined,
+      retryable: failure?.retryable,
+    });
+  }
+  return {
+    blob: await response.blob(),
+    filename:
+      contentDispositionFilename(response.headers.get("content-disposition")) ??
+      `repovista-${snapshotId}-guardrails.sarif`,
   };
 }
 
@@ -242,6 +273,7 @@ export interface SnapshotFilePage {
 export type AskResult = ContractAskResult;
 
 export type { CreateEmbeddingIndexResponse, RetrievalStatus, SearchResult };
+export type { GuardrailReport };
 
 export interface ShareReport {
   id: string;

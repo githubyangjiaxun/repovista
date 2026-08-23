@@ -24,6 +24,7 @@ import {
   Search,
   Send,
   Share2,
+  ShieldCheck,
   Sparkles,
   X,
 } from "lucide-react";
@@ -32,6 +33,7 @@ import { useRouter } from "next/navigation";
 import { type FormEvent, type MouseEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { ArchitectureMap } from "@/components/architecture-map";
 import { AutomationStatus } from "@/components/automation-status";
+import { GuardrailsPanel } from "@/components/guardrails-panel";
 import { RetrievalLab } from "@/components/retrieval-lab";
 import { SnapshotDelta } from "@/components/snapshot-delta";
 import {
@@ -52,7 +54,7 @@ import {
   snapshotExportUrl,
 } from "@/lib/api";
 
-type WorkspaceTab = "ask" | "map" | "overview" | "search";
+type WorkspaceTab = "ask" | "guardrails" | "map" | "overview" | "search";
 
 const exampleQuestions = [
   "Where does this application start?",
@@ -451,6 +453,13 @@ export function RepositoryExplorer({
             <Bot size={17} /> Ask repository
           </button>
           <button
+            className={tab === "guardrails" ? "active" : ""}
+            onClick={() => selectTab("guardrails")}
+            type="button"
+          >
+            <ShieldCheck size={17} /> Guardrails
+          </button>
+          <button
             className={tab === "search" ? "active" : ""}
             onClick={() => selectTab("search")}
             type="button"
@@ -832,6 +841,10 @@ export function RepositoryExplorer({
             onSearchSubmitted={updateSearchUrl}
             snapshotId={snapshot.id}
           />
+        ) : null}
+
+        {tab === "guardrails" ? (
+          <GuardrailsPanel onOpenSource={openSource} snapshotId={snapshot.id} />
         ) : null}
       </main>
 
