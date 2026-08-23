@@ -11,8 +11,10 @@ import {
   createRepositoryResponseSchema,
   type GitHubInstallation,
   type GitHubInstallationRepositoryPage,
+  type GuardrailReport,
   githubInstallationRepositoryPageSchema,
   githubInstallationSchema,
+  guardrailReportSchema,
   type Job,
   jobSchema,
   type RepositorySummary,
@@ -228,6 +230,72 @@ export class RepoVistaClient {
       { method: "POST" },
       (value) => createEmbeddingIndexResponseSchema.parse(value),
     );
+  }
+
+  getGuardrails(snapshotId: string): Promise<GuardrailReport> {
+    return this.requestEnvelope(
+      `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails`,
+      {},
+      (value) => guardrailReportSchema.parse(value),
+    );
+  }
+
+  async downloadGuardrailsSarif(snapshotId: string): Promise<{ body: string; filename: string }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const headers = new Headers({
+      Accept: "application/sarif+json",
+      "User-Agent": CLI_USER_AGENT,
+    });
+    if (this.apiToken) headers.set("Authorization", `Bearer ${this.apiToken}`);
+    let response: Response;
+    try {
+      response = await this.fetchImplementation(
+        `${this.apiUrl}/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/sarif`,
+        { headers, signal: controller.signal },
+      );
+    } catch (cause) {
+      if (controller.signal.aborted) {
+        throw new ApiError(`The API request timed out after ${this.requestTimeoutMs}ms.`, {
+          cause,
+          code: "REQUEST_TIMEOUT",
+          retryable: true,
+        });
+      }
+      throw new ApiError(`Unable to reach the RepoVista API at ${this.apiUrl}.`, {
+        cause,
+        code: "API_UNREACHABLE",
+        retryable: true,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+    const body = await response.text();
+    if (!response.ok) {
+      let payload: unknown = null;
+      try {
+        payload = JSON.parse(body);
+      } catch {
+        // Keep the stable HTTP error below when a proxy returns non-JSON.
+      }
+      const failure = isApiFailure(payload) ? payload.error : undefined;
+      throw new ApiError(
+        failure?.message ?? `The API request failed with HTTP ${response.status}.`,
+        {
+          code: failure?.code ?? `HTTP_${response.status}`,
+          details: failure?.details,
+          requestId: failure?.requestId ?? response.headers.get("x-request-id") ?? undefined,
+          retryable: failure?.retryable ?? response.status >= 500,
+          status: response.status,
+        },
+      );
+    }
+    const disposition = response.headers.get("content-disposition") ?? "";
+    const filename =
+      disposition.match(/filename\s*=\s*"([^"]+)"/i)?.[1] ??
+      disposition.match(/filename\s*=\s*([^;]+)/i)?.[1]?.trim() ??
+      `repovista-${snapshotId}-guardrails.sarif`;
+    return { body, filename };
   }
 
   private async requestEnvelope<T>(

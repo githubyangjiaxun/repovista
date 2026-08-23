@@ -1,6 +1,8 @@
+import { chmod, writeFile } from "node:fs/promises";
 import type { AskResult } from "@repovista/contracts";
 import {
   createRepositoryRequestSchema,
+  type GuardrailReport,
   idSchema,
   type Job,
   type RepositorySummary,
@@ -41,6 +43,7 @@ const mainHelp = [
   "  ask <repository-id>     Ask an evidence-backed question",
   "  search <snapshot-id>    Search fixed snapshot evidence",
   "  embed <snapshot-id>     Build a semantic embedding index",
+  "  guardrails <snapshot-id> Evaluate deterministic architecture guardrails",
   "  auth <action>           Login, inspect, or remove local CLI authentication",
   "  workspace <action>      List or select locally authenticated workspaces",
   "  github <action>         List GitHub App installations or repositories",
@@ -100,6 +103,15 @@ const commandHelp: Record<string, string> = {
     "  --wait                  Wait for the embedding job to finish",
     "  --poll-interval <n>     Poll interval while waiting (default: 2s)",
     "  --timeout <n>           Maximum wait time (default: 15m)",
+  ].join("\n"),
+  guardrails: [
+    "Usage: repovista guardrails <snapshot-id> [options]",
+    "",
+    "Options:",
+    "  --sarif <file>          Save a SARIF 2.1.0 report to a local file",
+    "  --json                  Emit the complete Guardrails JSON report",
+    "",
+    "Exit codes: 0 means no error-level findings; 2 means at least one error-level finding.",
   ].join("\n"),
   doctor: "Usage: repovista doctor [--json]",
   auth: [
@@ -384,6 +396,29 @@ function formatSearch(result: SearchResult): string {
   return lines.join("\n");
 }
 
+function formatGuardrails(report: GuardrailReport, sarifPath?: string): string {
+  const lines = [
+    `Guardrails: ${report.status}`,
+    `Snapshot: ${report.snapshot.id}`,
+    `Commit: ${report.snapshot.commitSha.slice(0, 12)}`,
+    `Findings: ${report.summary.total} (${report.summary.errors} errors, ${report.summary.warnings} warnings, ${report.summary.infos} infos)`,
+    `Algorithm: ${report.algorithmVersion}`,
+  ];
+  if (report.findings.length > 0) {
+    lines.push("", "Findings:");
+    for (const item of report.findings) {
+      lines.push(
+        `- [${item.severity}] ${item.ruleId} ${item.path}:${item.startLine}-${item.endLine}`,
+        `  ${item.message}`,
+      );
+    }
+  } else {
+    lines.push("", "No guardrail findings.");
+  }
+  if (sarifPath) lines.push("", `SARIF: ${sarifPath}`);
+  return lines.join("\n");
+}
+
 function writeJson(output: CliOutput, value: unknown): void {
   output.stdout(JSON.stringify(value, null, 2));
 }
@@ -580,6 +615,7 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
       ask: { model: "string", provider: "string", snapshot: "string" },
       search: { limit: "string", mode: "string" },
       embed: { poll_interval: "string", timeout: "string", wait: "boolean" },
+      guardrails: { sarif: "string" },
       doctor: {},
       auth: {},
       workspace: {},
@@ -938,6 +974,23 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
       if (json) writeJson(output, { ...queued, job });
       else output.stdout(formatJob(job));
       return unsuccessful(job) ? 3 : 0;
+    }
+
+    if (command === "guardrails") {
+      if (parsed.positionals.length !== 1) {
+        throw new UsageError("guardrails requires exactly one snapshot ID.");
+      }
+      const snapshotId = requireId(parsed.positionals[0], "Snapshot ID");
+      const report = await client.getGuardrails(snapshotId);
+      const sarifPath = optionalString(parsed.options.sarif);
+      if (sarifPath) {
+        const artifact = await client.downloadGuardrailsSarif(snapshotId);
+        await writeFile(sarifPath, artifact.body, { encoding: "utf8", mode: 0o600 });
+        await chmod(sarifPath, 0o600);
+      }
+      if (json) writeJson(output, report);
+      else output.stdout(formatGuardrails(report, sarifPath));
+      return report.summary.errors > 0 ? 2 : 0;
     }
 
     if (command === "status") {

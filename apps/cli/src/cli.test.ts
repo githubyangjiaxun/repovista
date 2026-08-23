@@ -340,6 +340,99 @@ describe("RepoVista CLI", () => {
     );
   });
 
+  it("prints guardrails, writes SARIF, and returns exit code 2 for errors", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "repovista-guardrails-"));
+    const sarifPath = path.join(directory, "report.sarif");
+    const report = {
+      algorithmVersion: "architecture-guardrails-v1",
+      snapshot: {
+        id: snapshotId,
+        commitSha: snapshot.commitSha,
+        parserVersion: snapshot.parserVersion,
+      },
+      generatedAt: snapshot.readyAt,
+      status: "fail",
+      summary: { total: 1, errors: 1, warnings: 0, infos: 0 },
+      thresholds: {
+        cycleMaxLength: 12,
+        largeFileLines: 800,
+        largeFileBytes: 102400,
+        largeSymbolLines: 150,
+        highFanIn: 20,
+      },
+      findings: [
+        {
+          id: "dependency_cycle:abc",
+          fingerprint: "sha256:abc",
+          ruleId: "dependency_cycle",
+          severity: "error",
+          title: "Package dependency cycle",
+          message: "Packages src/a and src/b form a dependency cycle.",
+          path: "src/a/index.ts",
+          startLine: 3,
+          endLine: 3,
+          metric: { packageCount: 2, packages: "src/a,src/b" },
+          evidence: [
+            {
+              path: "src/a/index.ts",
+              startLine: 3,
+              endLine: 3,
+              description: "Cycle edge.",
+            },
+          ],
+        },
+      ],
+    };
+    const fetchImplementation = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(envelope(report))
+      .mockResolvedValueOnce(
+        new Response('{"version":"2.1.0","runs":[]}', {
+          headers: {
+            "Content-Type": "application/sarif+json",
+            "Content-Disposition": 'attachment; filename="guardrails.sarif"',
+          },
+        }),
+      );
+    const { dependencies, stdout } = harness(fetchImplementation as typeof fetch);
+    try {
+      const exitCode = await runCli(["guardrails", snapshotId, "--sarif", sarifPath], dependencies);
+      expect(exitCode).toBe(2);
+      expect(stdout.join("\n")).toContain("dependency_cycle");
+      expect(stdout.join("\n")).toContain(`SARIF: ${sarifPath}`);
+      expect(await readFile(sarifPath, "utf8")).toContain('"version":"2.1.0"');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("returns zero for a clean guardrails report", async () => {
+    const clean = {
+      algorithmVersion: "architecture-guardrails-v1",
+      snapshot: {
+        id: snapshotId,
+        commitSha: snapshot.commitSha,
+        parserVersion: snapshot.parserVersion,
+      },
+      generatedAt: snapshot.readyAt,
+      status: "pass",
+      summary: { total: 0, errors: 0, warnings: 0, infos: 0 },
+      thresholds: {
+        cycleMaxLength: 12,
+        largeFileLines: 800,
+        largeFileBytes: 102400,
+        largeSymbolLines: 150,
+        highFanIn: 20,
+      },
+      findings: [],
+    };
+    const fetchImplementation = vi.fn<typeof fetch>(async () => envelope(clean));
+    const { dependencies, stdout } = harness(fetchImplementation as typeof fetch);
+    const exitCode = await runCli(["guardrails", snapshotId, "--json"], dependencies);
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ status: "pass" });
+  });
+
   it("rejects invalid search modes and limits before contacting the API", async () => {
     const fetchImplementation = vi.fn<typeof fetch>();
     const first = harness(fetchImplementation as typeof fetch);

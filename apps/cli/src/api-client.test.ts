@@ -5,6 +5,40 @@ const repositoryId = "01900000-0000-7000-8000-000000000001";
 const snapshotId = "01900000-0000-7000-8000-000000000002";
 const jobId = "01900000-0000-7000-8000-000000000003";
 
+const guardrailReport = {
+  algorithmVersion: "architecture-guardrails-v1",
+  snapshot: {
+    id: snapshotId,
+    commitSha: "0123456789abcdef0123456789abcdef01234567",
+    parserVersion: "tree-sitter-ts-js-py-go-v1",
+  },
+  generatedAt: "2026-01-01T00:00:03.000Z",
+  status: "warn",
+  summary: { total: 1, errors: 0, warnings: 1, infos: 0 },
+  thresholds: {
+    cycleMaxLength: 12,
+    largeFileLines: 800,
+    largeFileBytes: 102400,
+    largeSymbolLines: 150,
+    highFanIn: 20,
+  },
+  findings: [
+    {
+      id: "large_file:abc",
+      fingerprint: "sha256:abc",
+      ruleId: "large_file",
+      severity: "warning",
+      title: "Large source file",
+      message: "src/index.ts is large.",
+      path: "src/index.ts",
+      startLine: 1,
+      endLine: 801,
+      metric: { lines: 801, bytes: 120000 },
+      evidence: [{ path: "src/index.ts", startLine: 1, endLine: 801, description: "File size." }],
+    },
+  ],
+} as const;
+
 function jsonResponse(payload: unknown, status = 200, requestId = "request-1"): Response {
   return new Response(JSON.stringify(payload), {
     headers: { "Content-Type": "application/json", "X-Request-ID": requestId },
@@ -98,5 +132,35 @@ describe("RepoVistaClient", () => {
     expect(() => new RepoVistaClient({ apiUrl: "file:///tmp/api" })).toThrowError(
       expect.objectContaining({ code: "API_URL_INVALID" }),
     );
+  });
+
+  it("loads a guardrail report and downloads SARIF with bearer auth", async () => {
+    const fetchImplementation = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ data: guardrailReport, meta: { requestId: "request-guardrails" } }),
+      )
+      .mockResolvedValueOnce(
+        new Response('{"version":"2.1.0","runs":[]}', {
+          status: 200,
+          headers: {
+            "Content-Type": "application/sarif+json",
+            "Content-Disposition": 'attachment; filename="guardrails.sarif"',
+          },
+        }),
+      );
+    const client = new RepoVistaClient({
+      apiUrl: "http://localhost:4000",
+      apiToken: "rv_testtoken_abcdefghijklmnopqrstuvwxyz0123456789",
+      fetch: fetchImplementation as typeof fetch,
+    });
+
+    await expect(client.getGuardrails(snapshotId)).resolves.toMatchObject({ status: "warn" });
+    await expect(client.downloadGuardrailsSarif(snapshotId)).resolves.toEqual({
+      body: '{"version":"2.1.0","runs":[]}',
+      filename: "guardrails.sarif",
+    });
+    const sarifRequest = fetchImplementation.mock.calls[1]?.[1] as RequestInit;
+    expect(new Headers(sarifRequest.headers).get("Authorization")).toMatch(/^Bearer rv_/);
   });
 });
