@@ -841,6 +841,77 @@ export const auditEventSchema = z.object({
 });
 export type AuditEvent = z.infer<typeof auditEventSchema>;
 
+// v0.6 deterministic Architecture Guardrails. Findings are derived from one
+// immutable Snapshot and intentionally carry only bounded source locations and
+// metrics, never source blobs or credentials.
+export const guardrailSeveritySchema = z.enum(["error", "warning", "info"]);
+export type GuardrailSeverity = z.infer<typeof guardrailSeveritySchema>;
+
+export const guardrailStatusSchema = z.enum(["pass", "warn", "fail"]);
+export type GuardrailStatus = z.infer<typeof guardrailStatusSchema>;
+
+export const guardrailRuleIdSchema = z.enum([
+  "dependency_cycle",
+  "large_file",
+  "large_symbol",
+  "high_fan_in",
+  "unresolved_import",
+  "parse_failure",
+]);
+export type GuardrailRuleId = z.infer<typeof guardrailRuleIdSchema>;
+
+export const guardrailThresholdsSchema = z.object({
+  cycleMaxLength: z.number().int().min(2).max(100),
+  largeFileLines: z.number().int().positive(),
+  largeFileBytes: z.number().int().positive(),
+  largeSymbolLines: z.number().int().positive(),
+  highFanIn: z.number().int().positive(),
+});
+export type GuardrailThresholds = z.infer<typeof guardrailThresholdsSchema>;
+
+export const guardrailEvidenceSchema = z.object({
+  path: z.string().min(1),
+  startLine: z.number().int().positive(),
+  endLine: z.number().int().positive(),
+  description: z.string().min(1),
+});
+export type GuardrailEvidence = z.infer<typeof guardrailEvidenceSchema>;
+
+export const guardrailFindingSchema = z.object({
+  id: z.string().min(1),
+  fingerprint: z.string().min(1),
+  ruleId: guardrailRuleIdSchema,
+  severity: guardrailSeveritySchema,
+  title: z.string().min(1),
+  message: z.string().min(1),
+  path: z.string().min(1),
+  startLine: z.number().int().positive(),
+  endLine: z.number().int().positive(),
+  metric: z.record(z.string(), z.union([z.number().finite(), z.string()])),
+  evidence: z.array(guardrailEvidenceSchema).min(1).max(20),
+});
+export type GuardrailFinding = z.infer<typeof guardrailFindingSchema>;
+
+export const guardrailReportSchema = z.object({
+  algorithmVersion: z.string().min(1),
+  snapshot: z.object({
+    id: idSchema,
+    commitSha: commitShaSchema,
+    parserVersion: z.string().min(1),
+  }),
+  generatedAt: z.iso.datetime(),
+  status: guardrailStatusSchema,
+  summary: z.object({
+    total: z.number().int().nonnegative(),
+    errors: z.number().int().nonnegative(),
+    warnings: z.number().int().nonnegative(),
+    infos: z.number().int().nonnegative(),
+  }),
+  thresholds: guardrailThresholdsSchema,
+  findings: z.array(guardrailFindingSchema),
+});
+export type GuardrailReport = z.infer<typeof guardrailReportSchema>;
+
 export interface ApiSuccess<T> {
   data: T;
   meta: {

@@ -299,6 +299,12 @@ importers:
         specifier: workspace:*
         version: link:../domain
 
+  packages/guardrails:
+    dependencies:
+      '@repovista/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+
   packages/impact:
     dependencies:
       '@repovista/contracts':
