@@ -45,9 +45,14 @@
 - [Done](./docs/releases/v0.6-开发计划.md) JSON/SARIF API exports with public/private access behavior and no source leakage.
 - [Done](./docs/releases/v0.6-开发计划.md) CLI CI workflow and Web Guardrails workspace with fixed evidence navigation.
 
+## v0.7 — Guardrails Snapshot baseline comparison (implemented 2026-08-23)
+
+- [Done](./docs/releases/v0.7-开发计划.md) Deterministic comparison of two same-Repository Ready Snapshots.
+- [Done](./docs/releases/v0.7-开发计划.md) Added/resolved/unchanged/changed Finding states with severity-aware regression summaries.
+- [Done](./docs/releases/v0.7-开发计划.md) API, CLI, Web baseline selection, dual evidence navigation, compatibility gates, and privacy headers.
+
 ## Next candidates
 
-- Baseline comparison: compare two immutable Snapshots and report newly introduced or resolved findings.
 - Repository policy profiles: versioned, reviewable threshold profiles without allowing model-driven rules.
 - Optional verified explanations: let an AI summarize an existing finding while preserving its rule,
   fingerprint, Commit, and evidence boundaries.

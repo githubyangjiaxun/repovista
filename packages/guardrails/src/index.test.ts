@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildGuardrailReport, buildSarifReport, DEFAULT_GUARDRAIL_THRESHOLDS } from "./index.js";
+import {
+  buildGuardrailReport,
+  buildSarifReport,
+  compareGuardrailReports,
+  DEFAULT_GUARDRAIL_THRESHOLDS,
+} from "./index.js";
 
 const snapshot = {
   id: "01900000-0000-7000-8000-000000000001",
@@ -121,5 +126,100 @@ describe("architecture guardrails", () => {
     expect(sarif.version).toBe("2.1.0");
     expect(sarif.runs[0]?.results).toHaveLength(1);
     expect(JSON.stringify(sarif)).not.toContain("export function");
+  });
+
+  it("compares immutable reports with stable added, resolved, changed, and unchanged states", () => {
+    const base = buildGuardrailReport({
+      snapshot: { ...snapshot, id: "01900000-0000-7000-8000-000000000010" },
+      files: [file("f1", "src/main.ts", 801), file("f2", "src/old.ts", 801)],
+      symbols: [],
+      edges: [],
+    });
+    const head = buildGuardrailReport({
+      snapshot: { ...snapshot, id: "01900000-0000-7000-8000-000000000011" },
+      files: [file("f1", "src/main.ts", 900), file("f3", "src/new.ts", 801)],
+      symbols: [],
+      edges: [],
+    });
+    const comparison = compareGuardrailReports(base, head);
+    expect(comparison.overall).toBe("regressed");
+    expect(comparison.summary).toMatchObject({ added: 1, resolved: 1, changed: 1 });
+    expect(comparison.findings.map((item) => item.status)).toEqual([
+      "changed",
+      "added",
+      "resolved",
+    ]);
+    expect(comparison.findings[0]?.base?.path).toBe("src/main.ts");
+    expect(comparison.findings[0]?.head?.metric.lines).toBe(900);
+  });
+
+  it("counts severity upgrades as regressions and downgrades as improvements", () => {
+    const base = buildGuardrailReport({
+      snapshot: { ...snapshot, id: "01900000-0000-7000-8000-000000000012" },
+      files: [file("f1", "src/main.ts", 801)],
+      symbols: [],
+      edges: [],
+    });
+    const warning = {
+      ...base,
+      findings: base.findings.map((item) => ({ ...item, severity: "info" as const })),
+    };
+    const improved = compareGuardrailReports(base, warning);
+    expect(improved.overall).toBe("improved");
+    expect(improved.summary.improvements).toBe(1);
+    const regressed = compareGuardrailReports(warning, base);
+    expect(regressed.overall).toBe("regressed");
+    expect(regressed.summary.regressions).toBe(1);
+  });
+
+  it("rejects reports with different thresholds", () => {
+    const base = buildGuardrailReport({
+      snapshot,
+      files: [file("f1", "src/main.ts", 801)],
+      symbols: [],
+      edges: [],
+    });
+    const incompatible = buildGuardrailReport({
+      snapshot: { ...snapshot, id: "01900000-0000-7000-8000-000000000013" },
+      files: [file("f1", "src/main.ts", 801)],
+      symbols: [],
+      edges: [],
+      thresholds: { largeFileLines: 900 },
+    });
+    expect(() => compareGuardrailReports(base, incompatible)).toThrow(/incompatible thresholds/);
+  });
+
+  it("keeps equivalent object key order and duplicate pairing deterministic", () => {
+    const base = buildGuardrailReport({
+      snapshot,
+      files: [file("f1", "src/main.ts", 801), file("f2", "src/other.ts", 801)],
+      symbols: [],
+      edges: [],
+    });
+    const reordered = {
+      ...base,
+      thresholds: {
+        highFanIn: base.thresholds.highFanIn,
+        largeFileBytes: base.thresholds.largeFileBytes,
+        cycleMaxLength: base.thresholds.cycleMaxLength,
+        largeSymbolLines: base.thresholds.largeSymbolLines,
+        largeFileLines: base.thresholds.largeFileLines,
+      },
+      findings: [...base.findings].reverse().map((finding, index) => ({
+        ...finding,
+        id: `duplicate-${index}`,
+        metric: Object.fromEntries(Object.entries(finding.metric).reverse()),
+        evidence: finding.evidence.map((item) => ({
+          description: item.description,
+          endLine: item.endLine,
+          startLine: item.startLine,
+          path: item.path,
+        })),
+      })),
+    };
+    const comparison = compareGuardrailReports(base, reordered);
+    expect(comparison.overall).toBe("unchanged");
+    expect(comparison.summary.unchanged).toBe(2);
+    expect(compareGuardrailReports(base, reordered).findings).toEqual(comparison.findings);
   });
 });

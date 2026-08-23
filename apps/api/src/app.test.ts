@@ -1299,6 +1299,7 @@ describe("RepoVista API", () => {
     });
 
     expect(report.statusCode).toBe(200);
+    expect(report.headers["cache-control"]).toBe("public, max-age=0, must-revalidate");
     expect(report.json().data).toMatchObject({
       algorithmVersion: "architecture-guardrails-v1",
       status: "warn",
@@ -1316,10 +1317,11 @@ describe("RepoVista API", () => {
     );
     expect(sarif.headers["cache-control"]).toBe("public, max-age=0, must-revalidate");
     expect(sarif.json()).toMatchObject({ version: "2.1.0" });
+    expect(report.body).not.toContain("export function hello");
     expect(sarif.body).not.toContain("export function hello");
   });
 
-  it("marks private Guardrails SARIF as non-cacheable", async () => {
+  it("marks private Guardrails JSON and SARIF as non-cacheable", async () => {
     const store = createStore();
     const privateStore = store as unknown as {
       getSnapshotAccess: ReturnType<typeof vi.fn>;
@@ -1335,14 +1337,208 @@ describe("RepoVista API", () => {
     const { app } = createTestApp(store);
     openApps.push(app);
 
-    const result = await app.inject({
+    const report = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/guardrails`,
+      headers: { cookie: auth.cookie },
+    });
+    const sarif = await app.inject({
       method: "GET",
       url: `/v1/snapshots/${snapshotId}/guardrails/sarif`,
       headers: { cookie: auth.cookie },
     });
 
+    expect(report.statusCode).toBe(200);
+    expect(report.headers["cache-control"]).toBe("private, no-store");
+    expect(sarif.statusCode).toBe(200);
+    expect(sarif.headers["cache-control"]).toBe("private, no-store");
+  });
+
+  it("compares two ready snapshots without returning source contents", async () => {
+    const store = createStore();
+    const graph = await store.getSnapshotGraphData(snapshotId);
+    if (!graph) throw new Error("Expected graph data fixture.");
+    vi.mocked(store.getSnapshotGraphData).mockImplementation(async (id) => ({
+      ...graph,
+      snapshot: {
+        ...graph.snapshot,
+        id,
+        commitSha: id === baseSnapshotId ? baseSha : headSha,
+        readyAt: id === baseSnapshotId ? "2026-01-01T00:00:01.000Z" : "2026-01-01T00:00:02.000Z",
+      },
+      files: graph.files.map((file) => ({
+        ...file,
+        lineCount: id === baseSnapshotId ? 10 : 801,
+        byteSize: id === baseSnapshotId ? 100 : 120_000,
+      })),
+    }));
+    const { app } = createTestApp(store);
+    openApps.push(app);
+    const result = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${headSnapshotId}/guardrails/compare?baseSnapshotId=${baseSnapshotId}`,
+    });
+    if (result.statusCode !== 200) throw new Error(result.body);
+    expect(result.statusCode).toBe(200);
+    expect(result.headers["cache-control"]).toBe("public, max-age=0, must-revalidate");
+    expect(result.json().data).toMatchObject({
+      overall: "regressed",
+      base: { snapshot: { id: baseSnapshotId, commitSha: baseSha } },
+      head: { snapshot: { id: headSnapshotId, commitSha: headSha } },
+      summary: { added: 1, regressions: 1 },
+    });
+    expect(result.body).not.toContain("export function hello");
+  });
+
+  it("keeps private baseline comparisons non-cacheable", async () => {
+    const store = createStore();
+    const accessStore = store as unknown as {
+      getSnapshotAccess: ReturnType<typeof vi.fn>;
+    };
+    accessStore.getSnapshotAccess = vi.fn(async (_id: string) => ({
+      repositoryId,
+      workspaceId,
+      visibility: "private" as const,
+      githubInstallationId: null,
+      role: "owner" as const,
+    }));
+    const auth = authenticateOwner(store);
+    const graph = await store.getSnapshotGraphData(snapshotId);
+    if (!graph) throw new Error("Expected graph data fixture.");
+    vi.mocked(store.getSnapshotGraphData).mockImplementation(async (id) => ({
+      ...graph,
+      snapshot: {
+        ...graph.snapshot,
+        id,
+        commitSha: id === baseSnapshotId ? baseSha : headSha,
+      },
+    }));
+    const { app } = createTestApp(store);
+    openApps.push(app);
+
+    const result = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${headSnapshotId}/guardrails/compare?baseSnapshotId=${baseSnapshotId}`,
+      headers: { cookie: auth.cookie },
+    });
+
     expect(result.statusCode).toBe(200);
     expect(result.headers["cache-control"]).toBe("private, no-store");
+  });
+
+  it("rejects comparisons across repositories and workspaces with a conflict", async () => {
+    const store = createStore();
+    const accessStore = store as unknown as {
+      getSnapshotAccess: ReturnType<typeof vi.fn>;
+    };
+    accessStore.getSnapshotAccess = vi.fn(async (id: string) => ({
+      repositoryId: id === baseSnapshotId ? repositoryId : "01900000-0000-7000-8000-000000000099",
+      workspaceId,
+      visibility: "public" as const,
+      githubInstallationId: null,
+      role: "owner" as const,
+    }));
+    const { app } = createTestApp(store);
+    openApps.push(app);
+    const crossRepository = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${headSnapshotId}/guardrails/compare?baseSnapshotId=${baseSnapshotId}`,
+    });
+    expect(crossRepository.statusCode).toBe(409);
+    expect(crossRepository.json().error.code).toBe("GUARDRAIL_COMPARISON_INCOMPATIBLE");
+
+    accessStore.getSnapshotAccess = vi.fn(async (id: string) => ({
+      repositoryId,
+      workspaceId: id === baseSnapshotId ? workspaceId : "01900000-0000-7000-8000-000000000098",
+      visibility: "public" as const,
+      githubInstallationId: null,
+      role: "owner" as const,
+    }));
+    const crossWorkspace = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${headSnapshotId}/guardrails/compare?baseSnapshotId=${baseSnapshotId}`,
+    });
+    expect(crossWorkspace.statusCode).toBe(409);
+    expect(crossWorkspace.json().error.code).toBe("GUARDRAIL_COMPARISON_INCOMPATIBLE");
+  });
+
+  it("hides an inaccessible comparison baseline as not found", async () => {
+    const store = createStore();
+    const accessStore = store as unknown as {
+      getSnapshotAccess: ReturnType<typeof vi.fn>;
+    };
+    accessStore.getSnapshotAccess = vi.fn(async (id: string) =>
+      id === headSnapshotId
+        ? {
+            repositoryId,
+            workspaceId,
+            visibility: "public" as const,
+            githubInstallationId: null,
+            role: "owner" as const,
+          }
+        : null,
+    );
+    const { app } = createTestApp(store);
+    openApps.push(app);
+
+    const result = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${headSnapshotId}/guardrails/compare?baseSnapshotId=${baseSnapshotId}`,
+    });
+
+    expect(result.statusCode).toBe(404);
+    expect(result.json().error.code).toBe("SNAPSHOT_NOT_FOUND");
+    expect(store.getSnapshotGraphData).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-ready or parser-incompatible baseline", async () => {
+    const store = createStore();
+    const graph = await store.getSnapshotGraphData(snapshotId);
+    if (!graph) throw new Error("Expected graph data fixture.");
+    const accessStore = store as unknown as {
+      getSnapshotAccess: ReturnType<typeof vi.fn>;
+    };
+    accessStore.getSnapshotAccess = vi.fn(async () => ({
+      repositoryId,
+      workspaceId,
+      visibility: "public" as const,
+      githubInstallationId: null,
+      role: "owner" as const,
+    }));
+    vi.mocked(store.getSnapshotGraphData).mockImplementation(async (id) => ({
+      ...graph,
+      snapshot: {
+        ...graph.snapshot,
+        id,
+        status: id === baseSnapshotId ? "parsing" : "ready",
+        commitSha: id === baseSnapshotId ? null : headSha,
+      },
+    }));
+    const { app } = createTestApp(store);
+    openApps.push(app);
+    const notReady = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${headSnapshotId}/guardrails/compare?baseSnapshotId=${baseSnapshotId}`,
+    });
+    expect(notReady.statusCode).toBe(409);
+    expect(notReady.json().error.code).toBe("SNAPSHOT_NOT_READY");
+
+    vi.mocked(store.getSnapshotGraphData).mockImplementation(async (id) => ({
+      ...graph,
+      snapshot: {
+        ...graph.snapshot,
+        id,
+        status: "ready",
+        commitSha: id === baseSnapshotId ? baseSha : headSha,
+        parserVersion: id === baseSnapshotId ? "tree-sitter-ts-v0" : "tree-sitter-ts-v1",
+      },
+    }));
+    const incompatibleParser = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${headSnapshotId}/guardrails/compare?baseSnapshotId=${baseSnapshotId}`,
+    });
+    expect(incompatibleParser.statusCode).toBe(409);
+    expect(incompatibleParser.json().error.code).toBe("GUARDRAIL_COMPARISON_INCOMPATIBLE");
   });
 
   it("rejects export requests until the exact snapshot is ready", async () => {

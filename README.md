@@ -27,6 +27,20 @@ The map, source browser, search, reading path, and share reports remain useful w
 key. The default `fake` provider is a transparent deterministic evidence summarizer, so the full
 workflow can be evaluated locally before connecting Ollama or an OpenAI-compatible endpoint.
 
+## What v0.7 includes
+
+- Deterministic Guardrails Snapshot baseline comparison for two Ready Snapshots from the same
+  Repository, with `added`, `resolved`, `unchanged`, and `changed` Finding states.
+- Overall `regressed`, `improved`, or `unchanged` summaries that compare severity changes without
+  allowing AI, mutable policy, or current-repository pointers to influence the result.
+- HTTP, CLI, and Web workflows for baseline comparison, including `--json`, CI exit code `2` on
+  regressions, historical Ready Snapshot selection, and Base/Head commit-pinned evidence buttons.
+- Compatibility and privacy gates for Workspace, Repository, Ready status, Parser Version, algorithm
+  profile, thresholds, and public/private cache behavior; comparison responses never contain source
+  contents.
+
+The v0.7 implementation details and reproducible gates are in the [v0.7 acceptance record](docs/releases/v0.7-验收记录.md).
+
 ## What v0.6 includes
 
 - Deterministic Architecture Guardrails evaluated from one immutable Snapshot: dependency cycles,
@@ -42,7 +56,7 @@ workflow can be evaluated locally before connecting Ollama or an OpenAI-compatib
 
 Guardrails are intentionally deterministic and do not use AI to decide whether a rule fires. AI may
 later explain an already verified finding, but it cannot create findings or change their evidence.
-The reproducible checks and known boundaries are in the [v0.6 acceptance record](docs/releases/v0.6-验收记录.md).
+The v0.6 guardrail checks and known boundaries remain in the [v0.6 acceptance record](docs/releases/v0.6-验收记录.md).
 
 ## What v0.5 includes
 
@@ -166,6 +180,7 @@ For a Ready Snapshot, inspect retrieval, build a configured semantic index, and 
 pnpm --filter @repovista/cli dev embed <snapshot-id> --wait
 pnpm --filter @repovista/cli dev search <snapshot-id> \
   "where is response compression configured" --mode hybrid --limit 10
+pnpm --filter @repovista/cli dev guardrails compare <base-snapshot-id> <head-snapshot-id>
 ```
 
 Every command supports `--json`; `--api-url` points the CLI at a different API origin. Run
@@ -330,6 +345,11 @@ Read [SECURITY.md](./SECURITY.md) before reporting a vulnerability.
 - [v0.6 frontend development document](./docs/frontend/v0.6前端开发文档.md)
 - [v0.6 test and release plan](./docs/operations/v0.6测试与发布计划.md)
 - [v0.6 acceptance record](./docs/releases/v0.6-验收记录.md)
+- [v0.7 development plan](./docs/releases/v0.7-开发计划.md)
+- [v0.7 backend development document](./docs/backend/v0.7后端开发文档.md)
+- [v0.7 frontend development document](./docs/frontend/v0.7前端开发文档.md)
+- [v0.7 test and release plan](./docs/operations/v0.7测试与发布计划.md)
+- [v0.7 acceptance record](./docs/releases/v0.7-验收记录.md)
 - [Roadmap](./ROADMAP.md)
 
 The machine-readable API source of truth is [openapi/openapi.json](./openapi/openapi.json).

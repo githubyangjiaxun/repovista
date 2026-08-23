@@ -26,7 +26,12 @@ import {
 import { parseGitHubUrl } from "@repovista/git";
 import type { GitHubAppClient } from "@repovista/github";
 import { buildGraphView, type GraphView } from "@repovista/graph";
-import { buildGuardrailReport, buildSarifReport } from "@repovista/guardrails";
+import {
+  buildGuardrailReport,
+  buildSarifReport,
+  compareGuardrailReports,
+  GUARDRAILS_ALGORITHM_VERSION,
+} from "@repovista/guardrails";
 import { IMPACT_ALGORITHM_VERSION } from "@repovista/impact";
 import { buildArchitectureStory } from "@repovista/story";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -37,6 +42,7 @@ import { type RetrievalDependencies, retrieveEvidence } from "./retrieval.js";
 
 const repositoryParamsSchema = z.object({ repositoryId: idSchema });
 const snapshotParamsSchema = z.object({ snapshotId: idSchema });
+const guardrailCompareQuerySchema = z.object({ baseSnapshotId: idSchema });
 const snapshotSymbolParamsSchema = z.object({ snapshotId: idSchema, symbolId: idSchema });
 const jobParamsSchema = z.object({ jobId: idSchema });
 const shareParamsSchema = z.object({ slug: z.string().min(3).max(300) });
@@ -478,6 +484,66 @@ async function loadGuardrailReport(store: RepoVistaStore, snapshotId: string) {
     symbols: graphData.symbols,
     edges: graphData.edges,
   });
+}
+
+async function loadGuardrailComparison(
+  store: RepoVistaStore,
+  baseSnapshotId: string,
+  headSnapshotId: string,
+) {
+  const [baseGraph, headGraph] = await Promise.all([
+    store.getSnapshotGraphData(baseSnapshotId),
+    store.getSnapshotGraphData(headSnapshotId),
+  ]);
+  if (!baseGraph || !headGraph) {
+    throw new DomainError("SNAPSHOT_NOT_FOUND", "The requested snapshot does not exist.");
+  }
+  requireReadySnapshot(baseGraph.snapshot);
+  requireReadySnapshot(headGraph.snapshot);
+  if (baseGraph.snapshot.repositoryId !== headGraph.snapshot.repositoryId) {
+    throw new DomainError(
+      "GUARDRAIL_COMPARISON_INCOMPATIBLE",
+      "Guardrail comparison requires snapshots from the same repository.",
+    );
+  }
+  if (baseGraph.snapshot.parserVersion !== headGraph.snapshot.parserVersion) {
+    throw new DomainError(
+      "GUARDRAIL_COMPARISON_INCOMPATIBLE",
+      "Guardrail comparison requires matching parser versions.",
+    );
+  }
+  const toInput = (graph: typeof baseGraph) =>
+    buildGuardrailReport({
+      snapshot: {
+        id: graph.snapshot.id,
+        commitSha: graph.snapshot.commitSha as string,
+        parserVersion: graph.snapshot.parserVersion,
+        requestedAt: graph.snapshot.requestedAt,
+        readyAt: graph.snapshot.readyAt,
+      },
+      files: graph.files,
+      symbols: graph.symbols,
+      edges: graph.edges,
+    });
+  const base = toInput(baseGraph);
+  const head = toInput(headGraph);
+  if (
+    base.algorithmVersion !== GUARDRAILS_ALGORITHM_VERSION ||
+    head.algorithmVersion !== GUARDRAILS_ALGORITHM_VERSION
+  ) {
+    throw new DomainError(
+      "GUARDRAIL_COMPARISON_INCOMPATIBLE",
+      "Guardrail comparison requires the current guardrail algorithm.",
+    );
+  }
+  try {
+    return compareGuardrailReports(base, head);
+  } catch (error) {
+    throw new DomainError(
+      "GUARDRAIL_COMPARISON_INCOMPATIBLE",
+      error instanceof Error ? error.message : "The guardrail reports are incompatible.",
+    );
+  }
 }
 
 export function registerRoutes(
@@ -978,10 +1044,17 @@ export function registerRoutes(
     return sendExport(reply, createSvgExport(input), input.repository.visibility === "private");
   });
 
-  app.get("/v1/snapshots/:snapshotId/guardrails", async (request) => {
+  app.get("/v1/snapshots/:snapshotId/guardrails", async (request, reply) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
-    await requireSnapshotAccess(request, store, snapshotId);
-    return response(request, await loadGuardrailReport(store, snapshotId));
+    const access = await requireSnapshotAccess(request, store, snapshotId);
+    return reply
+      .header(
+        "Cache-Control",
+        access?.visibility === "private"
+          ? "private, no-store"
+          : "public, max-age=0, must-revalidate",
+      )
+      .send(response(request, await loadGuardrailReport(store, snapshotId)));
   });
 
   app.get("/v1/snapshots/:snapshotId/guardrails/sarif", async (request, reply) => {
@@ -1005,6 +1078,33 @@ export function registerRoutes(
       .header("ETag", etag)
       .header("X-Content-Type-Options", "nosniff")
       .send(body);
+  });
+
+  app.get("/v1/snapshots/:snapshotId/guardrails/compare", async (request, reply) => {
+    const { snapshotId: headSnapshotId } = parseInput(snapshotParamsSchema, request.params);
+    const { baseSnapshotId } = parseInput(guardrailCompareQuerySchema, request.query);
+    const headAccess = await requireSnapshotAccess(request, store, headSnapshotId);
+    const baseAccess = await requireSnapshotAccess(request, store, baseSnapshotId);
+    if (
+      !headAccess ||
+      !baseAccess ||
+      headAccess.repositoryId !== baseAccess.repositoryId ||
+      headAccess.workspaceId !== baseAccess.workspaceId
+    ) {
+      throw new DomainError(
+        "GUARDRAIL_COMPARISON_INCOMPATIBLE",
+        "Guardrail comparison requires snapshots from the same repository.",
+      );
+    }
+    const comparison = await loadGuardrailComparison(store, baseSnapshotId, headSnapshotId);
+    return reply
+      .header(
+        "Cache-Control",
+        headAccess.visibility === "private" || baseAccess.visibility === "private"
+          ? "private, no-store"
+          : "public, max-age=0, must-revalidate",
+      )
+      .send(response(request, comparison));
   });
 
   app.post("/v1/snapshots/:snapshotId/cancel", async (request, reply) => {

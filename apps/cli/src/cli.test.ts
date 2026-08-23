@@ -109,7 +109,7 @@ describe("RepoVista CLI", () => {
     const exitCode = await runCli(["--version"], dependencies);
 
     expect(exitCode).toBe(0);
-    expect(stdout).toEqual(["0.6.0"]);
+    expect(stdout).toEqual(["0.7.0"]);
     expect(stderr).toEqual([]);
     expect(fetchImplementation).not.toHaveBeenCalled();
   });
@@ -431,6 +431,79 @@ describe("RepoVista CLI", () => {
     const exitCode = await runCli(["guardrails", snapshotId, "--json"], dependencies);
     expect(exitCode).toBe(0);
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({ status: "pass" });
+  });
+
+  it("compares guardrails and returns exit code 2 for regressions", async () => {
+    const clean = {
+      algorithmVersion: "architecture-guardrails-v1",
+      snapshot: {
+        id: snapshotId,
+        commitSha: snapshot.commitSha,
+        parserVersion: snapshot.parserVersion,
+      },
+      generatedAt: snapshot.readyAt,
+      status: "pass" as const,
+      summary: { total: 0, errors: 0, warnings: 0, infos: 0 },
+      thresholds: {
+        cycleMaxLength: 12,
+        largeFileLines: 800,
+        largeFileBytes: 102400,
+        largeSymbolLines: 150,
+        highFanIn: 20,
+      },
+      findings: [],
+    };
+    const base = {
+      ...clean,
+      snapshot: { ...clean.snapshot, id: snapshotId },
+    };
+    const head = { ...clean, snapshot: { ...clean.snapshot, id: repositoryId } };
+    const comparison = {
+      algorithmVersion: "architecture-guardrails-v1",
+      base,
+      head,
+      overall: "regressed",
+      summary: {
+        total: 1,
+        added: 1,
+        resolved: 0,
+        unchanged: 0,
+        changed: 0,
+        regressions: 1,
+        improvements: 0,
+      },
+      findings: [
+        {
+          key: "large_file|src/index.ts",
+          status: "added",
+          base: null,
+          head: {
+            id: "large_file:abc",
+            fingerprint: "sha256:abc",
+            ruleId: "large_file",
+            severity: "warning",
+            title: "Large source file",
+            message: "src/index.ts is large.",
+            path: "src/index.ts",
+            startLine: 1,
+            endLine: 801,
+            metric: { lines: 801, bytes: 120000 },
+            evidence: [
+              { path: "src/index.ts", startLine: 1, endLine: 801, description: "File size." },
+            ],
+          },
+        },
+      ],
+    };
+    const fetchImplementation = vi.fn<typeof fetch>(async () => envelope(comparison));
+    const { dependencies, stdout } = harness(fetchImplementation as typeof fetch);
+    const exitCode = await runCli(
+      ["guardrails", "compare", snapshotId, repositoryId],
+      dependencies,
+    );
+    expect(exitCode).toBe(2);
+    expect(stdout.join("\n")).toContain("Guardrails comparison: regressed");
+    expect(stdout.join("\n")).toContain("[added] large_file");
   });
 
   it("rejects invalid search modes and limits before contacting the API", async () => {

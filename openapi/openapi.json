@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RepoVista API",
-    "version": "0.6.0",
+    "version": "0.7.0",
     "description": "Evidence-first repository indexing with private GitHub App access, Workspace authorization, deterministic Architecture Guardrails and SARIF, auditable sessions, API tokens, versioned semantic indexes, transparent hybrid retrieval, architecture stories, pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, and grounded answers."
   },
   "servers": [
@@ -743,6 +743,14 @@
         "responses": {
           "200": {
             "description": "Commit-pinned Architecture Guardrails report",
+            "headers": {
+              "Cache-Control": {
+                "description": "Public revalidation or private no-store policy",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -814,6 +822,68 @@
                 }
               }
             }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/guardrails/compare": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SnapshotId"
+        }
+      ],
+      "get": {
+        "operationId": "compareSnapshotGuardrails",
+        "summary": "Compare deterministic guardrails between two immutable snapshots",
+        "tags": ["Snapshots"],
+        "parameters": [
+          {
+            "name": "baseSnapshotId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Commit-pinned guardrail comparison",
+            "headers": {
+              "Cache-Control": {
+                "description": "Public revalidation or private no-store policy",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/GuardrailComparison"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -4975,6 +5045,100 @@
           },
           "createdAt": {
             "$ref": "#/components/schemas/DateTime"
+          }
+        }
+      },
+      "GuardrailComparisonStatus": {
+        "type": "string",
+        "enum": ["added", "resolved", "unchanged", "changed"]
+      },
+      "GuardrailComparisonOverall": {
+        "type": "string",
+        "enum": ["regressed", "improved", "unchanged"]
+      },
+      "GuardrailFindingComparison": {
+        "type": "object",
+        "required": ["key", "status", "base", "head"],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/GuardrailComparisonStatus"
+          },
+          "base": {
+            "$ref": "#/components/schemas/GuardrailFinding",
+            "nullable": true
+          },
+          "head": {
+            "$ref": "#/components/schemas/GuardrailFinding",
+            "nullable": true
+          }
+        }
+      },
+      "GuardrailComparison": {
+        "type": "object",
+        "required": ["algorithmVersion", "base", "head", "overall", "summary", "findings"],
+        "properties": {
+          "algorithmVersion": {
+            "type": "string"
+          },
+          "base": {
+            "$ref": "#/components/schemas/GuardrailReport"
+          },
+          "head": {
+            "$ref": "#/components/schemas/GuardrailReport"
+          },
+          "overall": {
+            "$ref": "#/components/schemas/GuardrailComparisonOverall"
+          },
+          "summary": {
+            "type": "object",
+            "required": [
+              "total",
+              "added",
+              "resolved",
+              "unchanged",
+              "changed",
+              "regressions",
+              "improvements"
+            ],
+            "properties": {
+              "total": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "added": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "resolved": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "unchanged": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "changed": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "regressions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "improvements": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GuardrailFindingComparison"
+            }
           }
         }
       }

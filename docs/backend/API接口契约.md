@@ -1,6 +1,6 @@
 # API 接口契约
 
-状态：v0.6 已实现并验收（2026-08-23）
+状态：v0.7 已实现并验收（2026-08-23）
 Base path：`/v1`
 机器事实来源：`openapi/openapi.json`
 
@@ -95,16 +95,22 @@ Operation。所有 UUID 资源查询先做 Workspace Access Check；无权资源
 
 共 49 个 Operation。
 
-v0.6 增加两个 Snapshot 派生读接口，共 51 个 Operation：
+v0.6 增加两个 Snapshot 派生读接口；v0.7 增加一个基线比较接口，共 52 个 Operation：
 
 | Method | Path | 用途 |
 |---|---|---|
 | GET | `/v1/snapshots/{snapshotId}/guardrails` | 计算并返回固定阈值的 Architecture Guardrails JSON 报告 |
 | GET | `/v1/snapshots/{snapshotId}/guardrails/sarif` | 下载同一报告的 SARIF 2.1.0 表示 |
+| GET | `/v1/snapshots/{snapshotId}/guardrails/compare?baseSnapshotId=...` | 比较同一 Repository 的两个 Ready Snapshot，返回 Finding 状态和回归摘要 |
 
 两个接口只接受 Ready Snapshot，并复用既有 Workspace Access Check。报告从指定 Snapshot 的文件、
 符号和关系重算，不写入可变 Finding 表；SARIF 不包含源码正文，私有 Snapshot 使用
 `Cache-Control: private, no-store`。
+
+比较接口同样不写入数据库，也不返回源码正文。Base/Head 必须通过各自的 Workspace Access Check，
+属于同一 Repository、均为 Ready、Parser Version/Guardrails 算法/阈值一致；不兼容返回
+`GUARDRAIL_COMPARISON_INCOMPATIBLE` 和 HTTP `409`。公开比较使用
+`public, max-age=0, must-revalidate`，任一侧为私有则使用 `private, no-store`。
 
 ## 3. 创建分析
 

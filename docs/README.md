@@ -1,6 +1,6 @@
 # RepoVista 工程文档
 
-状态：v0.6 已实现并完成 Architecture Guardrails、SARIF、CLI/Web 链路、权限测试与 OpenAPI 同步（2026-08-23）
+状态：v0.7 已实现并完成 Guardrails Snapshot 基线比较、CLI/Web 链路、权限/兼容性测试与 OpenAPI 同步（2026-08-23）
 
 本目录描述当前代码，而不是早期愿景。发生冲突时，事实来源优先级如下：
 
@@ -78,6 +78,16 @@
 | [v0.6 测试与发布计划](./operations/v0.6测试与发布计划.md) | 单元、API、CLI、Web、OpenAPI、Compose 与 Git 发布门禁 |
 | [v0.6 验收记录](./releases/v0.6-验收记录.md) | 可复现命令、结果、权限边界、已知限制和远端提交审计 |
 
+## v0.7 实施计划（已完成）
+
+| 文档 | 内容 |
+|---|---|
+| [版本开发计划](./releases/v0.7-开发计划.md) | Guardrails Snapshot 基线比较的范围、稳定性与完成定义 |
+| [v0.7 后端开发文档](./backend/v0.7后端开发文档.md) | 双快照读取、兼容性/权限门禁、比较 API 与缓存策略 |
+| [v0.7 前端开发文档](./frontend/v0.7前端开发文档.md) | 历史 Ready Snapshot 选择、比较状态与双侧证据导航 |
+| [v0.7 测试与发布计划](./operations/v0.7测试与发布计划.md) | 单元、API、CLI、Web、E2E、契约与发布门禁 |
+| [v0.7 验收记录](./releases/v0.7-验收记录.md) | 可复现结果、已知边界、数据库 Skip 和 Git 远端审计 |
+
 ## 前端
 
 | 文档 | 内容 |
@@ -90,7 +100,7 @@
 | 文档 | 内容 |
 |---|---|
 | [后端开发文档](./backend/后端开发文档.md) | Fastify 请求边界、配置、错误和模块职责 |
-| [API 接口契约](./backend/API接口契约.md) | 51 个 v0.6 Operation、Cookie/Bearer、Workspace、Guardrails/SARIF、SSE、Retrieval、Story 与 PR Impact |
+| [API 接口契约](./backend/API接口契约.md) | 52 个 v0.7 Operation、Cookie/Bearer、Workspace、Guardrails/比较/SARIF、SSE、Retrieval、Story 与 PR Impact |
 | [任务与索引流水线](./backend/任务与索引流水线.md) | 租约任务、安全克隆、扫描、解析和持久化 |
 
 ## 数据与可信 AI

@@ -99,6 +99,7 @@ export function RepositoryExplorer({
   const [repository, setRepository] = useState<RepositorySummary | null>(null);
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [files, setFiles] = useState<SnapshotFileSummary[]>([]);
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [fileFilter, setFileFilter] = useState("");
   const [graph, setGraph] = useState<GraphResponse | null>(null);
   const [level, setLevel] = useState<GraphLevel>("package");
@@ -174,9 +175,10 @@ export function RepositoryExplorer({
             retryable: true,
           });
         }
-        const [nextSnapshot, filePage] = await Promise.all([
+        const [nextSnapshot, filePage, nextSnapshots] = await Promise.all([
           apiFetch<Snapshot>(`/v1/snapshots/${selectedSnapshotId}`),
           apiFetch<SnapshotFilePage>(`/v1/snapshots/${selectedSnapshotId}/files?pageSize=100`),
+          apiFetch<Snapshot[]>(`/v1/repositories/${repositoryId}/snapshots`),
         ]);
         if (nextSnapshot.repositoryId !== repositoryId) {
           throw new ApiError("The selected snapshot does not belong to this repository.", {
@@ -187,6 +189,7 @@ export function RepositoryExplorer({
         setRepository(nextRepository);
         setSnapshot(nextSnapshot);
         setFiles(filePage.files);
+        setSnapshots(nextSnapshots.filter((item) => item.status === "ready" && item.commitSha));
         await loadGraph(nextSnapshot.id, "package");
       } catch (cause) {
         if (active) {
@@ -223,11 +226,19 @@ export function RepositoryExplorer({
     if (snapshot) await loadGraph(snapshot.id, nextLevel, mapQuery);
   }
 
-  async function openSource(filePath: string, startLine?: number, endLine?: number) {
-    if (!snapshot) return;
+  async function openSource(
+    filePath: string,
+    startLine?: number,
+    endLine?: number,
+    targetSnapshotId?: string,
+  ) {
+    const selectedSnapshotId = targetSnapshotId ?? snapshot?.id;
+    if (!selectedSnapshotId) return;
     setSourceRange({ startLine, endLine });
     try {
-      setSource(await apiFetch<SourceFile>(sourceUrl(snapshot.id, filePath, startLine, endLine)));
+      setSource(
+        await apiFetch<SourceFile>(sourceUrl(selectedSnapshotId, filePath, startLine, endLine)),
+      );
       setError(null);
     } catch (cause) {
       setError(apiErrorMessage(cause, "Unable to load this source file."));
@@ -844,7 +855,14 @@ export function RepositoryExplorer({
         ) : null}
 
         {tab === "guardrails" ? (
-          <GuardrailsPanel onOpenSource={openSource} snapshotId={snapshot.id} />
+          <GuardrailsPanel
+            availableSnapshots={snapshots}
+            onOpenSnapshotSource={(targetSnapshotId, path, startLine, endLine) =>
+              openSource(path, startLine, endLine, targetSnapshotId)
+            }
+            onOpenSource={openSource}
+            snapshotId={snapshot.id}
+          />
         ) : null}
       </main>
 

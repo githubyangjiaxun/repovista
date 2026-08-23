@@ -11,9 +11,11 @@ import {
   createRepositoryResponseSchema,
   type GitHubInstallation,
   type GitHubInstallationRepositoryPage,
+  type GuardrailComparison,
   type GuardrailReport,
   githubInstallationRepositoryPageSchema,
   githubInstallationSchema,
+  guardrailComparisonSchema,
   guardrailReportSchema,
   type Job,
   jobSchema,
@@ -237,6 +239,15 @@ export class RepoVistaClient {
       `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails`,
       {},
       (value) => guardrailReportSchema.parse(value),
+    );
+  }
+
+  compareGuardrails(baseSnapshotId: string, headSnapshotId: string): Promise<GuardrailComparison> {
+    const query = new URLSearchParams({ baseSnapshotId });
+    return this.requestEnvelope(
+      `/v1/snapshots/${encodeURIComponent(headSnapshotId)}/guardrails/compare?${query.toString()}`,
+      {},
+      (value) => guardrailComparisonSchema.parse(value),
     );
   }
 

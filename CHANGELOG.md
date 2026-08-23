@@ -5,6 +5,25 @@ Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-23
+
+### Added
+
+- Deterministic Guardrails Snapshot baseline comparison for two same-Repository Ready Snapshots.
+- Stable `added`, `resolved`, `unchanged`, and `changed` Finding pairs with severity-aware
+  `regressed`, `improved`, and `unchanged` summaries.
+- API comparison endpoint, CLI `guardrails compare` (`--json`, regression exit code `2`), and Web
+  historical Snapshot selection with Base/Head evidence navigation.
+- Compatibility gates for Workspace, Repository, Ready status, Parser Version, algorithm profile,
+  and thresholds; public/private comparison cache policy and source-free response tests.
+
+### Verification
+
+- Guardrails unit, API boundary, CLI, Web component, and Chromium E2E coverage includes duplicate
+  findings, severity changes, race-safe baseline switching, dual evidence, and request IDs.
+- OpenAPI now contains 52 operations and all workspace package/CLI/OpenAPI versions are `0.7.0`.
+- Database integration tests remain explicitly marked Skip when `DATABASE_TEST_URL` is not set.
+
 ## [0.6.0] - 2026-08-23
 
 ### Added

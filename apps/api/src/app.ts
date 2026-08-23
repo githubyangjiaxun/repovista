@@ -135,7 +135,8 @@ export function buildApp(dependencies: AppDependencies = {}): {
                       : error.code === "SNAPSHOT_NOT_READY" ||
                           error.code === "GITHUB_WEBHOOK_DELIVERY_CONFLICT" ||
                           error.code === "EXPORT_NOT_AVAILABLE" ||
-                          error.code === "PR_ANALYSIS_REVISION_CONFLICT"
+                          error.code === "PR_ANALYSIS_REVISION_CONFLICT" ||
+                          error.code === "GUARDRAIL_COMPARISON_INCOMPATIBLE"
                         ? 409
                         : error.code === "GITHUB_API_FAILED"
                           ? 502

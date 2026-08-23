@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import type {
+  GuardrailComparison,
+  GuardrailComparisonStatus,
   GuardrailEvidence,
   GuardrailFinding,
   GuardrailReport,
@@ -454,7 +456,7 @@ export interface SarifLog {
   runs: Array<Record<string, unknown>>;
 }
 
-export function buildSarifReport(report: GuardrailReport, toolVersion = "0.6.0"): SarifLog {
+export function buildSarifReport(report: GuardrailReport, toolVersion = "0.7.0"): SarifLog {
   const ruleIds = [...new Set(report.findings.map((finding) => finding.ruleId))].sort();
   const rules = ruleIds.map((id) => ({ id, name: id.replaceAll("_", " ") }));
   return {
@@ -496,5 +498,180 @@ export function buildSarifReport(report: GuardrailReport, toolVersion = "0.6.0")
         })),
       },
     ],
+  };
+}
+
+const comparisonSeverityOrder: Record<GuardrailSeverity, number> = {
+  info: 0,
+  warning: 1,
+  error: 2,
+};
+
+function stableSerialize(value: unknown): string {
+  if (value === undefined) return "undefined";
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableSerialize(item)).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>).sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
+  return `{${entries
+    .map(([key, item]) => `${JSON.stringify(key)}:${stableSerialize(item)}`)
+    .join(",")}}`;
+}
+
+function comparisonKey(item: GuardrailFinding): string {
+  const metric = item.metric;
+  switch (item.ruleId) {
+    case "dependency_cycle":
+      return `${item.ruleId}|${String(metric.packages ?? item.message)}`;
+    case "large_file":
+    case "parse_failure":
+      return `${item.ruleId}|${item.path}`;
+    case "large_symbol":
+    case "high_fan_in":
+      return `${item.ruleId}|${item.path}|${String(metric.symbol ?? item.message)}`;
+    case "unresolved_import":
+      return `${item.ruleId}|${item.path}|${item.startLine}|${String(metric.target ?? item.message)}`;
+  }
+}
+
+function findingSortKey(item: GuardrailFinding): string {
+  return [
+    item.id,
+    item.ruleId,
+    item.path,
+    String(item.startLine).padStart(8, "0"),
+    String(item.endLine).padStart(8, "0"),
+    item.severity,
+    item.title,
+    item.message,
+    stableSerialize(item.metric),
+    stableSerialize(item.evidence),
+  ].join("\u0000");
+}
+
+function sameFinding(base: GuardrailFinding, head: GuardrailFinding): boolean {
+  return (
+    base.ruleId === head.ruleId &&
+    base.severity === head.severity &&
+    base.title === head.title &&
+    base.message === head.message &&
+    base.path === head.path &&
+    base.startLine === head.startLine &&
+    base.endLine === head.endLine &&
+    stableSerialize(base.metric) === stableSerialize(head.metric) &&
+    stableSerialize(base.evidence) === stableSerialize(head.evidence)
+  );
+}
+
+function pairFindings(
+  base: readonly GuardrailFinding[],
+  head: readonly GuardrailFinding[],
+): Array<{ base: GuardrailFinding | null; head: GuardrailFinding | null; key: string }> {
+  const groupedBase = new Map<string, GuardrailFinding[]>();
+  const groupedHead = new Map<string, GuardrailFinding[]>();
+  for (const item of base) {
+    const key = comparisonKey(item);
+    groupedBase.set(
+      key,
+      [...(groupedBase.get(key) ?? []), item].sort((a, b) =>
+        findingSortKey(a).localeCompare(findingSortKey(b)),
+      ),
+    );
+  }
+  for (const item of head) {
+    const key = comparisonKey(item);
+    groupedHead.set(
+      key,
+      [...(groupedHead.get(key) ?? []), item].sort((a, b) =>
+        findingSortKey(a).localeCompare(findingSortKey(b)),
+      ),
+    );
+  }
+  const keys = [...new Set([...groupedBase.keys(), ...groupedHead.keys()])].sort((a, b) =>
+    a.localeCompare(b),
+  );
+  const pairs: Array<{
+    base: GuardrailFinding | null;
+    head: GuardrailFinding | null;
+    key: string;
+  }> = [];
+  for (const key of keys) {
+    const left = groupedBase.get(key) ?? [];
+    const right = groupedHead.get(key) ?? [];
+    const length = Math.max(left.length, right.length);
+    for (let index = 0; index < length; index += 1) {
+      pairs.push({ base: left[index] ?? null, head: right[index] ?? null, key });
+    }
+  }
+  return pairs;
+}
+
+function comparisonStatus(
+  base: GuardrailFinding | null,
+  head: GuardrailFinding | null,
+): GuardrailComparisonStatus {
+  if (!base) return "added";
+  if (!head) return "resolved";
+  return sameFinding(base, head) ? "unchanged" : "changed";
+}
+
+function isRegression(
+  base: GuardrailFinding | null,
+  head: GuardrailFinding | null,
+  status: GuardrailComparisonStatus,
+): boolean {
+  if (status === "added") return head?.severity === "warning" || head?.severity === "error";
+  if (status !== "changed" || !base || !head) return false;
+  return comparisonSeverityOrder[head.severity] > comparisonSeverityOrder[base.severity];
+}
+
+function isImprovement(
+  base: GuardrailFinding | null,
+  head: GuardrailFinding | null,
+  status: GuardrailComparisonStatus,
+): boolean {
+  if (status === "resolved") return base?.severity === "warning" || base?.severity === "error";
+  if (status !== "changed" || !base || !head) return false;
+  return comparisonSeverityOrder[head.severity] < comparisonSeverityOrder[base.severity];
+}
+
+export function compareGuardrailReports(
+  base: GuardrailReport,
+  head: GuardrailReport,
+): GuardrailComparison {
+  if (base.algorithmVersion !== head.algorithmVersion) {
+    throw new Error("Guardrail reports use incompatible algorithm versions.");
+  }
+  if (stableSerialize(base.thresholds) !== stableSerialize(head.thresholds)) {
+    throw new Error("Guardrail reports use incompatible thresholds.");
+  }
+  const findings = pairFindings(base.findings, head.findings).map(
+    ({ base: left, head: right, key }) => ({
+      key,
+      status: comparisonStatus(left, right),
+      base: left,
+      head: right,
+    }),
+  );
+  const summary = {
+    total: findings.length,
+    added: findings.filter((item) => item.status === "added").length,
+    resolved: findings.filter((item) => item.status === "resolved").length,
+    unchanged: findings.filter((item) => item.status === "unchanged").length,
+    changed: findings.filter((item) => item.status === "changed").length,
+    regressions: findings.filter((item) => isRegression(item.base, item.head, item.status)).length,
+    improvements: findings.filter((item) => isImprovement(item.base, item.head, item.status))
+      .length,
+  };
+  const overall =
+    summary.regressions > 0 ? "regressed" : summary.improvements > 0 ? "improved" : "unchanged";
+  return {
+    algorithmVersion: head.algorithmVersion,
+    base,
+    head,
+    overall,
+    summary,
+    findings,
   };
 }

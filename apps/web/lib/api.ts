@@ -5,6 +5,7 @@ import type {
   CreateEmbeddingIndexResponse,
   GitHubIntegrationStatus,
   GraphResponse,
+  GuardrailComparison,
   GuardrailReport,
   Job,
   PullRequestAnalysis,
@@ -274,6 +275,7 @@ export type AskResult = ContractAskResult;
 
 export type { CreateEmbeddingIndexResponse, RetrievalStatus, SearchResult };
 export type { GuardrailReport };
+export type { GuardrailComparison };
 
 export interface ShareReport {
   id: string;

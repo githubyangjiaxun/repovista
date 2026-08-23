@@ -1,5 +1,5 @@
 import { chmod, writeFile } from "node:fs/promises";
-import type { AskResult } from "@repovista/contracts";
+import type { AskResult, GuardrailComparison } from "@repovista/contracts";
 import {
   createRepositoryRequestSchema,
   type GuardrailReport,
@@ -106,6 +106,7 @@ const commandHelp: Record<string, string> = {
   ].join("\n"),
   guardrails: [
     "Usage: repovista guardrails <snapshot-id> [options]",
+    "       repovista guardrails compare <base-snapshot-id> <head-snapshot-id> [options]",
     "",
     "Options:",
     "  --sarif <file>          Save a SARIF 2.1.0 report to a local file",
@@ -416,6 +417,30 @@ function formatGuardrails(report: GuardrailReport, sarifPath?: string): string {
     lines.push("", "No guardrail findings.");
   }
   if (sarifPath) lines.push("", `SARIF: ${sarifPath}`);
+  return lines.join("\n");
+}
+
+function formatGuardrailComparison(comparison: GuardrailComparison): string {
+  const lines = [
+    `Guardrails comparison: ${comparison.overall}`,
+    `Base: ${comparison.base.snapshot.id} (${comparison.base.snapshot.commitSha.slice(0, 12)})`,
+    `Head: ${comparison.head.snapshot.id} (${comparison.head.snapshot.commitSha.slice(0, 12)})`,
+    `Changes: ${comparison.summary.total} (${comparison.summary.added} added, ${comparison.summary.resolved} resolved, ${comparison.summary.changed} changed, ${comparison.summary.unchanged} unchanged)`,
+    `Regressions: ${comparison.summary.regressions} · Improvements: ${comparison.summary.improvements}`,
+  ];
+  if (comparison.findings.length > 0) {
+    lines.push("", "Findings:");
+    for (const item of comparison.findings) {
+      const finding = item.head ?? item.base;
+      if (!finding) continue;
+      lines.push(
+        `- [${item.status}] ${finding.ruleId} ${finding.path}:${finding.startLine}-${finding.endLine}`,
+        `  ${finding.message}`,
+      );
+    }
+  } else {
+    lines.push("", "No guardrail changes.");
+  }
   return lines.join("\n");
 }
 
@@ -977,6 +1002,17 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     }
 
     if (command === "guardrails") {
+      if (parsed.positionals[0] === "compare") {
+        if (parsed.positionals.length !== 3) {
+          throw new UsageError("guardrails compare requires exactly a base and head snapshot ID.");
+        }
+        const baseSnapshotId = requireId(parsed.positionals[1], "Base snapshot ID");
+        const headSnapshotId = requireId(parsed.positionals[2], "Head snapshot ID");
+        const comparison = await client.compareGuardrails(baseSnapshotId, headSnapshotId);
+        if (json) writeJson(output, comparison);
+        else output.stdout(formatGuardrailComparison(comparison));
+        return comparison.summary.regressions > 0 ? 2 : 0;
+      }
       if (parsed.positionals.length !== 1) {
         throw new UsageError("guardrails requires exactly one snapshot ID.");
       }

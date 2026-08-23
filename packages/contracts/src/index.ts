@@ -912,6 +912,43 @@ export const guardrailReportSchema = z.object({
 });
 export type GuardrailReport = z.infer<typeof guardrailReportSchema>;
 
+export const guardrailComparisonStatusSchema = z.enum([
+  "added",
+  "resolved",
+  "unchanged",
+  "changed",
+]);
+export type GuardrailComparisonStatus = z.infer<typeof guardrailComparisonStatusSchema>;
+
+export const guardrailComparisonOverallSchema = z.enum(["regressed", "improved", "unchanged"]);
+export type GuardrailComparisonOverall = z.infer<typeof guardrailComparisonOverallSchema>;
+
+export const guardrailFindingComparisonSchema = z.object({
+  key: z.string().min(1),
+  status: guardrailComparisonStatusSchema,
+  base: guardrailFindingSchema.nullable(),
+  head: guardrailFindingSchema.nullable(),
+});
+export type GuardrailFindingComparison = z.infer<typeof guardrailFindingComparisonSchema>;
+
+export const guardrailComparisonSchema = z.object({
+  algorithmVersion: z.string().min(1),
+  base: guardrailReportSchema,
+  head: guardrailReportSchema,
+  overall: guardrailComparisonOverallSchema,
+  summary: z.object({
+    total: z.number().int().nonnegative(),
+    added: z.number().int().nonnegative(),
+    resolved: z.number().int().nonnegative(),
+    unchanged: z.number().int().nonnegative(),
+    changed: z.number().int().nonnegative(),
+    regressions: z.number().int().nonnegative(),
+    improvements: z.number().int().nonnegative(),
+  }),
+  findings: z.array(guardrailFindingComparisonSchema),
+});
+export type GuardrailComparison = z.infer<typeof guardrailComparisonSchema>;
+
 export interface ApiSuccess<T> {
   data: T;
   meta: {

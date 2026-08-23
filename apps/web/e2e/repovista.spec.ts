@@ -19,6 +19,7 @@ const prHeadSnapshotId = "01900000-0000-7000-8000-000000000014";
 const baseCommitSha = "fedcba9876543210fedcba9876543210fedcba98";
 const prBaseCommitSha = "1111111111111111111111111111111111111111";
 const prHeadCommitSha = "2222222222222222222222222222222222222222";
+const baselineCommitSha = "1111111111111111111111111111111111111111";
 
 const repository = {
   id: repositoryId,
@@ -65,6 +66,93 @@ const snapshot = {
   requestedAt: "2026-01-01T00:00:00.000Z",
   readyAt: "2026-01-01T00:00:03.000Z",
   failure: null,
+};
+
+const baselineSnapshot = {
+  ...snapshot,
+  id: baseSnapshotId,
+  commitSha: baselineCommitSha,
+  requestedAt: "2025-12-31T00:00:00.000Z",
+  readyAt: "2025-12-31T00:00:03.000Z",
+  indexMode: "full",
+  baseSnapshotId: null,
+};
+
+function guardrailReport(
+  targetSnapshot: { id: string; commitSha: string; readyAt: string },
+  finding = true,
+) {
+  return {
+    algorithmVersion: "architecture-guardrails-v1",
+    snapshot: {
+      id: targetSnapshot.id,
+      commitSha: targetSnapshot.commitSha,
+      parserVersion: "tree-sitter-ts-js-py-go-v1",
+    },
+    generatedAt: targetSnapshot.readyAt,
+    status: finding ? "warn" : "pass",
+    summary: finding
+      ? { total: 1, errors: 0, warnings: 1, infos: 0 }
+      : { total: 0, errors: 0, warnings: 0, infos: 0 },
+    thresholds: {
+      cycleMaxLength: 12,
+      largeFileLines: 800,
+      largeFileBytes: 102400,
+      largeSymbolLines: 150,
+      highFanIn: 20,
+    },
+    findings: finding
+      ? [
+          {
+            id: `large_file:${targetSnapshot.id}`,
+            fingerprint: `sha256:${targetSnapshot.id}`,
+            ruleId: "large_file",
+            severity: "warning",
+            title: "Large source file",
+            message: "src/server.ts is larger than the fixed threshold.",
+            path: "src/server.ts",
+            startLine: 1,
+            endLine: 801,
+            metric: { lines: 801, bytes: 120000 },
+            evidence: [
+              { path: "src/server.ts", startLine: 1, endLine: 801, description: "File size." },
+            ],
+          },
+        ]
+      : [],
+  };
+}
+
+const currentGuardrailReport = guardrailReport(snapshot, true);
+const baselineGuardrailReport = guardrailReport(baselineSnapshot, true);
+if (baselineGuardrailReport.findings[0]) {
+  baselineGuardrailReport.findings[0].message =
+    "src/server.ts exceeded the baseline size threshold by a smaller margin.";
+  baselineGuardrailReport.findings[0].endLine = 800;
+  baselineGuardrailReport.findings[0].metric = { lines: 800, bytes: 110000 };
+}
+const guardrailComparison = {
+  algorithmVersion: "architecture-guardrails-v1",
+  base: baselineGuardrailReport,
+  head: currentGuardrailReport,
+  overall: "regressed",
+  summary: {
+    total: 1,
+    added: 0,
+    resolved: 0,
+    unchanged: 0,
+    changed: 1,
+    regressions: 1,
+    improvements: 0,
+  },
+  findings: [
+    {
+      key: "large_file|src/server.ts",
+      status: "changed",
+      base: baselineGuardrailReport.findings[0],
+      head: currentGuardrailReport.findings[0],
+    },
+  ],
 };
 
 const files = [
@@ -575,6 +663,14 @@ async function installMockApi(
     }
 
     if (
+      request.method() === "GET" &&
+      url.pathname === `/v1/repositories/${repositoryId}/snapshots`
+    ) {
+      await json(route, [snapshot, baselineSnapshot]);
+      return;
+    }
+
+    if (
       request.method() === "POST" &&
       url.pathname === `/v1/repositories/${repositoryId}/pull-requests`
     ) {
@@ -614,8 +710,35 @@ async function installMockApi(
       return;
     }
 
+    if (request.method() === "GET" && url.pathname === `/v1/snapshots/${baseSnapshotId}`) {
+      await json(route, baselineSnapshot);
+      return;
+    }
+
     if (request.method() === "GET" && url.pathname === `/v1/snapshots/${snapshotId}/files`) {
       await json(route, { files, nextCursor: null });
+      return;
+    }
+
+    if (request.method() === "GET" && url.pathname === `/v1/snapshots/${snapshotId}/guardrails`) {
+      await json(route, currentGuardrailReport);
+      return;
+    }
+
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/v1/snapshots/${baseSnapshotId}/guardrails`
+    ) {
+      await json(route, baselineGuardrailReport);
+      return;
+    }
+
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/v1/snapshots/${snapshotId}/guardrails/compare`
+    ) {
+      expect(url.searchParams.get("baseSnapshotId")).toBe(baseSnapshotId);
+      await json(route, guardrailComparison);
       return;
     }
 
@@ -728,11 +851,19 @@ async function installMockApi(
       return;
     }
 
-    if (request.method() === "GET" && url.pathname === `/v1/snapshots/${snapshotId}/source`) {
+    if (
+      request.method() === "GET" &&
+      (url.pathname === `/v1/snapshots/${snapshotId}/source` ||
+        url.pathname === `/v1/snapshots/${baseSnapshotId}/source`)
+    ) {
       const startLine = Number.parseInt(url.searchParams.get("startLine") ?? "1", 10);
       const endLine = Number.parseInt(url.searchParams.get("endLine") ?? "14", 10);
       const requestedPath = url.searchParams.get("path") ?? "src/server.ts";
       const python = requestedPath.endsWith(".py");
+      const sourceCommitSha =
+        url.pathname === `/v1/snapshots/${baseSnapshotId}/source`
+          ? baselineCommitSha
+          : repository.latestCommitSha;
       await json(route, {
         id: fileId,
         path: requestedPath,
@@ -742,7 +873,7 @@ async function installMockApi(
           : sourceLines.slice(startLine - 1, endLine).join("\n"),
         lineCount: python ? 4 : sourceLines.length,
         startLine,
-        commitSha: repository.latestCommitSha,
+        commitSha: sourceCommitSha,
         blobHash: "sha256:server",
         truncated: false,
       });
@@ -1199,6 +1330,39 @@ test("downloads deterministic Markdown and SVG for the selected snapshot", async
     `${apiOrigin}/v1/snapshots/${snapshotId}/exports/markdown`,
     `${apiOrigin}/v1/snapshots/${snapshotId}/exports/svg?level=package`,
   ]);
+});
+
+test("compares guardrails with a historical Ready Snapshot and opens both evidence sides", async ({
+  context,
+  page,
+}) => {
+  await installMockApi(context);
+  await page.goto(`/repositories/${repositoryId}?snapshotId=${snapshotId}&tab=guardrails`);
+
+  await expect(
+    page.getByRole("heading", { name: "Deterministic checks with fixed source evidence." }),
+  ).toBeVisible();
+  const baseline = page.getByRole("combobox", { name: "Baseline snapshot" });
+  await expect(baseline).toBeVisible();
+  await baseline.selectOption(baseSnapshotId);
+  await expect(page.getByText("Baseline comparison: regressed")).toBeVisible();
+  await expect(page.getByText(/0 added · 0 resolved · 1 changed · 0 unchanged/)).toBeVisible();
+  await expect(
+    page
+      .getByRole("region", { name: "Guardrails comparison result" })
+      .getByText("src/server.ts is larger than the fixed threshold."),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: /Base ·/ }).click();
+  await expect(page.locator(".source-panel small")).toContainText(baselineCommitSha.slice(0, 7));
+  await expect(page.getByText("Evidence lines 1-800")).toBeVisible();
+  await page.getByRole("button", { name: "Close source" }).click();
+
+  await page.getByRole("button", { name: /Head ·/ }).click();
+  await expect(page.locator(".source-panel small")).toContainText(
+    repository.latestCommitSha.slice(0, 7),
+  );
+  await expect(page.getByText("Evidence lines 1-801")).toBeVisible();
 });
 
 test("lists existing repositories and opens an immutable snapshot", async ({ context, page }) => {

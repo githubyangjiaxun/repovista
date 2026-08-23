@@ -71,7 +71,7 @@ describe("RepoVistaClient", () => {
       expect.objectContaining({ method: "POST" }),
     );
     const request = fetchImplementation.mock.calls[0]?.[1] as RequestInit;
-    expect((request.headers as Headers).get("User-Agent")).toBe("RepoVista-CLI/0.6.0");
+    expect((request.headers as Headers).get("User-Agent")).toBe("RepoVista-CLI/0.7.0");
     expect(JSON.parse(String(request.body))).toEqual({
       url: "https://github.com/acme/demo",
       ref: "main",
@@ -162,5 +162,47 @@ describe("RepoVistaClient", () => {
     });
     const sarifRequest = fetchImplementation.mock.calls[1]?.[1] as RequestInit;
     expect(new Headers(sarifRequest.headers).get("Authorization")).toMatch(/^Bearer rv_/);
+  });
+
+  it("loads a guardrail baseline comparison and validates its envelope", async () => {
+    const comparison = {
+      algorithmVersion: "architecture-guardrails-v1",
+      base: guardrailReport,
+      head: { ...guardrailReport, snapshot: { ...guardrailReport.snapshot, id: repositoryId } },
+      overall: "regressed",
+      summary: {
+        total: 1,
+        added: 1,
+        resolved: 0,
+        unchanged: 0,
+        changed: 0,
+        regressions: 1,
+        improvements: 0,
+      },
+      findings: [
+        {
+          key: "large_file|src/index.ts",
+          status: "added",
+          base: null,
+          head: guardrailReport.findings[0],
+        },
+      ],
+    } as const;
+    const fetchImplementation = vi.fn<typeof fetch>(async (input, init) => {
+      expect(String(input)).toBe(
+        `http://localhost:4000/v1/snapshots/${repositoryId}/guardrails/compare?baseSnapshotId=${snapshotId}`,
+      );
+      expect(new Headers(init?.headers).get("User-Agent")).toBe("RepoVista-CLI/0.7.0");
+      return jsonResponse({ data: comparison, meta: { requestId: "request-compare" } });
+    });
+    const client = new RepoVistaClient({
+      apiUrl: "http://localhost:4000",
+      apiToken: "rv_testtoken_abcdefghijklmnopqrstuvwxyz0123456789",
+      fetch: fetchImplementation as typeof fetch,
+    });
+    await expect(client.compareGuardrails(snapshotId, repositoryId)).resolves.toMatchObject({
+      overall: "regressed",
+      summary: { regressions: 1 },
+    });
   });
 });
