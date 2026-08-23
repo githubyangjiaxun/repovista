@@ -1,6 +1,6 @@
 # RepoVista 工程文档
 
-状态：v0.5 已实现并完成认证、Workspace 隔离、GitHub App 私有仓库链路、CLI/Web 安全测试与 OpenAPI 同步（2026-08-22）
+状态：v0.6 已实现并完成 Architecture Guardrails、SARIF、CLI/Web 链路、权限测试与 OpenAPI 同步（2026-08-23）
 
 本目录描述当前代码，而不是早期愿景。发生冲突时，事实来源优先级如下：
 
@@ -68,6 +68,16 @@
 | [v0.5 测试与发布计划](./operations/v0.5测试与发布计划.md) | 授权隔离、凭据不泄露、PostgreSQL、CLI/Web/API 与部署门禁 |
 | [v0.5 验收记录](./releases/v0.5-验收记录.md) | 自动化安全矩阵、PostgreSQL、E2E、Docker、Benchmark、凭据扫描与真实 Fixture 边界 |
 
+## v0.6 实施计划（已完成）
+
+| 文档 | 内容 |
+|---|---|
+| [版本开发计划](./releases/v0.6-开发计划.md) | Architecture Guardrails 的规则、边界、完成定义与交付阶段 |
+| [v0.6 后端开发文档](./backend/v0.6后端开发文档.md) | Snapshot 读取、确定性规则、API、SARIF 与权限/缓存契约 |
+| [v0.6 前端开发文档](./frontend/v0.6前端开发文档.md) | Guardrails Workspace、证据跳转、加载/错误/下载交互 |
+| [v0.6 测试与发布计划](./operations/v0.6测试与发布计划.md) | 单元、API、CLI、Web、OpenAPI、Compose 与 Git 发布门禁 |
+| [v0.6 验收记录](./releases/v0.6-验收记录.md) | 可复现命令、结果、权限边界、已知限制和远端提交审计 |
+
 ## 前端
 
 | 文档 | 内容 |
@@ -80,7 +90,7 @@
 | 文档 | 内容 |
 |---|---|
 | [后端开发文档](./backend/后端开发文档.md) | Fastify 请求边界、配置、错误和模块职责 |
-| [API 接口契约](./backend/API接口契约.md) | 49 个 v0.5 Operation、Cookie/Bearer、Workspace、GitHub App、SSE、Retrieval、Story 与 PR Impact |
+| [API 接口契约](./backend/API接口契约.md) | 51 个 v0.6 Operation、Cookie/Bearer、Workspace、Guardrails/SARIF、SSE、Retrieval、Story 与 PR Impact |
 | [任务与索引流水线](./backend/任务与索引流水线.md) | 租约任务、安全克隆、扫描、解析和持久化 |
 
 ## 数据与可信 AI

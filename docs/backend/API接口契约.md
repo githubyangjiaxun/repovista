@@ -1,6 +1,6 @@
 # API 接口契约
 
-状态：v0.5 已实现并验收（2026-08-22）
+状态：v0.6 已实现并验收（2026-08-23）
 Base path：`/v1`
 机器事实来源：`openapi/openapi.json`
 
@@ -94,6 +94,17 @@ Operation。所有 UUID 资源查询先做 Workspace Access Check；无权资源
 | GET | `/v1/share-reports/{slug}` | 读取 v1 Tour 或 v2 Story |
 
 共 49 个 Operation。
+
+v0.6 增加两个 Snapshot 派生读接口，共 51 个 Operation：
+
+| Method | Path | 用途 |
+|---|---|---|
+| GET | `/v1/snapshots/{snapshotId}/guardrails` | 计算并返回固定阈值的 Architecture Guardrails JSON 报告 |
+| GET | `/v1/snapshots/{snapshotId}/guardrails/sarif` | 下载同一报告的 SARIF 2.1.0 表示 |
+
+两个接口只接受 Ready Snapshot，并复用既有 Workspace Access Check。报告从指定 Snapshot 的文件、
+符号和关系重算，不写入可变 Finding 表；SARIF 不包含源码正文，私有 Snapshot 使用
+`Cache-Control: private, no-store`。
 
 ## 3. 创建分析
 

@@ -5,6 +5,28 @@ Keep a Changelog structure.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-23
+
+### Added
+
+- Deterministic Architecture Guardrails for immutable Snapshots: package dependency cycles, large
+  files, large symbols, high fan-in symbols, unresolved imports, and parse failures.
+- Shared Guardrail contracts and a pure `@repovista/guardrails` implementation with stable findings,
+  thresholds, evidence, fingerprints, and `architecture-guardrails-v1` provenance.
+- Snapshot JSON and SARIF 2.1.0 exports, including Workspace authorization and private `no-store`
+  cache headers.
+- CLI `guardrails` workflow with human-readable/JSON output, safe SARIF file writing, and exit code
+  `2` when error-level findings are present.
+- Web Guardrails workspace with status summary, threshold display, evidence navigation, and SARIF
+  download.
+
+### Verification
+
+- OpenAPI, Biome, TypeScript, unit/API/CLI/Web tests, production builds, Compose configuration and
+  image checks, benchmark, and Git integrity gates are recorded in the [v0.6 acceptance record](docs/releases/v0.6-验收记录.md).
+- Guardrails do not use an AI model for rule decisions; findings are recomputed from the selected
+  immutable Snapshot and remain reproducible.
+
 ## [0.5.0] - 2026-08-22
 
 ### Added

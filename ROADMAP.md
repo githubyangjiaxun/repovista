@@ -38,4 +38,18 @@
 - [Done](./docs/releases/v0.5-开发计划.md) Workspace-aware access checks for repository-derived resources, private shares, and signed private webhooks.
 - [Done](./docs/releases/v0.5-开发计划.md) Web Settings/Import flows and CLI authentication, Workspace, Installation, and private analysis workflows.
 
+## v0.6 — Deterministic architecture quality guardrails (implemented 2026-08-23)
+
+- [Done](./docs/releases/v0.6-开发计划.md) Snapshot-scoped dependency-cycle, size, fan-in, unresolved-import, and parse-failure rules.
+- [Done](./docs/releases/v0.6-开发计划.md) Stable evidence-backed findings, thresholds, fingerprints, and algorithm provenance.
+- [Done](./docs/releases/v0.6-开发计划.md) JSON/SARIF API exports with public/private access behavior and no source leakage.
+- [Done](./docs/releases/v0.6-开发计划.md) CLI CI workflow and Web Guardrails workspace with fixed evidence navigation.
+
+## Next candidates
+
+- Baseline comparison: compare two immutable Snapshots and report newly introduced or resolved findings.
+- Repository policy profiles: versioned, reviewable threshold profiles without allowing model-driven rules.
+- Optional verified explanations: let an AI summarize an existing finding while preserving its rule,
+  fingerprint, Commit, and evidence boundaries.
+
 Roadmap ordering may change based on measured usage and contributor feedback.

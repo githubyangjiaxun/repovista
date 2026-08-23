@@ -27,6 +27,23 @@ The map, source browser, search, reading path, and share reports remain useful w
 key. The default `fake` provider is a transparent deterministic evidence summarizer, so the full
 workflow can be evaluated locally before connecting Ollama or an OpenAI-compatible endpoint.
 
+## What v0.6 includes
+
+- Deterministic Architecture Guardrails evaluated from one immutable Snapshot: dependency cycles,
+  oversized files/symbols, high fan-in, unresolved imports, and parse failures.
+- Commit-pinned findings with stable fingerprints, source/relationship evidence, fixed thresholds,
+  and algorithm provenance (`architecture-guardrails-v1`).
+- JSON and SARIF 2.1.0 HTTP exports with the same Workspace access checks and private no-store
+  response policy as other Snapshot artifacts.
+- CLI `guardrails <snapshot-id>` with human-readable, JSON, and SARIF modes; error findings return
+  exit code `2` for CI integration.
+- A Web Guardrails workspace that links every finding back to immutable source evidence without
+  exposing private source to anonymous downloads.
+
+Guardrails are intentionally deterministic and do not use AI to decide whether a rule fires. AI may
+later explain an already verified finding, but it cannot create findings or change their evidence.
+The reproducible checks and known boundaries are in the [v0.6 acceptance record](docs/releases/v0.6-验收记录.md).
+
 ## What v0.5 includes
 
 - GitHub OAuth login with HttpOnly sessions, CSRF protection, explicit Workspace switching, audited
@@ -267,7 +284,7 @@ docker compose config --quiet
 DATABASE_TEST_URL=postgresql://repovista:repovista@localhost:5432/repovista pnpm test
 ```
 
-`pnpm check` validates the 29-operation OpenAPI contract, formatting/lint rules, TypeScript,
+`pnpm check` validates the 51-operation OpenAPI contract, formatting/lint rules, TypeScript,
 unit/integration tests that have their required environment, and production builds. Playwright
 covers import, incremental progress, Python source navigation, map/source exploration, grounded
 answers, sharing, repository listing, deterministic Markdown/SVG downloads, pull-request impact
@@ -308,6 +325,11 @@ Read [SECURITY.md](./SECURITY.md) before reporting a vulnerability.
 - [v0.4 acceptance record](./docs/releases/v0.4-验收记录.md)
 - [v0.5 development plan](./docs/releases/v0.5-开发计划.md)
 - [v0.5 test and release plan](./docs/operations/v0.5测试与发布计划.md)
+- [v0.6 development plan](./docs/releases/v0.6-开发计划.md)
+- [v0.6 backend development document](./docs/backend/v0.6后端开发文档.md)
+- [v0.6 frontend development document](./docs/frontend/v0.6前端开发文档.md)
+- [v0.6 test and release plan](./docs/operations/v0.6测试与发布计划.md)
+- [v0.6 acceptance record](./docs/releases/v0.6-验收记录.md)
 - [Roadmap](./ROADMAP.md)
 
 The machine-readable API source of truth is [openapi/openapi.json](./openapi/openapi.json).
