@@ -41,6 +41,24 @@ workflow can be evaluated locally before connecting Ollama or an OpenAI-compatib
 
 The v0.7 implementation details and reproducible gates are in the [v0.7 acceptance record](docs/releases/v0.7-验收记录.md).
 
+## What v0.8 includes
+
+- Immutable, Workspace-scoped Guardrails Policy Profiles. Profiles can adjust only the existing
+  deterministic thresholds; users cannot upload rules, scripts, prompts, or model configuration.
+- Idempotent profile creation: an identical latest request reuses its immutable version, while a
+  changed name, description, algorithm, or threshold set creates the next version with a new UUID and
+  SHA-256 fingerprint.
+- Repository-level profile assignment for future Snapshots, with the selected profile ID copied into
+  each new Snapshot. Historical reports continue to use their own policy snapshot, and legacy NULL
+  values resolve to the built-in `default` profile.
+- Profile provenance in Guardrails JSON/SARIF reports, CLI profile management, and Web profile
+  visibility/assignment with Workspace authorization. Baseline comparison rejects differing policy
+  fingerprints with HTTP 409.
+
+AI remains an optional explanation layer. It never decides Guardrails findings, changes thresholds,
+executes repository-provided code, or edits a policy profile. See the [v0.8 acceptance record](docs/releases/v0.8-验收记录.md)
+for reproducible gates and the explicit PostgreSQL/GitHub fixture boundaries.
+
 ## What v0.6 includes
 
 - Deterministic Architecture Guardrails evaluated from one immutable Snapshot: dependency cycles,

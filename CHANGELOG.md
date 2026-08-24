@@ -5,6 +5,28 @@ Keep a Changelog structure.
 
 ## [Unreleased]
 
+No unreleased changes.
+
+## [0.8.0] - 2026-08-24
+
+### Added
+
+- Immutable, Workspace-scoped Guardrails Policy Profiles with threshold-only inputs; arbitrary rules,
+  scripts, prompts, and model configuration are rejected by the contract boundary.
+- Idempotent profile creation, monotonic per-key versions, stable SHA-256 fingerprints, audit events,
+  repository assignment, and Snapshot policy provenance.
+- Profile-aware Guardrails JSON/SARIF reports, baseline fingerprint compatibility checks, CLI profile
+  management, and Web assignment/read-only workflows.
+
+### Verification
+
+- OpenAPI, Biome, TypeScript, unit/API/CLI/Web tests, production builds, Chromium E2E, benchmark,
+  Compose configuration, and all three Compose image builds passed. PostgreSQL integration passed
+  11/11 on an isolated PostgreSQL 17 + pgvector database; the default test run explicitly skips those
+  integration cases when `DATABASE_TEST_URL` is absent.
+- AI remains optional and never decides Guardrails findings or mutates policy profiles. Full evidence is
+  in the [v0.8 acceptance record](docs/releases/v0.8-验收记录.md).
+
 ## [0.7.0] - 2026-08-23
 
 ### Added

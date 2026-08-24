@@ -51,9 +51,14 @@
 - [Done](./docs/releases/v0.7-开发计划.md) Added/resolved/unchanged/changed Finding states with severity-aware regression summaries.
 - [Done](./docs/releases/v0.7-开发计划.md) API, CLI, Web baseline selection, dual evidence navigation, compatibility gates, and privacy headers.
 
+## v0.8 — Guardrails Policy Profiles（implemented 2026-08-24）
+
+- [Done](./docs/releases/v0.8-开发计划.md) Workspace-scoped immutable profiles with deterministic threshold-only policy changes.
+- [Done](./docs/releases/v0.8-开发计划.md) Snapshot policy provenance, idempotent creation, versioning, and fingerprint compatibility gates.
+- [Done](./docs/releases/v0.8-开发计划.md) API, CLI, Web assignment workflows, audit events, migration, and release evidence.
+
 ## Next candidates
 
-- Repository policy profiles: versioned, reviewable threshold profiles without allowing model-driven rules.
 - Optional verified explanations: let an AI summarize an existing finding while preserving its rule,
   fingerprint, Commit, and evidence boundaries.
 

@@ -1,6 +1,6 @@
 # API 接口契约
 
-状态：v0.7 已实现并验收（2026-08-23）
+状态：v0.8 已实现并验收（2026-08-24）
 Base path：`/v1`
 机器事实来源：`openapi/openapi.json`
 
@@ -95,13 +95,30 @@ Operation。所有 UUID 资源查询先做 Workspace Access Check；无权资源
 
 共 49 个 Operation。
 
-v0.6 增加两个 Snapshot 派生读接口；v0.7 增加一个基线比较接口，共 52 个 Operation：
+v0.6 增加两个 Snapshot 派生读接口；v0.7 增加一个基线比较接口；v0.8 增加五个策略 Profile
+接口，共 57 个 Operation：
 
 | Method | Path | 用途 |
 |---|---|---|
 | GET | `/v1/snapshots/{snapshotId}/guardrails` | 计算并返回固定阈值的 Architecture Guardrails JSON 报告 |
 | GET | `/v1/snapshots/{snapshotId}/guardrails/sarif` | 下载同一报告的 SARIF 2.1.0 表示 |
 | GET | `/v1/snapshots/{snapshotId}/guardrails/compare?baseSnapshotId=...` | 比较同一 Repository 的两个 Ready Snapshot，返回 Finding 状态和回归摘要 |
+
+v0.8 策略 Profile 路由：
+
+| Method | Path | 用途 |
+|---|---|---|
+| GET | `/v1/guardrail-profiles` | 列出当前 Workspace 可见的内置 default 和自定义不可变版本 |
+| POST | `/v1/guardrail-profiles` | 创建或幂等复用策略版本；只接受既有 Guardrails 阈值 |
+| GET | `/v1/guardrail-profiles/{profileId}` | 读取单个策略版本 |
+| GET | `/v1/repositories/{repositoryId}/guardrail-profile` | 读取仓库对未来 Snapshot 的当前绑定 |
+| PUT | `/v1/repositories/{repositoryId}/guardrail-profile` | 为未来 Snapshot 绑定策略版本或清空回 default |
+
+策略 Profile 是 Workspace 隔离的不可变读模型。完全相同的最新创建请求返回既有版本；内容变化
+才递增版本。Repository 绑定只影响之后创建的 Snapshot，历史 Snapshot 报告读取自身保存的
+策略 ID；迁移前的 `NULL guardrailProfileId` 回退内置 `default`。不同策略 fingerprint 的
+Guardrails 基线比较返回 `409 GUARDRAIL_COMPARISON_INCOMPATIBLE`。策略接口的写请求遵循现有
+Cookie + CSRF 或 Workspace-bound Bearer Token 权限，读取结果遵循公开/私有缓存策略。
 
 两个接口只接受 Ready Snapshot，并复用既有 Workspace Access Check。报告从指定 Snapshot 的文件、
 符号和关系重算，不写入可变 Finding 表；SARIF 不包含源码正文，私有 Snapshot 使用
@@ -311,7 +328,8 @@ GET /v1/snapshots/{snapshotId}/exports/svg?level=package|file|symbol
 - 200：读取或问答成功。
 - 201：Share Report 创建成功。
 - 202：Source/PR/Embedding 分析或取消请求被接受。
-- 401：GitHub Webhook 签名错误。
+- 401：未认证、认证失效或 GitHub Webhook 签名错误。
+- 403：已认证但没有当前 Workspace/Repository 的写权限。
 - 400：输入、URL、Ref 或 Path 不合法。
 - 404：资源不存在。
 - 409：Snapshot/Embedding 未 Ready、Delivery Payload 冲突、配置不匹配等状态冲突。

@@ -1,6 +1,6 @@
 # RepoVista 工程文档
 
-状态：v0.7 已实现并完成 Guardrails Snapshot 基线比较、CLI/Web 链路、权限/兼容性测试与 OpenAPI 同步（2026-08-23）
+状态：v0.8 已实现并完成 Guardrails Policy Profiles、CLI/Web 链路、权限/兼容性测试与 OpenAPI 同步（2026-08-24）
 
 本目录描述当前代码，而不是早期愿景。发生冲突时，事实来源优先级如下：
 
@@ -88,6 +88,17 @@
 | [v0.7 测试与发布计划](./operations/v0.7测试与发布计划.md) | 单元、API、CLI、Web、E2E、契约与发布门禁 |
 | [v0.7 验收记录](./releases/v0.7-验收记录.md) | 可复现结果、已知边界、数据库 Skip 和 Git 远端审计 |
 
+## v0.8 实施完成
+
+| 文档 | 内容 |
+|---|---|
+| [版本开发计划](./releases/v0.8-开发计划.md) | 版本化、可审查的 Guardrails Policy Profiles |
+| [v0.8 后端开发文档](./backend/v0.8后端开发文档.md) | Profile API、Snapshot 快照、权限和兼容性 |
+| [v0.8 数据库设计](./database/v0.8数据库设计.md) | 版本化策略表、外键和事务不变式 |
+| [v0.8 前端开发文档](./frontend/v0.8前端开发文档.md) | Guardrails 页策略展示、切换和竞态保护 |
+| [v0.8 测试与发布计划](./operations/v0.8测试与发布计划.md) | 各层测试、数据库、E2E、Compose 和 Git 门禁 |
+| [v0.8 验收记录](./releases/v0.8-验收记录.md) | 实际门禁结果、数据库 Skip、Git 提交和远端审计 |
+
 ## 前端
 
 | 文档 | 内容 |
@@ -100,7 +111,7 @@
 | 文档 | 内容 |
 |---|---|
 | [后端开发文档](./backend/后端开发文档.md) | Fastify 请求边界、配置、错误和模块职责 |
-| [API 接口契约](./backend/API接口契约.md) | 52 个 v0.7 Operation、Cookie/Bearer、Workspace、Guardrails/比较/SARIF、SSE、Retrieval、Story 与 PR Impact |
+| [API 接口契约](./backend/API接口契约.md) | 57 个 v0.8 Operation、Cookie/Bearer、Workspace、策略 Profile、Guardrails/比较/SARIF、SSE、Retrieval、Story 与 PR Impact |
 | [任务与索引流水线](./backend/任务与索引流水线.md) | 租约任务、安全克隆、扫描、解析和持久化 |
 
 ## 数据与可信 AI
