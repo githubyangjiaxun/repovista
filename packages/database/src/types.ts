@@ -7,6 +7,8 @@ import type {
   GitHubInstallation,
   GitHubWebhookResult,
   GroundedAnswer,
+  GuardrailProfile,
+  GuardrailThresholds,
   Job,
   RepositorySummary,
   RetrievalStatus,
@@ -38,6 +40,33 @@ export interface CreateImportInput {
   ignore: string[];
   parserVersion: string;
 }
+
+export interface CreateGuardrailProfileInput {
+  workspaceId: string;
+  profileKey: string;
+  name: string;
+  description: string;
+  algorithmVersion: string;
+  thresholds: GuardrailThresholds;
+  fingerprint: (version: number) => string;
+  actorUserId: string | null;
+  actorKind: Principal["kind"];
+}
+
+export interface CreateGuardrailProfileResult {
+  profile: GuardrailProfile;
+  created: boolean;
+}
+
+export interface AssignRepositoryGuardrailProfileInput {
+  repositoryId: string;
+  workspaceId: string;
+  profileId: string | null;
+  actorUserId: string | null;
+  actorKind: Principal["kind"];
+}
+
+export type GuardrailProfileRecord = GuardrailProfile;
 
 export interface GitHubUserProfileInput {
   providerUserId: string;

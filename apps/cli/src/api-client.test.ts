@@ -4,6 +4,28 @@ import { ApiError, RepoVistaClient } from "./api-client.js";
 const repositoryId = "01900000-0000-7000-8000-000000000001";
 const snapshotId = "01900000-0000-7000-8000-000000000002";
 const jobId = "01900000-0000-7000-8000-000000000003";
+const profileId = "01900000-0000-7000-8000-000000000004";
+
+const guardrailProfile = {
+  id: profileId,
+  workspaceId: "01900000-0000-7000-8000-000000000005",
+  profileKey: "strict",
+  name: "Strict architecture guardrails",
+  description: "Lower deterministic thresholds.",
+  version: 2,
+  algorithmVersion: "architecture-guardrails-v1",
+  thresholds: {
+    cycleMaxLength: 8,
+    largeFileLines: 600,
+    largeFileBytes: 80_000,
+    largeSymbolLines: 100,
+    highFanIn: 15,
+  },
+  fingerprint: `sha256:${"a".repeat(64)}`,
+  builtIn: false,
+  createdBy: "01900000-0000-7000-8000-000000000006",
+  createdAt: "2026-08-24T00:00:00.000Z",
+};
 
 const guardrailReport = {
   algorithmVersion: "architecture-guardrails-v1",
@@ -71,7 +93,7 @@ describe("RepoVistaClient", () => {
       expect.objectContaining({ method: "POST" }),
     );
     const request = fetchImplementation.mock.calls[0]?.[1] as RequestInit;
-    expect((request.headers as Headers).get("User-Agent")).toBe("RepoVista-CLI/0.7.0");
+    expect((request.headers as Headers).get("User-Agent")).toBe("RepoVista-CLI/0.8.0");
     expect(JSON.parse(String(request.body))).toEqual({
       url: "https://github.com/acme/demo",
       ref: "main",
@@ -134,6 +156,62 @@ describe("RepoVistaClient", () => {
     );
   });
 
+  it("lists, creates, and assigns versioned Guardrail policy profiles", async () => {
+    const fetchImplementation = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ data: [guardrailProfile], meta: { requestId: "request-list" } }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ data: guardrailProfile, meta: { requestId: "request-create" } }, 201),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ data: guardrailProfile, meta: { requestId: "request-assign" } }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ data: guardrailProfile, meta: { requestId: "request-current" } }),
+      );
+    const client = new RepoVistaClient({
+      apiUrl: "http://localhost:4000",
+      apiToken: "rv_testtoken_abcdefghijklmnopqrstuvwxyz0123456789",
+      fetch: fetchImplementation as typeof fetch,
+    });
+
+    await expect(client.listGuardrailProfiles()).resolves.toEqual([guardrailProfile]);
+    await expect(
+      client.createGuardrailProfile({
+        profileKey: guardrailProfile.profileKey,
+        name: guardrailProfile.name,
+        description: guardrailProfile.description,
+        thresholds: guardrailProfile.thresholds,
+      }),
+    ).resolves.toEqual(guardrailProfile);
+    await expect(client.assignRepositoryGuardrailProfile(repositoryId, profileId)).resolves.toEqual(
+      guardrailProfile,
+    );
+    await expect(client.getRepositoryGuardrailProfile(repositoryId)).resolves.toEqual(
+      guardrailProfile,
+    );
+
+    expect(fetchImplementation.mock.calls.map((call) => String(call[0]))).toEqual([
+      "http://localhost:4000/v1/guardrail-profiles",
+      "http://localhost:4000/v1/guardrail-profiles",
+      `http://localhost:4000/v1/repositories/${repositoryId}/guardrail-profile`,
+      `http://localhost:4000/v1/repositories/${repositoryId}/guardrail-profile`,
+    ]);
+    const createRequest = fetchImplementation.mock.calls[1]?.[1] as RequestInit;
+    expect(createRequest.method).toBe("POST");
+    expect(JSON.parse(String(createRequest.body))).toEqual({
+      profileKey: guardrailProfile.profileKey,
+      name: guardrailProfile.name,
+      description: guardrailProfile.description,
+      thresholds: guardrailProfile.thresholds,
+    });
+    const assignRequest = fetchImplementation.mock.calls[2]?.[1] as RequestInit;
+    expect(assignRequest.method).toBe("PUT");
+    expect(JSON.parse(String(assignRequest.body))).toEqual({ profileId });
+  });
+
   it("loads a guardrail report and downloads SARIF with bearer auth", async () => {
     const fetchImplementation = vi
       .fn<typeof fetch>()
@@ -192,7 +270,7 @@ describe("RepoVistaClient", () => {
       expect(String(input)).toBe(
         `http://localhost:4000/v1/snapshots/${repositoryId}/guardrails/compare?baseSnapshotId=${snapshotId}`,
       );
-      expect(new Headers(init?.headers).get("User-Agent")).toBe("RepoVista-CLI/0.7.0");
+      expect(new Headers(init?.headers).get("User-Agent")).toBe("RepoVista-CLI/0.8.0");
       return jsonResponse({ data: comparison, meta: { requestId: "request-compare" } });
     });
     const client = new RepoVistaClient({

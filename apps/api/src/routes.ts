@@ -5,6 +5,8 @@ import type { AppConfig } from "@repovista/config";
 import type { GraphLevel, RelationType } from "@repovista/contracts";
 import {
   askRequestSchema,
+  assignGuardrailProfileRequestSchema,
+  createGuardrailProfileRequestSchema,
   createPullRequestAnalysisRequestSchema,
   createRepositoryRequestSchema,
   createShareRequestSchema,
@@ -27,21 +29,25 @@ import { parseGitHubUrl } from "@repovista/git";
 import type { GitHubAppClient } from "@repovista/github";
 import { buildGraphView, type GraphView } from "@repovista/graph";
 import {
+  BUILT_IN_GUARDRAIL_PROFILE,
+  BUILT_IN_GUARDRAIL_PROFILE_ID,
   buildGuardrailReport,
   buildSarifReport,
   compareGuardrailReports,
   GUARDRAILS_ALGORITHM_VERSION,
+  guardrailProfileFingerprint,
 } from "@repovista/guardrails";
 import { IMPACT_ALGORITHM_VERSION } from "@repovista/impact";
 import { buildArchitectureStory } from "@repovista/story";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { resolveRequestAuth } from "./auth.js";
+import { resolveRequestAuth, verifySessionCsrf } from "./auth.js";
 import { fetchPullRequest } from "./github.js";
 import { type RetrievalDependencies, retrieveEvidence } from "./retrieval.js";
 
 const repositoryParamsSchema = z.object({ repositoryId: idSchema });
 const snapshotParamsSchema = z.object({ snapshotId: idSchema });
+const guardrailProfileParamsSchema = z.object({ profileId: idSchema });
 const guardrailCompareQuerySchema = z.object({ baseSnapshotId: idSchema });
 const snapshotSymbolParamsSchema = z.object({ snapshotId: idSchema, symbolId: idSchema });
 const jobParamsSchema = z.object({ jobId: idSchema });
@@ -172,7 +178,7 @@ async function requireRepositoryAccess(
   request: FastifyRequest,
   store: RepoVistaStore,
   repositoryId: string,
-): Promise<ReturnType<RepoVistaStore["getRepositoryAccess"]> extends Promise<infer T> ? T : never> {
+): Promise<NonNullable<Awaited<ReturnType<RepoVistaStore["getRepositoryAccess"]>>>> {
   const principal = await requestPrincipal(request, store);
   const access =
     typeof store.getRepositoryAccess === "function"
@@ -188,7 +194,7 @@ async function requireRepositoryAccess(
         : null;
   if (!access)
     throw new DomainError("REPOSITORY_NOT_FOUND", "The requested repository does not exist.");
-  return access as Awaited<ReturnType<RepoVistaStore["getRepositoryAccess"]>>;
+  return access as NonNullable<Awaited<ReturnType<RepoVistaStore["getRepositoryAccess"]>>>;
 }
 
 async function requireSnapshotAccess(
@@ -229,6 +235,20 @@ function requireWritePrincipal(principal: Principal): void {
   ) {
     throw new DomainError("WORKSPACE_FORBIDDEN", "The API token does not allow this operation.");
   }
+}
+
+function requirePolicyWritePrincipal(principal: Principal): Principal & { userId: string } {
+  if (principal.kind === "anonymous" || !principal.userId) {
+    throw new DomainError("AUTH_REQUIRED", "Authentication is required to manage policy profiles.");
+  }
+  requireWritePrincipal(principal);
+  return principal as Principal & { userId: string };
+}
+
+function profileCacheControl(principal: Principal): string {
+  return principal.kind === "anonymous"
+    ? "public, max-age=0, must-revalidate"
+    : "private, no-store";
 }
 
 function rawWebhookBody(request: FastifyRequest): Buffer {
@@ -472,6 +492,10 @@ async function loadGuardrailReport(store: RepoVistaStore, snapshotId: string) {
     throw new DomainError("SNAPSHOT_NOT_FOUND", "The requested snapshot does not exist.");
   }
   requireReadySnapshot(graphData.snapshot);
+  const profile =
+    typeof store.getSnapshotGuardrailProfile === "function"
+      ? ((await store.getSnapshotGuardrailProfile(snapshotId)) ?? BUILT_IN_GUARDRAIL_PROFILE)
+      : BUILT_IN_GUARDRAIL_PROFILE;
   return buildGuardrailReport({
     snapshot: {
       id: graphData.snapshot.id,
@@ -483,6 +507,7 @@ async function loadGuardrailReport(store: RepoVistaStore, snapshotId: string) {
     files: graphData.files,
     symbols: graphData.symbols,
     edges: graphData.edges,
+    profile,
   });
 }
 
@@ -512,7 +537,15 @@ async function loadGuardrailComparison(
       "Guardrail comparison requires matching parser versions.",
     );
   }
-  const toInput = (graph: typeof baseGraph) =>
+  const [baseProfile, headProfile] = await Promise.all([
+    typeof store.getSnapshotGuardrailProfile === "function"
+      ? store.getSnapshotGuardrailProfile(baseSnapshotId)
+      : Promise.resolve(null),
+    typeof store.getSnapshotGuardrailProfile === "function"
+      ? store.getSnapshotGuardrailProfile(headSnapshotId)
+      : Promise.resolve(null),
+  ]);
+  const toInput = (graph: typeof baseGraph, profile: typeof baseProfile) =>
     buildGuardrailReport({
       snapshot: {
         id: graph.snapshot.id,
@@ -524,9 +557,10 @@ async function loadGuardrailComparison(
       files: graph.files,
       symbols: graph.symbols,
       edges: graph.edges,
+      profile: profile ?? BUILT_IN_GUARDRAIL_PROFILE,
     });
-  const base = toInput(baseGraph);
-  const head = toInput(headGraph);
+  const base = toInput(baseGraph, baseProfile);
+  const head = toInput(headGraph, headProfile);
   if (
     base.algorithmVersion !== GUARDRAILS_ALGORITHM_VERSION ||
     head.algorithmVersion !== GUARDRAILS_ALGORITHM_VERSION
@@ -577,6 +611,119 @@ export function registerRoutes(
           },
     ),
   );
+
+  app.get("/v1/guardrail-profiles", async (request, reply) => {
+    const auth = await resolveRequestAuth(request, store);
+    const profiles = await store.listGuardrailProfiles(auth.principal.workspaceId);
+    return reply
+      .header("Cache-Control", profileCacheControl(auth.principal))
+      .send(response(request, [BUILT_IN_GUARDRAIL_PROFILE, ...profiles]));
+  });
+
+  app.post("/v1/guardrail-profiles", async (request, reply) => {
+    const auth = await resolveRequestAuth(request, store);
+    verifySessionCsrf(request, config, auth);
+    const principal = requirePolicyWritePrincipal(auth.principal);
+    const body = parseInput(createGuardrailProfileRequestSchema, request.body);
+    const result = await store.createGuardrailProfile({
+      workspaceId: principal.workspaceId,
+      profileKey: body.profileKey,
+      name: body.name,
+      description: body.description,
+      algorithmVersion: GUARDRAILS_ALGORITHM_VERSION,
+      thresholds: body.thresholds,
+      fingerprint: (version) =>
+        guardrailProfileFingerprint({
+          profileKey: body.profileKey,
+          version,
+          thresholds: body.thresholds,
+        }),
+      actorUserId: principal.userId,
+      actorKind: principal.kind,
+    });
+    reply.code(result.created ? 201 : 200).header("Cache-Control", "private, no-store");
+    return response(request, result.profile);
+  });
+
+  app.get("/v1/guardrail-profiles/:profileId", async (request, reply) => {
+    const { profileId } = parseInput(guardrailProfileParamsSchema, request.params);
+    const auth = await resolveRequestAuth(request, store);
+    const profile =
+      profileId === BUILT_IN_GUARDRAIL_PROFILE_ID
+        ? BUILT_IN_GUARDRAIL_PROFILE
+        : await store.getGuardrailProfile(profileId, auth.principal.workspaceId);
+    if (!profile) {
+      throw new DomainError(
+        "GUARDRAIL_PROFILE_NOT_FOUND",
+        "The guardrail policy profile does not exist.",
+      );
+    }
+    return reply
+      .header("Cache-Control", profileCacheControl(auth.principal))
+      .send(response(request, profile));
+  });
+
+  app.get("/v1/repositories/:repositoryId/guardrail-profile", async (request, reply) => {
+    const { repositoryId } = parseInput(repositoryParamsSchema, request.params);
+    const access = await requireRepositoryAccess(request, store, repositoryId);
+    const profileId = await store.getRepositoryGuardrailProfileId(repositoryId, access.workspaceId);
+    if (profileId === undefined) {
+      throw new DomainError("REPOSITORY_NOT_FOUND", "The requested repository does not exist.");
+    }
+    const profile = profileId
+      ? await store.getGuardrailProfile(profileId, access.workspaceId)
+      : BUILT_IN_GUARDRAIL_PROFILE;
+    if (!profile) {
+      throw new DomainError(
+        "GUARDRAIL_PROFILE_NOT_FOUND",
+        "The guardrail policy profile does not exist.",
+      );
+    }
+    return reply
+      .header(
+        "Cache-Control",
+        access.visibility === "private"
+          ? "private, no-store"
+          : "public, max-age=0, must-revalidate",
+      )
+      .send(response(request, profile));
+  });
+
+  app.put("/v1/repositories/:repositoryId/guardrail-profile", async (request, reply) => {
+    const { repositoryId } = parseInput(repositoryParamsSchema, request.params);
+    const body = parseInput(assignGuardrailProfileRequestSchema, request.body);
+    const auth = await resolveRequestAuth(request, store);
+    verifySessionCsrf(request, config, auth);
+    const principal = requirePolicyWritePrincipal(auth.principal);
+    const access = await requireRepositoryAccess(request, store, repositoryId);
+    if (access.workspaceId !== principal.workspaceId) {
+      throw new DomainError(
+        "WORKSPACE_FORBIDDEN",
+        "The repository is not managed by the active workspace.",
+      );
+    }
+    const profileId =
+      body.profileId === null || body.profileId === BUILT_IN_GUARDRAIL_PROFILE_ID
+        ? null
+        : body.profileId;
+    await store.assignRepositoryGuardrailProfile({
+      repositoryId,
+      workspaceId: principal.workspaceId,
+      profileId,
+      actorUserId: principal.userId,
+      actorKind: principal.kind,
+    });
+    const profile = profileId
+      ? await store.getGuardrailProfile(profileId, principal.workspaceId)
+      : BUILT_IN_GUARDRAIL_PROFILE;
+    if (!profile) {
+      throw new DomainError(
+        "GUARDRAIL_PROFILE_NOT_FOUND",
+        "The guardrail policy profile does not exist.",
+      );
+    }
+    return reply.header("Cache-Control", "private, no-store").send(response(request, profile));
+  });
 
   app.post("/v1/integrations/github/webhooks", async (request, reply) => {
     if (!config.GITHUB_WEBHOOK_SECRET) {

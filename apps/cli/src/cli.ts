@@ -1,6 +1,7 @@
 import { chmod, writeFile } from "node:fs/promises";
-import type { AskResult, GuardrailComparison } from "@repovista/contracts";
+import type { AskResult, GuardrailComparison, GuardrailProfile } from "@repovista/contracts";
 import {
+  createGuardrailProfileRequestSchema,
   createRepositoryRequestSchema,
   type GuardrailReport,
   idSchema,
@@ -25,6 +26,13 @@ import { CLI_VERSION } from "./version.js";
 const DEFAULT_API_URL = "http://localhost:4000";
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_WAIT_TIMEOUT_MS = 15 * 60_000;
+const DEFAULT_GUARDRAIL_PROFILE_THRESHOLDS = {
+  cycleMaxLength: 12,
+  largeFileLines: 800,
+  largeFileBytes: 100 * 1024,
+  largeSymbolLines: 150,
+  highFanIn: 20,
+};
 
 const mainHelp = [
   "RepoVista CLI",
@@ -43,7 +51,7 @@ const mainHelp = [
   "  ask <repository-id>     Ask an evidence-backed question",
   "  search <snapshot-id>    Search fixed snapshot evidence",
   "  embed <snapshot-id>     Build a semantic embedding index",
-  "  guardrails <snapshot-id> Evaluate deterministic architecture guardrails",
+  "  guardrails <target>      Evaluate reports or manage policy profiles",
   "  auth <action>           Login, inspect, or remove local CLI authentication",
   "  workspace <action>      List or select locally authenticated workspaces",
   "  github <action>         List GitHub App installations or repositories",
@@ -107,10 +115,22 @@ const commandHelp: Record<string, string> = {
   guardrails: [
     "Usage: repovista guardrails <snapshot-id> [options]",
     "       repovista guardrails compare <base-snapshot-id> <head-snapshot-id> [options]",
+    "       repovista guardrails profiles [--json]",
+    "       repovista guardrails profile create <key> --name <name> [options]",
+    "       repovista guardrails profile assign <repository-id> <profile-id|default>",
     "",
-    "Options:",
+    "Report options:",
     "  --sarif <file>          Save a SARIF 2.1.0 report to a local file",
     "  --json                  Emit the complete Guardrails JSON report",
+    "",
+    "Profile create options (unspecified thresholds use the built-in default):",
+    "  --name <name>                 Human-readable profile name (required)",
+    "  --description <text>          Reviewable policy description",
+    "  --cycle-max-length <n>        Maximum dependency cycle length (2-100)",
+    "  --large-file-lines <n>        Large file line threshold",
+    "  --large-file-bytes <n>        Large file byte threshold",
+    "  --large-symbol-lines <n>      Large symbol line threshold",
+    "  --high-fan-in <n>             High fan-in threshold",
     "",
     "Exit codes: 0 means no error-level findings; 2 means at least one error-level finding.",
   ].join("\n"),
@@ -404,6 +424,7 @@ function formatGuardrails(report: GuardrailReport, sarifPath?: string): string {
     `Commit: ${report.snapshot.commitSha.slice(0, 12)}`,
     `Findings: ${report.summary.total} (${report.summary.errors} errors, ${report.summary.warnings} warnings, ${report.summary.infos} infos)`,
     `Algorithm: ${report.algorithmVersion}`,
+    `Profile: ${report.profile ? `${report.profile.profileKey} v${report.profile.version} (${report.profile.fingerprint.slice(0, 19)}…)` : "legacy default"}`,
   ];
   if (report.findings.length > 0) {
     lines.push("", "Findings:");
@@ -427,6 +448,7 @@ function formatGuardrailComparison(comparison: GuardrailComparison): string {
     `Head: ${comparison.head.snapshot.id} (${comparison.head.snapshot.commitSha.slice(0, 12)})`,
     `Changes: ${comparison.summary.total} (${comparison.summary.added} added, ${comparison.summary.resolved} resolved, ${comparison.summary.changed} changed, ${comparison.summary.unchanged} unchanged)`,
     `Regressions: ${comparison.summary.regressions} · Improvements: ${comparison.summary.improvements}`,
+    `Profile: ${comparison.profile ? `${comparison.profile.profileKey} v${comparison.profile.version}` : "legacy default"}`,
   ];
   if (comparison.findings.length > 0) {
     lines.push("", "Findings:");
@@ -442,6 +464,17 @@ function formatGuardrailComparison(comparison: GuardrailComparison): string {
     lines.push("", "No guardrail changes.");
   }
   return lines.join("\n");
+}
+
+function formatGuardrailProfile(profile: GuardrailProfile): string {
+  return [
+    `${profile.builtIn ? "built-in" : "custom  "}  ${profile.profileKey} v${profile.version}  ${profile.name}`,
+    `  ID: ${profile.id}`,
+    `  Algorithm: ${profile.algorithmVersion}`,
+    `  Fingerprint: ${profile.fingerprint}`,
+    `  Thresholds: cycle=${profile.thresholds.cycleMaxLength}, file-lines=${profile.thresholds.largeFileLines}, file-bytes=${profile.thresholds.largeFileBytes}, symbol-lines=${profile.thresholds.largeSymbolLines}, fan-in=${profile.thresholds.highFanIn}`,
+    ...(profile.description ? [`  Description: ${profile.description}`] : []),
+  ].join("\n");
 }
 
 function writeJson(output: CliOutput, value: unknown): void {
@@ -536,6 +569,27 @@ function positiveInteger(value: string | undefined, label: string, maximum?: num
       maximum === undefined
         ? `${label} must be a positive integer.`
         : `${label} must be an integer from 1 to ${maximum}.`,
+    );
+  }
+  return parsed;
+}
+
+function profileThreshold(
+  options: ParsedOptions["options"],
+  option: string,
+  label: string,
+  fallback: number,
+  minimum = 1,
+  maximum?: number,
+): number {
+  const value = optionalString(options[option]);
+  if (!value) return fallback;
+  const parsed = positiveInteger(value, label, maximum);
+  if (parsed < minimum) {
+    throw new UsageError(
+      maximum === undefined
+        ? `${label} must be an integer of at least ${minimum}.`
+        : `${label} must be an integer from ${minimum} to ${maximum}.`,
     );
   }
   return parsed;
@@ -640,7 +694,16 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
       ask: { model: "string", provider: "string", snapshot: "string" },
       search: { limit: "string", mode: "string" },
       embed: { poll_interval: "string", timeout: "string", wait: "boolean" },
-      guardrails: { sarif: "string" },
+      guardrails: {
+        cycle_max_length: "string",
+        description: "string",
+        high_fan_in: "string",
+        large_file_bytes: "string",
+        large_file_lines: "string",
+        large_symbol_lines: "string",
+        name: "string",
+        sarif: "string",
+      },
       doctor: {},
       auth: {},
       workspace: {},
@@ -1002,6 +1065,96 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     }
 
     if (command === "guardrails") {
+      if (parsed.positionals[0] === "profiles") {
+        if (parsed.positionals.length !== 1) {
+          throw new UsageError("guardrails profiles accepts no additional arguments.");
+        }
+        const profiles = await client.listGuardrailProfiles();
+        if (json) writeJson(output, profiles);
+        else output.stdout(profiles.map(formatGuardrailProfile).join("\n\n"));
+        return 0;
+      }
+      if (parsed.positionals[0] === "profile") {
+        const action = parsed.positionals[1];
+        if (action === "create") {
+          if (parsed.positionals.length !== 3) {
+            throw new UsageError("guardrails profile create requires exactly one profile key.");
+          }
+          const name = optionalString(parsed.options.name);
+          if (!name) throw new UsageError("guardrails profile create requires --name.");
+          const request = createGuardrailProfileRequestSchema.safeParse({
+            profileKey: parsed.positionals[2],
+            name,
+            description: optionalString(parsed.options.description) ?? "",
+            thresholds: {
+              cycleMaxLength: profileThreshold(
+                parsed.options,
+                "cycle_max_length",
+                "--cycle-max-length",
+                DEFAULT_GUARDRAIL_PROFILE_THRESHOLDS.cycleMaxLength,
+                2,
+                100,
+              ),
+              largeFileLines: profileThreshold(
+                parsed.options,
+                "large_file_lines",
+                "--large-file-lines",
+                DEFAULT_GUARDRAIL_PROFILE_THRESHOLDS.largeFileLines,
+              ),
+              largeFileBytes: profileThreshold(
+                parsed.options,
+                "large_file_bytes",
+                "--large-file-bytes",
+                DEFAULT_GUARDRAIL_PROFILE_THRESHOLDS.largeFileBytes,
+              ),
+              largeSymbolLines: profileThreshold(
+                parsed.options,
+                "large_symbol_lines",
+                "--large-symbol-lines",
+                DEFAULT_GUARDRAIL_PROFILE_THRESHOLDS.largeSymbolLines,
+              ),
+              highFanIn: profileThreshold(
+                parsed.options,
+                "high_fan_in",
+                "--high-fan-in",
+                DEFAULT_GUARDRAIL_PROFILE_THRESHOLDS.highFanIn,
+              ),
+            },
+          });
+          if (!request.success) {
+            throw new UsageError(
+              `Invalid Guardrail profile: ${request.error.issues.map((issue) => issue.message).join("; ")}`,
+            );
+          }
+          const profile = await client.createGuardrailProfile(request.data);
+          if (json) writeJson(output, profile);
+          else {
+            output.stdout(`Guardrail profile ready.\n\n${formatGuardrailProfile(profile)}`);
+            output.stdout("Profiles are immutable; changed inputs create the next version.");
+          }
+          return 0;
+        }
+        if (action === "assign") {
+          if (parsed.positionals.length !== 4) {
+            throw new UsageError(
+              "guardrails profile assign requires a repository ID and profile ID or default.",
+            );
+          }
+          const repositoryId = requireId(parsed.positionals[2], "Repository ID");
+          const target = parsed.positionals[3];
+          const profileId = target === "default" ? null : requireId(target, "Guardrail profile ID");
+          const profile = await client.assignRepositoryGuardrailProfile(repositoryId, profileId);
+          if (json) writeJson(output, profile);
+          else {
+            output.stdout(
+              `Repository ${repositoryId} will use ${profile.profileKey} v${profile.version} for new snapshots.`,
+            );
+            output.stdout("Existing snapshots keep their original policy profile.");
+          }
+          return 0;
+        }
+        throw new UsageError("guardrails profile requires create or assign.");
+      }
       if (parsed.positionals[0] === "compare") {
         if (parsed.positionals.length !== 3) {
           throw new UsageError("guardrails compare requires exactly a base and head snapshot ID.");

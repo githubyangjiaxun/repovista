@@ -4,6 +4,7 @@ import type {
   GuardrailComparisonStatus,
   GuardrailEvidence,
   GuardrailFinding,
+  GuardrailProfile,
   GuardrailReport,
   GuardrailRuleId,
   GuardrailSeverity,
@@ -11,6 +12,7 @@ import type {
 } from "@repovista/contracts";
 
 export const GUARDRAILS_ALGORITHM_VERSION = "architecture-guardrails-v1";
+export const BUILT_IN_GUARDRAIL_PROFILE_ID = "00000000-0000-7000-8000-000000000003";
 
 export const DEFAULT_GUARDRAIL_THRESHOLDS: GuardrailThresholds = {
   cycleMaxLength: 12,
@@ -18,6 +20,63 @@ export const DEFAULT_GUARDRAIL_THRESHOLDS: GuardrailThresholds = {
   largeFileBytes: 100 * 1024,
   largeSymbolLines: 150,
   highFanIn: 20,
+};
+
+const BUILT_IN_PROFILE_CREATED_AT = "2026-01-01T00:00:00.000Z";
+
+function stableProfileInput(
+  profileKey: string,
+  version: number,
+  algorithmVersion: string,
+  thresholds: GuardrailThresholds,
+): string {
+  return JSON.stringify({
+    algorithmVersion,
+    profileKey,
+    thresholds: {
+      cycleMaxLength: thresholds.cycleMaxLength,
+      largeFileBytes: thresholds.largeFileBytes,
+      largeFileLines: thresholds.largeFileLines,
+      largeSymbolLines: thresholds.largeSymbolLines,
+      highFanIn: thresholds.highFanIn,
+    },
+    version,
+  });
+}
+
+export function guardrailProfileFingerprint(input: {
+  profileKey: string;
+  version: number;
+  algorithmVersion?: string;
+  thresholds: GuardrailThresholds;
+}): string {
+  return `sha256:${sha(
+    stableProfileInput(
+      input.profileKey,
+      input.version,
+      input.algorithmVersion ?? GUARDRAILS_ALGORITHM_VERSION,
+      input.thresholds,
+    ),
+  )}`;
+}
+
+export const BUILT_IN_GUARDRAIL_PROFILE: GuardrailProfile = {
+  id: BUILT_IN_GUARDRAIL_PROFILE_ID,
+  workspaceId: null,
+  profileKey: "default",
+  name: "Default architecture guardrails",
+  description: "The deterministic RepoVista baseline thresholds.",
+  version: 1,
+  algorithmVersion: GUARDRAILS_ALGORITHM_VERSION,
+  thresholds: DEFAULT_GUARDRAIL_THRESHOLDS,
+  fingerprint: guardrailProfileFingerprint({
+    profileKey: "default",
+    version: 1,
+    thresholds: DEFAULT_GUARDRAIL_THRESHOLDS,
+  }),
+  builtIn: true,
+  createdBy: null,
+  createdAt: BUILT_IN_PROFILE_CREATED_AT,
 };
 
 export interface GuardrailSnapshot {
@@ -63,6 +122,7 @@ export interface BuildGuardrailReportInput {
   files: readonly GuardrailFile[];
   symbols: readonly GuardrailSymbol[];
   edges: readonly GuardrailEdge[];
+  profile?: GuardrailProfile | null;
   thresholds?: Partial<GuardrailThresholds>;
 }
 
@@ -269,7 +329,22 @@ function cycleFindings(
 }
 
 export function buildGuardrailReport(input: BuildGuardrailReportInput): GuardrailReport {
-  const thresholds = mergeThresholds(input.thresholds);
+  const profile = input.profile ?? (input.thresholds ? null : BUILT_IN_GUARDRAIL_PROFILE);
+  if (profile) {
+    if (profile.algorithmVersion !== GUARDRAILS_ALGORITHM_VERSION) {
+      throw new Error("Guardrail profile uses an incompatible algorithm version.");
+    }
+    if (profile.fingerprint !== guardrailProfileFingerprint(profile)) {
+      throw new Error("Guardrail profile fingerprint is invalid.");
+    }
+    if (
+      input.thresholds &&
+      stableSerialize(mergeThresholds(input.thresholds)) !== stableSerialize(profile.thresholds)
+    ) {
+      throw new Error("Guardrail profile thresholds cannot be overridden.");
+    }
+  }
+  const thresholds = profile ? profile.thresholds : mergeThresholds(input.thresholds);
   const files = [...input.files].sort((left, right) => left.path.localeCompare(right.path));
   const symbols = [...input.symbols].sort(
     (left, right) =>
@@ -437,6 +512,7 @@ export function buildGuardrailReport(input: BuildGuardrailReportInput): Guardrai
   const infos = ordered.filter((item) => item.severity === "info").length;
   return {
     algorithmVersion: GUARDRAILS_ALGORITHM_VERSION,
+    profile,
     snapshot: {
       id: input.snapshot.id,
       commitSha: input.snapshot.commitSha,
@@ -456,7 +532,7 @@ export interface SarifLog {
   runs: Array<Record<string, unknown>>;
 }
 
-export function buildSarifReport(report: GuardrailReport, toolVersion = "0.7.0"): SarifLog {
+export function buildSarifReport(report: GuardrailReport, toolVersion = "0.8.0"): SarifLog {
   const ruleIds = [...new Set(report.findings.map((finding) => finding.ruleId))].sort();
   const rules = ruleIds.map((id) => ({ id, name: id.replaceAll("_", " ") }));
   return {
@@ -471,6 +547,9 @@ export function buildSarifReport(report: GuardrailReport, toolVersion = "0.7.0")
           snapshotId: report.snapshot.id,
           commitSha: report.snapshot.commitSha,
           algorithmVersion: report.algorithmVersion,
+          guardrailProfileId: report.profile?.id ?? BUILT_IN_GUARDRAIL_PROFILE.id,
+          guardrailProfileFingerprint:
+            report.profile?.fingerprint ?? BUILT_IN_GUARDRAIL_PROFILE.fingerprint,
         },
         results: report.findings.map((finding) => ({
           ruleId: finding.ruleId,
@@ -643,6 +722,11 @@ export function compareGuardrailReports(
   if (base.algorithmVersion !== head.algorithmVersion) {
     throw new Error("Guardrail reports use incompatible algorithm versions.");
   }
+  const baseProfile = base.profile ?? BUILT_IN_GUARDRAIL_PROFILE;
+  const headProfile = head.profile ?? BUILT_IN_GUARDRAIL_PROFILE;
+  if (baseProfile.fingerprint !== headProfile.fingerprint) {
+    throw new Error("Guardrail reports use incompatible policy profiles.");
+  }
   if (stableSerialize(base.thresholds) !== stableSerialize(head.thresholds)) {
     throw new Error("Guardrail reports use incompatible thresholds.");
   }
@@ -668,6 +752,7 @@ export function compareGuardrailReports(
     summary.regressions > 0 ? "regressed" : summary.improvements > 0 ? "improved" : "unchanged";
   return {
     algorithmVersion: head.algorithmVersion,
+    profile: headProfile,
     base,
     head,
     overall,

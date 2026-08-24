@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  BUILT_IN_GUARDRAIL_PROFILE,
   buildGuardrailReport,
   buildSarifReport,
   compareGuardrailReports,
   DEFAULT_GUARDRAIL_THRESHOLDS,
+  guardrailProfileFingerprint,
 } from "./index.js";
 
 const snapshot = {
@@ -50,6 +52,23 @@ const edge = (
   evidence,
 });
 
+function profile(id: string, profileKey: string, thresholds = DEFAULT_GUARDRAIL_THRESHOLDS) {
+  return {
+    id,
+    workspaceId: "01900000-0000-7000-8000-000000000099",
+    profileKey,
+    name: `${profileKey} guardrails`,
+    description: "A deterministic test policy.",
+    version: 1,
+    algorithmVersion: "architecture-guardrails-v1",
+    thresholds,
+    fingerprint: guardrailProfileFingerprint({ profileKey, version: 1, thresholds }),
+    builtIn: false,
+    createdBy: "01900000-0000-7000-8000-000000000098",
+    createdAt: "2026-08-24T00:00:00.000Z",
+  };
+}
+
 describe("architecture guardrails", () => {
   it("finds cycles, large files, unresolved imports, and parse gaps deterministically", () => {
     const files = [
@@ -85,6 +104,51 @@ describe("architecture guardrails", () => {
     ]);
     expect(first.generatedAt).toBe(snapshot.readyAt);
     expect(first.thresholds).toEqual(DEFAULT_GUARDRAIL_THRESHOLDS);
+    expect(first.profile).toEqual(BUILT_IN_GUARDRAIL_PROFILE);
+  });
+
+  it("creates stable policy fingerprints independent of threshold object key order", () => {
+    const first = guardrailProfileFingerprint({
+      profileKey: "strict",
+      version: 3,
+      thresholds: DEFAULT_GUARDRAIL_THRESHOLDS,
+    });
+    const second = guardrailProfileFingerprint({
+      profileKey: "strict",
+      version: 3,
+      thresholds: {
+        highFanIn: DEFAULT_GUARDRAIL_THRESHOLDS.highFanIn,
+        largeSymbolLines: DEFAULT_GUARDRAIL_THRESHOLDS.largeSymbolLines,
+        largeFileBytes: DEFAULT_GUARDRAIL_THRESHOLDS.largeFileBytes,
+        largeFileLines: DEFAULT_GUARDRAIL_THRESHOLDS.largeFileLines,
+        cycleMaxLength: DEFAULT_GUARDRAIL_THRESHOLDS.cycleMaxLength,
+      },
+    });
+    expect(first).toBe(second);
+    expect(first).toMatch(/^sha256:[a-f0-9]{64}$/);
+  });
+
+  it("rejects invalid profile fingerprints and threshold overrides", () => {
+    const strict = profile("01900000-0000-7000-8000-000000000090", "strict");
+    expect(() =>
+      buildGuardrailReport({
+        snapshot,
+        files: [],
+        symbols: [],
+        edges: [],
+        profile: { ...strict, fingerprint: `sha256:${"0".repeat(64)}` },
+      }),
+    ).toThrow(/fingerprint is invalid/);
+    expect(() =>
+      buildGuardrailReport({
+        snapshot,
+        files: [],
+        symbols: [],
+        edges: [],
+        profile: strict,
+        thresholds: { highFanIn: strict.thresholds.highFanIn + 1 },
+      }),
+    ).toThrow(/cannot be overridden/);
   });
 
   it("counts only non-containment incoming edges for fan-in", () => {
@@ -187,6 +251,43 @@ describe("architecture guardrails", () => {
       thresholds: { largeFileLines: 900 },
     });
     expect(() => compareGuardrailReports(base, incompatible)).toThrow(/incompatible thresholds/);
+  });
+
+  it("rejects reports with different policy fingerprints even when thresholds match", () => {
+    const base = buildGuardrailReport({
+      snapshot,
+      files: [],
+      symbols: [],
+      edges: [],
+      profile: profile("01900000-0000-7000-8000-000000000091", "strict"),
+    });
+    const head = buildGuardrailReport({
+      snapshot: { ...snapshot, id: "01900000-0000-7000-8000-000000000092" },
+      files: [],
+      symbols: [],
+      edges: [],
+      profile: profile("01900000-0000-7000-8000-000000000093", "team"),
+    });
+    expect(base.thresholds).toEqual(head.thresholds);
+    expect(() => compareGuardrailReports(base, head)).toThrow(/incompatible policy profiles/);
+  });
+
+  it("treats legacy reports without profile provenance as the built-in default", () => {
+    const legacy = buildGuardrailReport({
+      snapshot,
+      files: [],
+      symbols: [],
+      edges: [],
+      thresholds: DEFAULT_GUARDRAIL_THRESHOLDS,
+    });
+    const current = buildGuardrailReport({
+      snapshot: { ...snapshot, id: "01900000-0000-7000-8000-000000000094" },
+      files: [],
+      symbols: [],
+      edges: [],
+    });
+    expect(legacy.profile).toBeNull();
+    expect(compareGuardrailReports(legacy, current).profile).toEqual(BUILT_IN_GUARDRAIL_PROFILE);
   });
 
   it("keeps equivalent object key order and duplicate pairing deterministic", () => {

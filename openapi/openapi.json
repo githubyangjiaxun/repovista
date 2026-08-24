@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RepoVista API",
-    "version": "0.7.0",
-    "description": "Evidence-first repository indexing with private GitHub App access, Workspace authorization, deterministic Architecture Guardrails and SARIF, auditable sessions, API tokens, versioned semantic indexes, transparent hybrid retrieval, architecture stories, pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, and grounded answers."
+    "version": "0.8.0",
+    "description": "Evidence-first repository indexing with private GitHub App access, Workspace authorization, immutable Guardrail policy profiles, deterministic Architecture Guardrails and SARIF, auditable sessions, API tokens, versioned semantic indexes, transparent hybrid retrieval, architecture stories, pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, and grounded answers."
   },
   "servers": [
     {
@@ -20,6 +20,9 @@
     },
     {
       "name": "Snapshots"
+    },
+    {
+      "name": "Guardrails"
     },
     {
       "name": "Jobs"
@@ -234,6 +237,174 @@
         }
       }
     },
+    "/v1/guardrail-profiles": {
+      "get": {
+        "operationId": "listGuardrailProfiles",
+        "summary": "List immutable Guardrail policy profile versions in the active workspace",
+        "tags": ["Guardrails"],
+        "responses": {
+          "200": {
+            "description": "Built-in default and workspace policy profile versions",
+            "headers": {
+              "Cache-Control": {
+                "description": "Public revalidation or authenticated private no-store policy",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/GuardrailProfile"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createGuardrailProfile",
+        "summary": "Create or idempotently reuse an immutable Guardrail policy profile version",
+        "tags": ["Guardrails"],
+        "security": [
+          {
+            "CookieSession": []
+          },
+          {
+            "BearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CsrfHeader"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGuardrailProfileRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "An identical latest profile version was reused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/GuardrailProfile"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "A new immutable profile version was created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/GuardrailProfile"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/v1/guardrail-profiles/{profileId}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/GuardrailProfileId"
+        }
+      ],
+      "get": {
+        "operationId": "getGuardrailProfile",
+        "summary": "Read one immutable Guardrail policy profile version",
+        "tags": ["Guardrails"],
+        "responses": {
+          "200": {
+            "description": "Guardrail policy profile",
+            "headers": {
+              "Cache-Control": {
+                "description": "Public revalidation or authenticated private no-store policy",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/GuardrailProfile"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
     "/v1/repositories": {
       "post": {
         "operationId": "createRepositoryImport",
@@ -383,6 +554,115 @@
                 }
               }
             }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/v1/repositories/{repositoryId}/guardrail-profile": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/RepositoryId"
+        }
+      ],
+      "get": {
+        "operationId": "getRepositoryGuardrailProfile",
+        "summary": "Read the policy profile used for future repository snapshots",
+        "tags": ["Repositories", "Guardrails"],
+        "responses": {
+          "200": {
+            "description": "Current repository policy profile",
+            "headers": {
+              "Cache-Control": {
+                "description": "Public revalidation or private no-store policy",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/GuardrailProfile"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "put": {
+        "operationId": "assignRepositoryGuardrailProfile",
+        "summary": "Bind an immutable policy profile to future repository snapshots",
+        "tags": ["Repositories", "Guardrails"],
+        "security": [
+          {
+            "CookieSession": []
+          },
+          {
+            "BearerToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CsrfHeader"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignGuardrailProfileRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Policy profile bound; existing snapshots are unchanged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/GuardrailProfile"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
@@ -2480,6 +2760,14 @@
           "$ref": "#/components/schemas/Uuid"
         }
       },
+      "GuardrailProfileId": {
+        "name": "profileId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Uuid"
+        }
+      },
       "JobId": {
         "name": "jobId",
         "in": "path",
@@ -2564,6 +2852,16 @@
       },
       "Unauthorized": {
         "description": "Webhook signature is invalid",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/FailureEnvelope"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The credential is authenticated but not allowed to perform this operation",
         "content": {
           "application/json": {
             "schema": {
@@ -3077,6 +3375,16 @@
           "repositoryId": {
             "$ref": "#/components/schemas/Uuid"
           },
+          "guardrailProfileId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "commitSha": {
             "type": ["string", "null"]
           },
@@ -3447,6 +3755,157 @@
           }
         }
       },
+      "GuardrailThresholds": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "cycleMaxLength",
+          "largeFileLines",
+          "largeFileBytes",
+          "largeSymbolLines",
+          "highFanIn"
+        ],
+        "properties": {
+          "cycleMaxLength": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 100
+          },
+          "largeFileLines": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "largeFileBytes": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "largeSymbolLines": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "highFanIn": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      },
+      "GuardrailProfile": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspaceId",
+          "profileKey",
+          "name",
+          "description",
+          "version",
+          "algorithmVersion",
+          "thresholds",
+          "fingerprint",
+          "builtIn",
+          "createdBy",
+          "createdAt"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "workspaceId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "profileKey": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{1,63}$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "algorithmVersion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "thresholds": {
+            "$ref": "#/components/schemas/GuardrailThresholds"
+          },
+          "fingerprint": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          },
+          "builtIn": {
+            "type": "boolean"
+          },
+          "createdBy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/DateTime"
+          }
+        }
+      },
+      "CreateGuardrailProfileRequest": {
+        "type": "object",
+        "required": ["profileKey", "name", "thresholds"],
+        "properties": {
+          "profileKey": {
+            "type": "string",
+            "pattern": "^(?!default$)[a-z][a-z0-9-]{1,63}$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 500,
+            "default": ""
+          },
+          "thresholds": {
+            "$ref": "#/components/schemas/GuardrailThresholds"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AssignGuardrailProfileRequest": {
+        "type": "object",
+        "required": ["profileId"],
+        "properties": {
+          "profileId": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Uuid"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "GuardrailReport": {
         "type": "object",
         "required": [
@@ -3461,6 +3920,16 @@
         "properties": {
           "algorithmVersion": {
             "type": "string"
+          },
+          "profile": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GuardrailProfile"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "snapshot": {
             "type": "object",
@@ -5082,6 +5551,16 @@
         "properties": {
           "algorithmVersion": {
             "type": "string"
+          },
+          "profile": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GuardrailProfile"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "base": {
             "$ref": "#/components/schemas/GuardrailReport"

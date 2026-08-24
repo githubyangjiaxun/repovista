@@ -21,6 +21,27 @@ const prBaseCommitSha = "1111111111111111111111111111111111111111";
 const prHeadCommitSha = "2222222222222222222222222222222222222222";
 const baselineCommitSha = "1111111111111111111111111111111111111111";
 
+const defaultGuardrailProfile = {
+  id: "00000000-0000-7000-8000-000000000003",
+  workspaceId: null,
+  profileKey: "default",
+  name: "Default architecture guardrails",
+  description: "The deterministic RepoVista baseline thresholds.",
+  version: 1,
+  algorithmVersion: "architecture-guardrails-v1",
+  thresholds: {
+    cycleMaxLength: 12,
+    largeFileLines: 800,
+    largeFileBytes: 102_400,
+    largeSymbolLines: 150,
+    highFanIn: 20,
+  },
+  fingerprint: `sha256:${"a".repeat(64)}`,
+  builtIn: true,
+  createdBy: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+};
+
 const repository = {
   id: repositoryId,
   owner: "acme",
@@ -84,6 +105,7 @@ function guardrailReport(
 ) {
   return {
     algorithmVersion: "architecture-guardrails-v1",
+    profile: defaultGuardrailProfile,
     snapshot: {
       id: targetSnapshot.id,
       commitSha: targetSnapshot.commitSha,
@@ -133,6 +155,7 @@ if (baselineGuardrailReport.findings[0]) {
 }
 const guardrailComparison = {
   algorithmVersion: "architecture-guardrails-v1",
+  profile: defaultGuardrailProfile,
   base: baselineGuardrailReport,
   head: currentGuardrailReport,
   overall: "regressed",
@@ -535,7 +558,7 @@ function corsHeaders(): Record<string, string> {
   return {
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Allow-Headers": "Accept, Content-Type, X-RepoVista-CSRF, X-Request-ID",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
     "Access-Control-Allow-Origin": webOrigin,
     "Access-Control-Expose-Headers": "Content-Disposition, ETag, X-Request-ID",
     Vary: "Origin",
@@ -717,6 +740,19 @@ async function installMockApi(
 
     if (request.method() === "GET" && url.pathname === `/v1/snapshots/${snapshotId}/files`) {
       await json(route, { files, nextCursor: null });
+      return;
+    }
+
+    if (request.method() === "GET" && url.pathname === "/v1/guardrail-profiles") {
+      await json(route, [defaultGuardrailProfile]);
+      return;
+    }
+
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/v1/repositories/${repositoryId}/guardrail-profile`
+    ) {
+      await json(route, defaultGuardrailProfile);
       return;
     }
 
@@ -1341,6 +1377,12 @@ test("compares guardrails with a historical Ready Snapshot and opens both eviden
 
   await expect(
     page.getByRole("heading", { name: "Deterministic checks with fixed source evidence." }),
+  ).toBeVisible();
+  await expect(page.getByRole("region", { name: "Guardrail policy profile" })).toContainText(
+    "default v1",
+  );
+  await expect(
+    page.getByText("Sign in as an Editor or Owner to change the repository default."),
   ).toBeVisible();
   const baseline = page.getByRole("combobox", { name: "Baseline snapshot" });
   await expect(baseline).toBeVisible();

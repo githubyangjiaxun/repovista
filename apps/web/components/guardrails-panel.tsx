@@ -1,6 +1,11 @@
 "use client";
 
-import type { GuardrailComparison, GuardrailReport, Snapshot } from "@repovista/contracts";
+import type {
+  GuardrailComparison,
+  GuardrailProfile,
+  GuardrailReport,
+  Snapshot,
+} from "@repovista/contracts";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -9,9 +14,11 @@ import {
   FileCode2,
   Info,
   LoaderCircle,
+  Save,
   ShieldCheck,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useOptionalAuth } from "@/components/auth-provider";
 import { apiErrorMessage, apiFetch, fetchGuardrailSarif } from "@/lib/api";
 
 function metricText(metric: Record<string, string | number>): string {
@@ -21,11 +28,13 @@ function metricText(metric: Record<string, string | number>): string {
 }
 
 export function GuardrailsPanel({
+  repositoryId,
   snapshotId,
   availableSnapshots = [],
   onOpenSource,
   onOpenSnapshotSource,
 }: {
+  repositoryId: string;
   snapshotId: string;
   availableSnapshots?: Snapshot[];
   onOpenSource: (path: string, startLine?: number, endLine?: number) => void | Promise<void>;
@@ -36,6 +45,10 @@ export function GuardrailsPanel({
     endLine?: number,
   ) => void | Promise<void>;
 }) {
+  const session = useOptionalAuth()?.session ?? null;
+  const canManageProfiles = Boolean(
+    session?.authenticated && session.workspace && session.workspace.role !== "viewer",
+  );
   const [report, setReport] = useState<GuardrailReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -44,6 +57,14 @@ export function GuardrailsPanel({
   const [comparison, setComparison] = useState<GuardrailComparison | null>(null);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
   const [comparisonLoading, setComparisonLoading] = useState(false);
+  const [profiles, setProfiles] = useState<GuardrailProfile[]>([]);
+  const [repositoryProfile, setRepositoryProfile] = useState<GuardrailProfile | null>(null);
+  const [selectedProfileId, setSelectedProfileId] = useState("");
+  const [profilesLoading, setProfilesLoading] = useState(true);
+  const [profilesError, setProfilesError] = useState<string | null>(null);
+  const [assigningProfile, setAssigningProfile] = useState(false);
+  const [assignmentMessage, setAssignmentMessage] = useState<string | null>(null);
+  const profileRequest = useRef(0);
 
   const baselineSnapshots = availableSnapshots.filter(
     (item) => item.id !== snapshotId && item.status === "ready" && Boolean(item.commitSha),
@@ -52,6 +73,7 @@ export function GuardrailsPanel({
   useEffect(() => {
     let active = true;
     setBaselineSnapshotId("");
+    setReport(null);
     setLoading(true);
     setError(null);
     apiFetch<GuardrailReport>(`/v1/snapshots/${snapshotId}/guardrails`)
@@ -68,6 +90,42 @@ export function GuardrailsPanel({
       active = false;
     };
   }, [snapshotId]);
+
+  useEffect(() => {
+    const request = ++profileRequest.current;
+    let active = true;
+    setProfiles([]);
+    setRepositoryProfile(null);
+    setSelectedProfileId("");
+    setProfilesLoading(true);
+    setProfilesError(null);
+    setAssigningProfile(false);
+    setAssignmentMessage(null);
+    Promise.all([
+      apiFetch<GuardrailProfile[]>("/v1/guardrail-profiles"),
+      apiFetch<GuardrailProfile>(
+        `/v1/repositories/${encodeURIComponent(repositoryId)}/guardrail-profile`,
+      ),
+    ])
+      .then(([available, current]) => {
+        if (!active || profileRequest.current !== request) return;
+        setProfiles(available);
+        setRepositoryProfile(current);
+        setSelectedProfileId(current.id);
+      })
+      .catch((cause) => {
+        if (active && profileRequest.current === request) {
+          setProfilesError(apiErrorMessage(cause, "Unable to load Guardrail policy profiles."));
+        }
+      })
+      .finally(() => {
+        if (active && profileRequest.current === request) setProfilesLoading(false);
+      });
+    return () => {
+      active = false;
+      profileRequest.current += 1;
+    };
+  }, [repositoryId]);
 
   useEffect(() => {
     if (!baselineSnapshotId) {
@@ -121,6 +179,39 @@ export function GuardrailsPanel({
     }
   }
 
+  async function assignProfile() {
+    if (!canManageProfiles || !selectedProfileId || selectedProfileId === repositoryProfile?.id) {
+      return;
+    }
+    const request = ++profileRequest.current;
+    setAssigningProfile(true);
+    setProfilesError(null);
+    setAssignmentMessage(null);
+    try {
+      const selected = profiles.find((profile) => profile.id === selectedProfileId);
+      if (!selected) throw new Error("The selected Guardrail profile is unavailable.");
+      const next = await apiFetch<GuardrailProfile>(
+        `/v1/repositories/${encodeURIComponent(repositoryId)}/guardrail-profile`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ profileId: selected.builtIn ? null : selected.id }),
+        },
+      );
+      if (profileRequest.current !== request) return;
+      setRepositoryProfile(next);
+      setSelectedProfileId(next.id);
+      setAssignmentMessage(
+        `${next.profileKey} v${next.version} will apply to newly created Snapshots only.`,
+      );
+    } catch (cause) {
+      if (profileRequest.current === request) {
+        setProfilesError(apiErrorMessage(cause, "Unable to assign the Guardrail policy profile."));
+      }
+    } finally {
+      if (profileRequest.current === request) setAssigningProfile(false);
+    }
+  }
+
   if (loading) {
     return (
       <section className="workspace-view guardrails-view">
@@ -166,6 +257,108 @@ export function GuardrailsPanel({
       </div>
 
       {error ? <div className="retrieval-alert">{error}</div> : null}
+
+      <section className="guardrails-policy" aria-label="Guardrail policy profile">
+        <div className="guardrails-policy-snapshot">
+          <div>
+            <ShieldCheck size={18} />
+            <span>Snapshot policy</span>
+          </div>
+          {report.profile ? (
+            <>
+              <strong>
+                {report.profile.profileKey} v{report.profile.version}
+              </strong>
+              <code title={report.profile.fingerprint}>
+                {report.profile.fingerprint.slice(0, 19)}…
+              </code>
+              <p>{report.profile.description || "No profile description."}</p>
+            </>
+          ) : (
+            <>
+              <strong>Legacy default</strong>
+              <p>This report predates profile provenance and uses the built-in thresholds.</p>
+            </>
+          )}
+          <small>
+            This Snapshot is immutable; changing the repository default cannot rewrite it.
+          </small>
+        </div>
+
+        <div className="guardrails-policy-assignment">
+          <div>
+            <strong>Policy for future Snapshots</strong>
+            <span>Choose a reviewed immutable version. AI cannot modify or apply policies.</span>
+          </div>
+          {profilesError ? (
+            <div className="guardrails-policy-error" role="alert">
+              {profilesError}
+            </div>
+          ) : null}
+          {profilesLoading ? (
+            <output>
+              <LoaderCircle className="spin" size={15} /> Loading policy profiles…
+            </output>
+          ) : repositoryProfile && profiles.length > 0 ? (
+            <div className="guardrails-policy-controls">
+              <label>
+                <span>Repository default</span>
+                <select
+                  aria-label="Repository Guardrail profile"
+                  disabled={!canManageProfiles || assigningProfile}
+                  onChange={(event) => {
+                    setSelectedProfileId(event.target.value);
+                    setAssignmentMessage(null);
+                  }}
+                  value={selectedProfileId}
+                >
+                  {profiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.profileKey} v{profile.version} · {profile.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {canManageProfiles ? (
+                <button
+                  className="secondary-button"
+                  disabled={
+                    assigningProfile ||
+                    !selectedProfileId ||
+                    selectedProfileId === repositoryProfile.id
+                  }
+                  onClick={() => void assignProfile()}
+                  type="button"
+                >
+                  {assigningProfile ? (
+                    <LoaderCircle className="spin" size={15} />
+                  ) : (
+                    <Save size={15} />
+                  )}
+                  Apply to future Snapshots
+                </button>
+              ) : (
+                <small>
+                  {session?.authenticated
+                    ? "Viewer access is read-only."
+                    : "Sign in as an Editor or Owner to change the repository default."}
+                </small>
+              )}
+            </div>
+          ) : profilesError ? null : (
+            <p>No policy profiles are available for this workspace.</p>
+          )}
+          {repositoryProfile ? (
+            <small>
+              Current default: {repositoryProfile.profileKey} v{repositoryProfile.version} ·{" "}
+              {repositoryProfile.fingerprint.slice(0, 19)}…
+            </small>
+          ) : null}
+          {assignmentMessage ? (
+            <div className="guardrails-policy-success">{assignmentMessage}</div>
+          ) : null}
+        </div>
+      </section>
 
       {baselineSnapshots.length > 0 ? (
         <section className="guardrails-baseline" aria-label="Guardrails baseline comparison">

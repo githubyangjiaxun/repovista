@@ -12,10 +12,12 @@ import {
   type GitHubInstallation,
   type GitHubInstallationRepositoryPage,
   type GuardrailComparison,
+  type GuardrailProfile,
   type GuardrailReport,
   githubInstallationRepositoryPageSchema,
   githubInstallationSchema,
   guardrailComparisonSchema,
+  guardrailProfileSchema,
   guardrailReportSchema,
   type Job,
   jobSchema,
@@ -30,6 +32,7 @@ import { CLI_USER_AGENT } from "./version.js";
 
 const repositoryListSchema = repositorySummarySchema.array();
 const snapshotListSchema = snapshotSchema.array();
+const guardrailProfileListSchema = guardrailProfileSchema.array();
 export interface AskRepositoryRequest extends AskRequest {
   snapshotId?: string;
 }
@@ -248,6 +251,44 @@ export class RepoVistaClient {
       `/v1/snapshots/${encodeURIComponent(headSnapshotId)}/guardrails/compare?${query.toString()}`,
       {},
       (value) => guardrailComparisonSchema.parse(value),
+    );
+  }
+
+  listGuardrailProfiles(): Promise<GuardrailProfile[]> {
+    return this.requestEnvelope("/v1/guardrail-profiles", {}, (value) =>
+      guardrailProfileListSchema.parse(value),
+    );
+  }
+
+  createGuardrailProfile(input: {
+    profileKey: string;
+    name: string;
+    description: string;
+    thresholds: GuardrailProfile["thresholds"];
+  }): Promise<GuardrailProfile> {
+    return this.requestEnvelope(
+      "/v1/guardrail-profiles",
+      { method: "POST", body: JSON.stringify(input) },
+      (value) => guardrailProfileSchema.parse(value),
+    );
+  }
+
+  getRepositoryGuardrailProfile(repositoryId: string): Promise<GuardrailProfile> {
+    return this.requestEnvelope(
+      `/v1/repositories/${encodeURIComponent(repositoryId)}/guardrail-profile`,
+      {},
+      (value) => guardrailProfileSchema.parse(value),
+    );
+  }
+
+  assignRepositoryGuardrailProfile(
+    repositoryId: string,
+    profileId: string | null,
+  ): Promise<GuardrailProfile> {
+    return this.requestEnvelope(
+      `/v1/repositories/${encodeURIComponent(repositoryId)}/guardrail-profile`,
+      { method: "PUT", body: JSON.stringify({ profileId }) },
+      (value) => guardrailProfileSchema.parse(value),
     );
   }
 

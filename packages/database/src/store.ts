@@ -19,6 +19,7 @@ import type {
 } from "@repovista/contracts";
 import {
   embeddingIndexSchema,
+  guardrailProfileSchema,
   idSchema,
   pullRequestAnalysisSchema,
   pullRequestImpactSchema,
@@ -39,12 +40,15 @@ import {
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import type {
+  AssignRepositoryGuardrailProfileInput,
   AuditEventInput,
   AuditEventRecord,
   ClaimedEmbeddingJob,
   ClaimedIndexJob,
   CompletePullRequestAnalysisInput,
   CreateApiTokenInput,
+  CreateGuardrailProfileInput,
+  CreateGuardrailProfileResult,
   CreateImportInput,
   CreateImportResult,
   CreatePullRequestAnalysisInput,
@@ -58,6 +62,7 @@ import type {
   GitHubInstallationInput,
   GitHubWebhookInput,
   GitHubWebhookProcessResult,
+  GuardrailProfileRecord,
   IncrementalIndexBase,
   InstallationState,
   JobEventRecord,
@@ -113,6 +118,7 @@ interface WorkspaceMemberRow {
 interface SnapshotRow {
   id: string;
   repository_id: string;
+  guardrail_profile_id: string | null;
   commit_sha: string | null;
   ref_name: string | null;
   status: Snapshot["status"];
@@ -125,6 +131,20 @@ interface SnapshotRow {
   error_message: string | null;
   requested_at: Date | string;
   ready_at: Date | string | null;
+}
+
+interface GuardrailProfileRow {
+  id: string;
+  workspace_id: string;
+  profile_key: string;
+  name: string;
+  description: string;
+  version: number;
+  algorithm_version: string;
+  thresholds_json: unknown;
+  fingerprint: string;
+  created_by: string | null;
+  created_at: Date | string;
 }
 
 interface JobRow {
@@ -292,6 +312,7 @@ function mapSnapshot(row: SnapshotRow): Snapshot {
   return {
     id: row.id,
     repositoryId: row.repository_id,
+    guardrailProfileId: row.guardrail_profile_id,
     commitSha: row.commit_sha,
     refName: row.ref_name,
     status: row.status,
@@ -310,6 +331,23 @@ function mapSnapshot(row: SnapshotRow): Snapshot {
             message: row.error_message ?? "Snapshot indexing failed.",
           },
   };
+}
+
+function mapGuardrailProfile(row: GuardrailProfileRow): GuardrailProfileRecord {
+  return guardrailProfileSchema.parse({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    profileKey: row.profile_key,
+    name: row.name,
+    description: row.description,
+    version: Number(row.version),
+    algorithmVersion: row.algorithm_version,
+    thresholds: row.thresholds_json,
+    fingerprint: row.fingerprint,
+    builtIn: false,
+    createdBy: row.created_by,
+    createdAt: iso(row.created_at),
+  });
 }
 
 interface EmbeddingIndexRow {
@@ -1480,6 +1518,159 @@ export class RepoVistaStore {
     }));
   }
 
+  async listGuardrailProfiles(workspaceId: string): Promise<GuardrailProfileRecord[]> {
+    const result = await this.pool.query<GuardrailProfileRow>(
+      "SELECT id, workspace_id, profile_key::text, name, description, version, " +
+        "algorithm_version, thresholds_json, fingerprint, created_by, created_at " +
+        "FROM guardrail_profiles WHERE workspace_id = $1 " +
+        "ORDER BY profile_key::text, version DESC, created_at DESC",
+      [workspaceId],
+    );
+    return result.rows.map(mapGuardrailProfile);
+  }
+
+  async getGuardrailProfile(
+    profileId: string,
+    workspaceId: string,
+  ): Promise<GuardrailProfileRecord | null> {
+    const result = await this.pool.query<GuardrailProfileRow>(
+      "SELECT id, workspace_id, profile_key::text, name, description, version, " +
+        "algorithm_version, thresholds_json, fingerprint, created_by, created_at " +
+        "FROM guardrail_profiles WHERE id = $1 AND workspace_id = $2",
+      [profileId, workspaceId],
+    );
+    return result.rows[0] ? mapGuardrailProfile(result.rows[0]) : null;
+  }
+
+  async createGuardrailProfile(
+    input: CreateGuardrailProfileInput,
+  ): Promise<CreateGuardrailProfileResult> {
+    return withTransaction(this.pool, async (client) => {
+      if (input.profileKey === "default") {
+        throw new DomainError(
+          "GUARDRAIL_PROFILE_KEY_RESERVED",
+          "The default profile key is reserved for the built-in policy.",
+        );
+      }
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
+        `guardrail-profile:${input.workspaceId}:${input.profileKey}`,
+      ]);
+      const previous = await client.query<GuardrailProfileRow & { matches_input: boolean }>(
+        "SELECT id, workspace_id, profile_key::text, name, description, version, " +
+          "algorithm_version, thresholds_json, fingerprint, created_by, created_at, " +
+          "(name = $3 AND description = $4 AND algorithm_version = $5 " +
+          "AND thresholds_json = $6::jsonb) AS matches_input " +
+          "FROM guardrail_profiles WHERE workspace_id = $1 AND profile_key = $2 " +
+          "ORDER BY version DESC LIMIT 1",
+        [
+          input.workspaceId,
+          input.profileKey,
+          input.name,
+          input.description,
+          input.algorithmVersion,
+          JSON.stringify(input.thresholds),
+        ],
+      );
+      const previousRow = previous.rows[0];
+      if (previousRow?.matches_input) {
+        return { profile: mapGuardrailProfile(previousRow), created: false };
+      }
+      const version = Number(previousRow?.version ?? 0) + 1;
+      const fingerprint = input.fingerprint(version);
+      const id = createId();
+      const inserted = await client.query<GuardrailProfileRow>(
+        "INSERT INTO guardrail_profiles (id, workspace_id, profile_key, name, description, " +
+          "version, algorithm_version, thresholds_json, fingerprint, created_by) " +
+          "VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10) " +
+          "RETURNING id, workspace_id, profile_key::text, name, description, version, " +
+          "algorithm_version, thresholds_json, fingerprint, created_by, created_at",
+        [
+          id,
+          input.workspaceId,
+          input.profileKey,
+          input.name,
+          input.description,
+          version,
+          input.algorithmVersion,
+          JSON.stringify(input.thresholds),
+          fingerprint,
+          input.actorUserId,
+        ],
+      );
+      await this.appendAuditEvent(client, {
+        workspaceId: input.workspaceId,
+        actorUserId: input.actorUserId,
+        actorKind: input.actorKind,
+        action: "guardrail_profile.create",
+        resourceType: "guardrail_profile",
+        resourceId: id,
+        metadata: { profileKey: input.profileKey, version, fingerprint },
+      });
+      const row = inserted.rows[0];
+      if (!row)
+        throw new DomainError("GUARDRAIL_PROFILE_CREATE_FAILED", "The profile was not created.");
+      return { profile: mapGuardrailProfile(row), created: true };
+    });
+  }
+
+  async getRepositoryGuardrailProfileId(
+    repositoryId: string,
+    workspaceId: string,
+  ): Promise<string | null | undefined> {
+    const result = await this.pool.query<{ guardrail_profile_id: string | null }>(
+      "SELECT guardrail_profile_id FROM repositories WHERE id = $1 AND workspace_id = $2",
+      [repositoryId, workspaceId],
+    );
+    return result.rows[0] ? result.rows[0].guardrail_profile_id : undefined;
+  }
+
+  async assignRepositoryGuardrailProfile(
+    input: AssignRepositoryGuardrailProfileInput,
+  ): Promise<void> {
+    await withTransaction(this.pool, async (client) => {
+      if (input.profileId) {
+        const profile = await client.query<{ id: string }>(
+          "SELECT id FROM guardrail_profiles WHERE id = $1 AND workspace_id = $2",
+          [input.profileId, input.workspaceId],
+        );
+        if (!profile.rows[0]) {
+          throw new DomainError(
+            "GUARDRAIL_PROFILE_NOT_FOUND",
+            "The guardrail policy profile does not exist.",
+          );
+        }
+      }
+      const updated = await client.query(
+        "UPDATE repositories SET guardrail_profile_id = $3, updated_at = now() " +
+          "WHERE id = $1 AND workspace_id = $2",
+        [input.repositoryId, input.workspaceId, input.profileId],
+      );
+      if (updated.rowCount === 0) {
+        throw new DomainError("REPOSITORY_NOT_FOUND", "The requested repository does not exist.");
+      }
+      await this.appendAuditEvent(client, {
+        workspaceId: input.workspaceId,
+        actorUserId: input.actorUserId,
+        actorKind: input.actorKind,
+        action: "repository.guardrail_profile_assign",
+        resourceType: "repository",
+        resourceId: input.repositoryId,
+        metadata: { profileId: input.profileId },
+      });
+    });
+  }
+
+  async getSnapshotGuardrailProfile(snapshotId: string): Promise<GuardrailProfileRecord | null> {
+    const result = await this.pool.query<GuardrailProfileRow>(
+      "SELECT p.id, p.workspace_id, p.profile_key::text, p.name, p.description, p.version, " +
+        "p.algorithm_version, p.thresholds_json, p.fingerprint, p.created_by, p.created_at " +
+        "FROM repository_snapshots s JOIN guardrail_profiles p ON p.id = s.guardrail_profile_id " +
+        "WHERE s.id = $1",
+      [snapshotId],
+    );
+    return result.rows[0] ? mapGuardrailProfile(result.rows[0]) : null;
+  }
+
   async createRepositoryImport(input: CreateImportInput): Promise<CreateImportResult> {
     return withTransaction(this.pool, async (client) => {
       if (input.githubInstallationId) {
@@ -1562,6 +1753,12 @@ export class RepoVistaStore {
         );
       }
 
+      const repositoryProfile = await client.query<{ guardrail_profile_id: string | null }>(
+        "SELECT guardrail_profile_id FROM repositories WHERE id = $1 FOR UPDATE",
+        [repositoryId],
+      );
+      const guardrailProfileId = repositoryProfile.rows[0]?.guardrail_profile_id ?? null;
+
       const active = await client.query<{
         snapshot_id: string;
         job_id: string;
@@ -1571,9 +1768,10 @@ export class RepoVistaStore {
           "JOIN analysis_jobs j ON j.snapshot_id = s.id " +
           "WHERE s.repository_id = $1 " +
           "AND s.requested_ref IS NOT DISTINCT FROM $2 " +
+          "AND s.guardrail_profile_id IS NOT DISTINCT FROM $3 " +
           "AND j.status IN ('queued', 'running') " +
           "ORDER BY j.created_at DESC LIMIT 1",
-        [repositoryId, input.requestedRef ?? null],
+        [repositoryId, input.requestedRef ?? null, guardrailProfileId],
       );
 
       const activeRow = active.rows[0];
@@ -1590,9 +1788,15 @@ export class RepoVistaStore {
       const jobId = createId();
       await client.query(
         "INSERT INTO repository_snapshots (" +
-          "id, repository_id, requested_ref, status, parser_version" +
-          ") VALUES ($1, $2, $3, 'requested', $4)",
-        [snapshotId, repositoryId, input.requestedRef ?? null, input.parserVersion],
+          "id, repository_id, requested_ref, status, parser_version, guardrail_profile_id" +
+          ") VALUES ($1, $2, $3, 'requested', $4, $5)",
+        [
+          snapshotId,
+          repositoryId,
+          input.requestedRef ?? null,
+          input.parserVersion,
+          guardrailProfileId,
+        ],
       );
       await client.query(
         "INSERT INTO analysis_jobs (" +
@@ -1777,8 +1981,13 @@ export class RepoVistaStore {
       );
     }
     return withTransaction(this.pool, async (client) => {
-      const repository = await client.query<{ id: string; clone_url: string }>(
-        "SELECT id, clone_url FROM repositories WHERE id = $1 AND workspace_id = $2",
+      const repository = await client.query<{
+        id: string;
+        clone_url: string;
+        guardrail_profile_id: string | null;
+      }>(
+        "SELECT id, clone_url, guardrail_profile_id FROM repositories " +
+          "WHERE id = $1 AND workspace_id = $2 FOR SHARE",
         [input.repositoryId, input.workspaceId],
       );
       if (!repository.rows[0]) {
@@ -1787,10 +1996,12 @@ export class RepoVistaStore {
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
         `commit-snapshot:${input.repositoryId}:${commitSha}:${input.parserVersion}`,
       ]);
+      const guardrailProfileId = repository.rows[0].guardrail_profile_id;
       const ready = await client.query<{ id: string }>(
         "SELECT id FROM repository_snapshots WHERE repository_id = $1 AND commit_sha = $2 " +
-          "AND parser_version = $3 AND status = 'ready' ORDER BY ready_at DESC LIMIT 1",
-        [input.repositoryId, commitSha, input.parserVersion],
+          "AND parser_version = $3 AND guardrail_profile_id IS NOT DISTINCT FROM $4 " +
+          "AND status = 'ready' ORDER BY ready_at DESC LIMIT 1",
+        [input.repositoryId, commitSha, input.parserVersion, guardrailProfileId],
       );
       if (ready.rows[0])
         return { snapshotId: ready.rows[0].id, jobId: null, status: "ready" as const };
@@ -1802,9 +2013,10 @@ export class RepoVistaStore {
         "SELECT s.id AS snapshot_id, j.id AS job_id, j.status FROM repository_snapshots s " +
           "JOIN analysis_jobs j ON j.snapshot_id = s.id " +
           "WHERE s.repository_id = $1 AND s.requested_ref = $2 AND s.parser_version = $3 " +
+          "AND s.guardrail_profile_id IS NOT DISTINCT FROM $4 " +
           "AND j.job_type = 'index_snapshot' AND j.status IN ('queued', 'running') " +
           "ORDER BY j.created_at DESC LIMIT 1",
-        [input.repositoryId, commitSha, input.parserVersion],
+        [input.repositoryId, commitSha, input.parserVersion, guardrailProfileId],
       );
       if (active.rows[0]) {
         return {
@@ -1816,9 +2028,9 @@ export class RepoVistaStore {
       const snapshotId = createId();
       const jobId = createId();
       await client.query(
-        "INSERT INTO repository_snapshots (id, repository_id, requested_ref, status, parser_version, promote_latest) " +
-          "VALUES ($1, $2, $3, 'requested', $4, false)",
-        [snapshotId, input.repositoryId, commitSha, input.parserVersion],
+        "INSERT INTO repository_snapshots (id, repository_id, requested_ref, status, parser_version, " +
+          "promote_latest, guardrail_profile_id) VALUES ($1, $2, $3, 'requested', $4, false, $5)",
+        [snapshotId, input.repositoryId, commitSha, input.parserVersion, guardrailProfileId],
       );
       await client.query(
         "INSERT INTO analysis_jobs (id, workspace_id, repository_id, snapshot_id, job_type, status, idempotency_key) " +
@@ -3187,8 +3399,10 @@ export class RepoVistaStore {
       const jobId = createId();
       await client.query(
         "INSERT INTO repository_snapshots (" +
-          "id, repository_id, commit_sha, parent_commit_sha, requested_ref, ref_name, status, parser_version" +
-          ") VALUES ($1, $2, $3, NULL, $4, $5, 'requested', $6)",
+          "id, repository_id, commit_sha, parent_commit_sha, requested_ref, ref_name, status, " +
+          "parser_version, guardrail_profile_id" +
+          ") VALUES ($1, $2, $3, NULL, $4, $5, 'requested', $6, " +
+          "(SELECT guardrail_profile_id FROM repositories WHERE id = $2))",
         [snapshotId, repositoryId, null, push.after, push.defaultBranch, parserVersion],
       );
       await client.query(
@@ -3219,7 +3433,7 @@ export class RepoVistaStore {
 
   async listSnapshots(repositoryId: string): Promise<Snapshot[]> {
     const result = await this.pool.query<SnapshotRow>(
-      "SELECT id, repository_id, commit_sha, ref_name, status, parser_version, " +
+      "SELECT id, repository_id, guardrail_profile_id, commit_sha, ref_name, status, parser_version, " +
         "base_snapshot_id, index_mode, tree_hash, " +
         "stats_json, error_code, error_message, requested_at, ready_at " +
         "FROM repository_snapshots WHERE repository_id = $1 " +
@@ -3231,7 +3445,7 @@ export class RepoVistaStore {
 
   async getSnapshot(snapshotId: string): Promise<Snapshot | null> {
     const result = await this.pool.query<SnapshotRow>(
-      "SELECT id, repository_id, commit_sha, ref_name, status, parser_version, " +
+      "SELECT id, repository_id, guardrail_profile_id, commit_sha, ref_name, status, parser_version, " +
         "base_snapshot_id, index_mode, tree_hash, " +
         "stats_json, error_code, error_message, requested_at, ready_at " +
         "FROM repository_snapshots WHERE id = $1",

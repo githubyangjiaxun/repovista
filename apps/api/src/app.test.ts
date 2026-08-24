@@ -3,6 +3,7 @@ import { CSRF_COOKIE, hashSecret, SESSION_COOKIE } from "@repovista/auth";
 import { loadConfig } from "@repovista/config";
 import type { DatabasePool, RepoVistaStore } from "@repovista/database";
 import { DomainError, PUBLIC_WORKSPACE_ID } from "@repovista/domain";
+import { BUILT_IN_GUARDRAIL_PROFILE, guardrailProfileFingerprint } from "@repovista/guardrails";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "./app.js";
 
@@ -20,6 +21,45 @@ const headSha = "2222222222222222222222222222222222222222";
 const ownerUserId = "01900000-0000-7000-8000-000000000010";
 const memberUserId = "01900000-0000-7000-8000-000000000011";
 const workspaceId = "01900000-0000-7000-8000-000000000012";
+const profileId = "01900000-0000-7000-8000-000000000015";
+
+const strictProfile = {
+  id: profileId,
+  workspaceId,
+  profileKey: "strict",
+  name: "Strict architecture guardrails",
+  description: "Lower thresholds for core services.",
+  version: 1,
+  algorithmVersion: "architecture-guardrails-v1",
+  thresholds: {
+    cycleMaxLength: 8,
+    largeFileLines: 600,
+    largeFileBytes: 80_000,
+    largeSymbolLines: 100,
+    highFanIn: 15,
+  },
+  fingerprint: guardrailProfileFingerprint({
+    profileKey: "strict",
+    version: 1,
+    thresholds: {
+      cycleMaxLength: 8,
+      largeFileLines: 600,
+      largeFileBytes: 80_000,
+      largeSymbolLines: 100,
+      highFanIn: 15,
+    },
+  }),
+  builtIn: false,
+  createdBy: ownerUserId,
+  createdAt: "2026-08-24T00:00:00.000Z",
+};
+
+const createProfilePayload = {
+  profileKey: strictProfile.profileKey,
+  name: strictProfile.name,
+  description: strictProfile.description,
+  thresholds: strictProfile.thresholds,
+};
 
 const pullRequestAnalysis = {
   id: analysisId,
@@ -135,6 +175,14 @@ function createStore(): RepoVistaStore {
       revision: 1,
       status: "queued" as const,
     })),
+    listGuardrailProfiles: vi.fn(async () => [strictProfile]),
+    getGuardrailProfile: vi.fn(async (id, requestedWorkspaceId) =>
+      id === profileId && requestedWorkspaceId === workspaceId ? strictProfile : null,
+    ),
+    createGuardrailProfile: vi.fn(async () => ({ profile: strictProfile, created: true })),
+    getRepositoryGuardrailProfileId: vi.fn(async () => null),
+    assignRepositoryGuardrailProfile: vi.fn(async () => undefined),
+    getSnapshotGuardrailProfile: vi.fn(async () => null),
     listRepositories: vi.fn(async () => [repository]),
     getRepository: vi.fn(async () => repository),
     listSnapshots: vi.fn(async () => [snapshot]),
@@ -1278,8 +1326,188 @@ describe("RepoVista API", () => {
     expect(result.headers["cache-control"]).toBe("private, no-store");
   });
 
+  it("lists, creates, and reads immutable Guardrail policy profiles in the active workspace", async () => {
+    const store = createStore();
+    const auth = authenticateOwner(store);
+    const { app } = createTestApp(store);
+    openApps.push(app);
+
+    const listed = await app.inject({
+      method: "GET",
+      url: "/v1/guardrail-profiles",
+      headers: { cookie: auth.cookie },
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.headers["cache-control"]).toBe("private, no-store");
+    expect(listed.json().data).toEqual([BUILT_IN_GUARDRAIL_PROFILE, strictProfile]);
+    expect(store.listGuardrailProfiles).toHaveBeenCalledWith(workspaceId);
+
+    const headers = {
+      cookie: auth.cookie,
+      origin: "http://localhost:3000",
+      "x-repovista-csrf": auth.csrfToken,
+    };
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/guardrail-profiles",
+      headers,
+      payload: createProfilePayload,
+    });
+    expect(created.statusCode, created.body).toBe(201);
+    expect(created.headers["cache-control"]).toBe("private, no-store");
+    expect(created.json().data).toEqual(strictProfile);
+    const createInput = vi.mocked(store.createGuardrailProfile).mock.calls[0]?.[0];
+    expect(createInput).toMatchObject({
+      workspaceId,
+      profileKey: "strict",
+      actorUserId: ownerUserId,
+      actorKind: "session",
+    });
+    expect(createInput?.fingerprint(1)).toBe(strictProfile.fingerprint);
+
+    vi.mocked(store.createGuardrailProfile).mockResolvedValueOnce({
+      profile: strictProfile,
+      created: false,
+    });
+    const repeated = await app.inject({
+      method: "POST",
+      url: "/v1/guardrail-profiles",
+      headers,
+      payload: createProfilePayload,
+    });
+    expect(repeated.statusCode).toBe(200);
+    expect(repeated.json().data.id).toBe(profileId);
+
+    const loaded = await app.inject({
+      method: "GET",
+      url: `/v1/guardrail-profiles/${profileId}`,
+      headers: { cookie: auth.cookie },
+    });
+    expect(loaded.statusCode).toBe(200);
+    expect(loaded.json().data).toEqual(strictProfile);
+    expect(store.getGuardrailProfile).toHaveBeenCalledWith(profileId, workspaceId);
+  });
+
+  it("keeps policy writes authenticated, role-scoped, and reserves the default key", async () => {
+    const store = createStore();
+    const { app } = createTestApp(store);
+    openApps.push(app);
+
+    const anonymous = await app.inject({
+      method: "POST",
+      url: "/v1/guardrail-profiles",
+      payload: createProfilePayload,
+    });
+    expect(anonymous.statusCode).toBe(401);
+    expect(anonymous.json().error.code).toBe("AUTH_REQUIRED");
+
+    const viewerHeaders = authenticateToken(store, {
+      role: "viewer",
+      scopes: ["repo:read"],
+    });
+    const viewer = await app.inject({
+      method: "POST",
+      url: "/v1/guardrail-profiles",
+      headers: viewerHeaders,
+      payload: createProfilePayload,
+    });
+    expect(viewer.statusCode).toBe(403);
+    expect(viewer.json().error.code).toBe("WORKSPACE_FORBIDDEN");
+
+    const viewerAssignment = await app.inject({
+      method: "PUT",
+      url: `/v1/repositories/${repositoryId}/guardrail-profile`,
+      headers: viewerHeaders,
+      payload: { profileId },
+    });
+    expect(viewerAssignment.statusCode).toBe(403);
+    expect(viewerAssignment.json().error.code).toBe("WORKSPACE_FORBIDDEN");
+
+    const ownerHeaders = authenticateToken(store);
+    const reserved = await app.inject({
+      method: "POST",
+      url: "/v1/guardrail-profiles",
+      headers: ownerHeaders,
+      payload: { ...createProfilePayload, profileKey: "default" },
+    });
+    expect(reserved.statusCode).toBe(400);
+    expect(reserved.json().error.code).toBe("VALIDATION_FAILED");
+    expect(store.createGuardrailProfile).not.toHaveBeenCalled();
+
+    const unsafeField = await app.inject({
+      method: "POST",
+      url: "/v1/guardrail-profiles",
+      headers: ownerHeaders,
+      payload: { ...createProfilePayload, script: "return true;" },
+    });
+    expect(unsafeField.statusCode).toBe(400);
+    expect(unsafeField.json().error.code).toBe("VALIDATION_FAILED");
+    expect(store.createGuardrailProfile).not.toHaveBeenCalled();
+  });
+
+  it("hides foreign policy IDs and binds repository defaults without changing old snapshots", async () => {
+    const store = createStore();
+    const auth = authenticateOwner(store);
+    const { app } = createTestApp(store);
+    openApps.push(app);
+
+    const foreignProfileId = "01900000-0000-7000-8000-000000000097";
+    const hidden = await app.inject({
+      method: "GET",
+      url: `/v1/guardrail-profiles/${foreignProfileId}`,
+      headers: { cookie: auth.cookie },
+    });
+    expect(hidden.statusCode).toBe(404);
+    expect(hidden.json().error.code).toBe("GUARDRAIL_PROFILE_NOT_FOUND");
+    expect(store.getGuardrailProfile).toHaveBeenCalledWith(foreignProfileId, workspaceId);
+
+    vi.mocked(store.getRepositoryGuardrailProfileId).mockResolvedValueOnce(profileId);
+    const current = await app.inject({
+      method: "GET",
+      url: `/v1/repositories/${repositoryId}/guardrail-profile`,
+      headers: { cookie: auth.cookie },
+    });
+    expect(current.statusCode).toBe(200);
+    expect(current.json().data.id).toBe(profileId);
+
+    const headers = {
+      cookie: auth.cookie,
+      origin: "http://localhost:3000",
+      "x-repovista-csrf": auth.csrfToken,
+    };
+    const assigned = await app.inject({
+      method: "PUT",
+      url: `/v1/repositories/${repositoryId}/guardrail-profile`,
+      headers,
+      payload: { profileId },
+    });
+    expect(assigned.statusCode, assigned.body).toBe(200);
+    expect(assigned.headers["cache-control"]).toBe("private, no-store");
+    expect(assigned.json().data.id).toBe(profileId);
+    expect(store.assignRepositoryGuardrailProfile).toHaveBeenCalledWith({
+      repositoryId,
+      workspaceId,
+      profileId,
+      actorUserId: ownerUserId,
+      actorKind: "session",
+    });
+
+    const reset = await app.inject({
+      method: "PUT",
+      url: `/v1/repositories/${repositoryId}/guardrail-profile`,
+      headers,
+      payload: { profileId: null },
+    });
+    expect(reset.statusCode).toBe(200);
+    expect(reset.json().data).toEqual(BUILT_IN_GUARDRAIL_PROFILE);
+    expect(store.assignRepositoryGuardrailProfile).toHaveBeenLastCalledWith(
+      expect.objectContaining({ repositoryId, workspaceId, profileId: null }),
+    );
+  });
+
   it("returns deterministic guardrails and a source-free SARIF export", async () => {
     const store = createStore();
+    vi.mocked(store.getSnapshotGuardrailProfile).mockResolvedValue(strictProfile);
     const graphData = await store.getSnapshotGraphData(snapshotId);
     if (!graphData) throw new Error("Expected graph data fixture.");
     vi.mocked(store.getSnapshotGraphData).mockResolvedValue({
@@ -1302,9 +1530,16 @@ describe("RepoVista API", () => {
     expect(report.headers["cache-control"]).toBe("public, max-age=0, must-revalidate");
     expect(report.json().data).toMatchObject({
       algorithmVersion: "architecture-guardrails-v1",
+      profile: {
+        id: profileId,
+        profileKey: "strict",
+        version: 1,
+        fingerprint: strictProfile.fingerprint,
+      },
       status: "warn",
       snapshot: { id: snapshotId, commitSha: snapshot.commitSha },
       summary: { total: 1, warnings: 1 },
+      thresholds: strictProfile.thresholds,
     });
     expect(report.json().data.findings[0]).toMatchObject({
       ruleId: "large_file",
@@ -1317,6 +1552,10 @@ describe("RepoVista API", () => {
     );
     expect(sarif.headers["cache-control"]).toBe("public, max-age=0, must-revalidate");
     expect(sarif.json()).toMatchObject({ version: "2.1.0" });
+    expect(sarif.json().runs[0].properties).toMatchObject({
+      guardrailProfileId: profileId,
+      guardrailProfileFingerprint: strictProfile.fingerprint,
+    });
     expect(report.body).not.toContain("export function hello");
     expect(sarif.body).not.toContain("export function hello");
   });
@@ -1388,6 +1627,46 @@ describe("RepoVista API", () => {
       summary: { added: 1, regressions: 1 },
     });
     expect(result.body).not.toContain("export function hello");
+  });
+
+  it("rejects baseline comparisons across different policy fingerprints", async () => {
+    const store = createStore();
+    const graph = await store.getSnapshotGraphData(snapshotId);
+    if (!graph) throw new Error("Expected graph data fixture.");
+    const teamProfile = {
+      ...strictProfile,
+      id: "01900000-0000-7000-8000-000000000096",
+      profileKey: "team",
+      name: "Team architecture guardrails",
+      fingerprint: guardrailProfileFingerprint({
+        profileKey: "team",
+        version: strictProfile.version,
+        thresholds: strictProfile.thresholds,
+      }),
+    };
+    vi.mocked(store.getSnapshotGraphData).mockImplementation(async (id) => ({
+      ...graph,
+      snapshot: {
+        ...graph.snapshot,
+        id,
+        commitSha: id === baseSnapshotId ? baseSha : headSha,
+      },
+    }));
+    vi.mocked(store.getSnapshotGuardrailProfile).mockImplementation(async (id) =>
+      id === baseSnapshotId ? strictProfile : teamProfile,
+    );
+    const { app } = createTestApp(store);
+    openApps.push(app);
+
+    const result = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${headSnapshotId}/guardrails/compare?baseSnapshotId=${baseSnapshotId}`,
+    });
+    expect(result.statusCode).toBe(409);
+    expect(result.json().error).toMatchObject({
+      code: "GUARDRAIL_COMPARISON_INCOMPATIBLE",
+      message: "Guardrail reports use incompatible policy profiles.",
+    });
   });
 
   it("keeps private baseline comparisons non-cacheable", async () => {

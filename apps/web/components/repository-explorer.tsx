@@ -861,6 +861,7 @@ export function RepositoryExplorer({
               openSource(path, startLine, endLine, targetSnapshotId)
             }
             onOpenSource={openSource}
+            repositoryId={repositoryId}
             snapshotId={snapshot.id}
           />
         ) : null}

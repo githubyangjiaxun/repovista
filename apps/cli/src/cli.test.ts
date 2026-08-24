@@ -12,6 +12,48 @@ const fileId = "01900000-0000-7000-8000-000000000004";
 const symbolId = "01900000-0000-7000-8000-000000000005";
 const messageId = "01900000-0000-7000-8000-000000000006";
 const userId = "01900000-0000-7000-8000-000000000010";
+const profileId = "01900000-0000-7000-8000-000000000011";
+
+const guardrailProfile = {
+  id: profileId,
+  workspaceId: "01900000-0000-7000-8000-000000000012",
+  profileKey: "strict",
+  name: "Strict architecture guardrails",
+  description: "Lower deterministic thresholds.",
+  version: 2,
+  algorithmVersion: "architecture-guardrails-v1",
+  thresholds: {
+    cycleMaxLength: 8,
+    largeFileLines: 600,
+    largeFileBytes: 80_000,
+    largeSymbolLines: 100,
+    highFanIn: 15,
+  },
+  fingerprint: `sha256:${"a".repeat(64)}`,
+  builtIn: false,
+  createdBy: userId,
+  createdAt: "2026-08-24T00:00:00.000Z",
+};
+
+const defaultGuardrailProfile = {
+  ...guardrailProfile,
+  id: "00000000-0000-7000-8000-000000000003",
+  workspaceId: null,
+  profileKey: "default",
+  name: "Default architecture guardrails",
+  description: "The deterministic RepoVista baseline thresholds.",
+  version: 1,
+  thresholds: {
+    cycleMaxLength: 12,
+    largeFileLines: 800,
+    largeFileBytes: 102_400,
+    largeSymbolLines: 150,
+    highFanIn: 20,
+  },
+  fingerprint: `sha256:${"b".repeat(64)}`,
+  builtIn: true,
+  createdBy: null,
+};
 
 const queuedJob = {
   id: jobId,
@@ -109,7 +151,7 @@ describe("RepoVista CLI", () => {
     const exitCode = await runCli(["--version"], dependencies);
 
     expect(exitCode).toBe(0);
-    expect(stdout).toEqual(["0.7.0"]);
+    expect(stdout).toEqual(["0.8.0"]);
     expect(stderr).toEqual([]);
     expect(fetchImplementation).not.toHaveBeenCalled();
   });
@@ -504,6 +546,109 @@ describe("RepoVista CLI", () => {
     expect(exitCode).toBe(2);
     expect(stdout.join("\n")).toContain("Guardrails comparison: regressed");
     expect(stdout.join("\n")).toContain("[added] large_file");
+  });
+
+  it("lists immutable Guardrail policy profile versions", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () =>
+      envelope([defaultGuardrailProfile, guardrailProfile]),
+    );
+    const { dependencies, stdout } = harness(fetchImplementation as typeof fetch);
+
+    const exitCode = await runCli(["guardrails", "profiles"], dependencies);
+
+    expect(exitCode).toBe(0);
+    expect(stdout.join("\n")).toContain("built-in  default v1");
+    expect(stdout.join("\n")).toContain("strict v2");
+    expect(stdout.join("\n")).toContain(guardrailProfile.fingerprint);
+    expect(fetchImplementation.mock.calls[0]?.[0]).toBe(
+      "http://localhost:4000/v1/guardrail-profiles",
+    );
+  });
+
+  it("creates a policy profile from bounded threshold options", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () => envelope(guardrailProfile));
+    const { dependencies, stdout } = harness(fetchImplementation as typeof fetch);
+
+    const exitCode = await runCli(
+      [
+        "guardrails",
+        "profile",
+        "create",
+        "strict",
+        "--name",
+        "Strict architecture guardrails",
+        "--description",
+        "Lower deterministic thresholds.",
+        "--cycle-max-length",
+        "8",
+        "--large-file-lines",
+        "600",
+        "--large-file-bytes",
+        "80000",
+        "--large-symbol-lines",
+        "100",
+        "--high-fan-in",
+        "15",
+        "--json",
+      ],
+      dependencies,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.join("\n"))).toMatchObject({ id: profileId, version: 2 });
+    const request = fetchImplementation.mock.calls[0]?.[1] as RequestInit;
+    expect(request.method).toBe("POST");
+    expect(JSON.parse(String(request.body))).toEqual({
+      profileKey: "strict",
+      name: "Strict architecture guardrails",
+      description: "Lower deterministic thresholds.",
+      thresholds: guardrailProfile.thresholds,
+    });
+  });
+
+  it("assigns the built-in default only to future repository snapshots", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () => envelope(defaultGuardrailProfile));
+    const { dependencies, stdout } = harness(fetchImplementation as typeof fetch);
+
+    const exitCode = await runCli(
+      ["guardrails", "profile", "assign", repositoryId, "default"],
+      dependencies,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stdout.join("\n")).toContain("default v1 for new snapshots");
+    expect(stdout.join("\n")).toContain("Existing snapshots keep their original policy profile.");
+    const request = fetchImplementation.mock.calls[0]?.[1] as RequestInit;
+    expect(request.method).toBe("PUT");
+    expect(JSON.parse(String(request.body))).toEqual({ profileId: null });
+  });
+
+  it("rejects reserved or out-of-range profile inputs before contacting the API", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>();
+    const reserved = harness(fetchImplementation as typeof fetch);
+    expect(
+      await runCli(
+        ["guardrails", "profile", "create", "default", "--name", "Reserved"],
+        reserved.dependencies,
+      ),
+    ).toBe(2);
+    const invalid = harness(fetchImplementation as typeof fetch);
+    expect(
+      await runCli(
+        [
+          "guardrails",
+          "profile",
+          "create",
+          "strict",
+          "--name",
+          "Strict",
+          "--cycle-max-length",
+          "1",
+        ],
+        invalid.dependencies,
+      ),
+    ).toBe(2);
+    expect(fetchImplementation).not.toHaveBeenCalled();
   });
 
   it("rejects invalid search modes and limits before contacting the API", async () => {

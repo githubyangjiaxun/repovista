@@ -15,6 +15,7 @@ integration("RepoVistaStore with PostgreSQL", () => {
   let pool: DatabasePool;
   let store: RepoVistaStore;
   const repositoryIds = new Set<string>();
+  const guardrailProfileIds = new Set<string>();
 
   beforeAll(async () => {
     if (!databaseUrl) throw new Error("DATABASE_TEST_URL is required.");
@@ -32,7 +33,134 @@ integration("RepoVistaStore with PostgreSQL", () => {
           ")",
       );
     }
+    if (guardrailProfileIds.size > 0) {
+      await pool.query("DELETE FROM guardrail_profiles WHERE id = ANY($1::uuid[])", [
+        [...guardrailProfileIds],
+      ]);
+    }
     await pool?.end();
+  });
+
+  it("versions Guardrail policy profiles and snapshots repository assignments", async () => {
+    const suffix = randomUUID();
+    const imported = await store.createRepositoryImport({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      identity: {
+        owner: "repovista-policy-test",
+        name: suffix,
+        canonicalUrl: `https://github.com/repovista-policy-test/${suffix}`,
+        cloneUrl: `https://github.com/repovista-policy-test/${suffix}.git`,
+      },
+      requestedRef: "main",
+      ignore: [],
+      parserVersion: "integration-policy-v1",
+    });
+    repositoryIds.add(imported.repositoryId);
+    const defaultJob = await store.claimIndexJob(`policy-default-${suffix}`, 30);
+    expect(defaultJob?.id).toBe(imported.jobId);
+    if (!defaultJob) throw new Error("Expected the default policy job.");
+    await store.cancelJob(defaultJob.id, defaultJob.snapshotId, `policy-default-${suffix}`);
+
+    const thresholds = {
+      cycleMaxLength: 8,
+      largeFileLines: 600,
+      largeFileBytes: 80_000,
+      largeSymbolLines: 100,
+      highFanIn: 15,
+    };
+    const fingerprint = (version: number) => {
+      const payload = JSON.stringify({
+        algorithmVersion: "architecture-guardrails-v1",
+        profileKey: "strict",
+        thresholds: {
+          cycleMaxLength: thresholds.cycleMaxLength,
+          largeFileBytes: thresholds.largeFileBytes,
+          largeFileLines: thresholds.largeFileLines,
+          largeSymbolLines: thresholds.largeSymbolLines,
+          highFanIn: thresholds.highFanIn,
+        },
+        version,
+      });
+      return `sha256:${createHash("sha256").update(payload).digest("hex")}`;
+    };
+    const first = await store.createGuardrailProfile({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      profileKey: "strict",
+      name: "Strict architecture guardrails",
+      description: "Lower deterministic thresholds.",
+      algorithmVersion: "architecture-guardrails-v1",
+      thresholds,
+      fingerprint,
+      actorUserId: null,
+      actorKind: "anonymous",
+    });
+    guardrailProfileIds.add(first.profile.id);
+    expect(first).toMatchObject({ created: true, profile: { profileKey: "strict", version: 1 } });
+
+    const repeated = await store.createGuardrailProfile({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      profileKey: "strict",
+      name: "Strict architecture guardrails",
+      description: "Lower deterministic thresholds.",
+      algorithmVersion: "architecture-guardrails-v1",
+      thresholds,
+      fingerprint,
+      actorUserId: null,
+      actorKind: "anonymous",
+    });
+    expect(repeated).toEqual({ profile: first.profile, created: false });
+
+    const second = await store.createGuardrailProfile({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      profileKey: "strict",
+      name: "Strict architecture guardrails",
+      description: "A reviewed second immutable version.",
+      algorithmVersion: "architecture-guardrails-v1",
+      thresholds,
+      fingerprint,
+      actorUserId: null,
+      actorKind: "anonymous",
+    });
+    guardrailProfileIds.add(second.profile.id);
+    expect(second).toMatchObject({ created: true, profile: { profileKey: "strict", version: 2 } });
+    expect(second.profile.fingerprint).not.toBe(first.profile.fingerprint);
+
+    const profiles = await store.listGuardrailProfiles(PUBLIC_WORKSPACE_ID);
+    expect(
+      profiles.filter((item) => guardrailProfileIds.has(item.id)).map((item) => item.version),
+    ).toEqual([2, 1]);
+    await store.assignRepositoryGuardrailProfile({
+      repositoryId: imported.repositoryId,
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      profileId: second.profile.id,
+      actorUserId: null,
+      actorKind: "anonymous",
+    });
+    await expect(
+      store.getRepositoryGuardrailProfileId(imported.repositoryId, PUBLIC_WORKSPACE_ID),
+    ).resolves.toBe(second.profile.id);
+
+    const profiled = await store.createRepositoryImport({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      identity: {
+        owner: "repovista-policy-test",
+        name: suffix,
+        canonicalUrl: `https://github.com/repovista-policy-test/${suffix}`,
+        cloneUrl: `https://github.com/repovista-policy-test/${suffix}.git`,
+      },
+      requestedRef: "main",
+      ignore: [],
+      parserVersion: "integration-policy-v1",
+    });
+    expect(profiled.snapshotId).not.toBe(imported.snapshotId);
+    await expect(store.getSnapshotGuardrailProfile(imported.snapshotId)).resolves.toBeNull();
+    await expect(store.getSnapshotGuardrailProfile(profiled.snapshotId)).resolves.toEqual(
+      second.profile,
+    );
+    const profiledJob = await store.claimIndexJob(`policy-profiled-${suffix}`, 30);
+    expect(profiledJob?.id).toBe(profiled.jobId);
+    if (!profiledJob) throw new Error("Expected the profiled policy job.");
+    await store.cancelJob(profiledJob.id, profiledJob.snapshotId, `policy-profiled-${suffix}`);
   });
 
   it("persists a complete snapshot and serves graph, source, search, answers, and shares", async () => {

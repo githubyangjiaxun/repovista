@@ -134,6 +134,7 @@ export type SnapshotStats = z.infer<typeof snapshotStatsSchema>;
 export const snapshotSchema = z.object({
   id: idSchema,
   repositoryId: idSchema,
+  guardrailProfileId: idSchema.nullable().optional(),
   commitSha: z.string().nullable(),
   refName: z.string().nullable(),
   status: snapshotStatusSchema,
@@ -860,14 +861,57 @@ export const guardrailRuleIdSchema = z.enum([
 ]);
 export type GuardrailRuleId = z.infer<typeof guardrailRuleIdSchema>;
 
-export const guardrailThresholdsSchema = z.object({
-  cycleMaxLength: z.number().int().min(2).max(100),
-  largeFileLines: z.number().int().positive(),
-  largeFileBytes: z.number().int().positive(),
-  largeSymbolLines: z.number().int().positive(),
-  highFanIn: z.number().int().positive(),
-});
+export const guardrailThresholdsSchema = z
+  .object({
+    cycleMaxLength: z.number().int().min(2).max(100),
+    largeFileLines: z.number().int().positive(),
+    largeFileBytes: z.number().int().positive(),
+    largeSymbolLines: z.number().int().positive(),
+    highFanIn: z.number().int().positive(),
+  })
+  .strict();
 export type GuardrailThresholds = z.infer<typeof guardrailThresholdsSchema>;
+
+export const guardrailProfileIdSchema = idSchema;
+export const guardrailProfileKeySchema = z
+  .string()
+  .trim()
+  .regex(/^[a-z][a-z0-9-]{1,63}$/);
+
+export const guardrailProfileSchema = z.object({
+  id: guardrailProfileIdSchema,
+  workspaceId: idSchema.nullable(),
+  profileKey: guardrailProfileKeySchema,
+  name: z.string().min(1).max(100),
+  description: z.string().max(500),
+  version: z.number().int().positive(),
+  algorithmVersion: z.string().min(1),
+  thresholds: guardrailThresholdsSchema,
+  fingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  builtIn: z.boolean(),
+  createdBy: idSchema.nullable(),
+  createdAt: z.iso.datetime(),
+});
+export type GuardrailProfile = z.infer<typeof guardrailProfileSchema>;
+
+export const createGuardrailProfileRequestSchema = z
+  .object({
+    profileKey: guardrailProfileKeySchema.refine((value) => value !== "default", {
+      message: "The default profile key is reserved for the built-in policy.",
+    }),
+    name: z.string().trim().min(1).max(100),
+    description: z.string().trim().max(500).default(""),
+    thresholds: guardrailThresholdsSchema,
+  })
+  .strict();
+export type CreateGuardrailProfileRequest = z.infer<typeof createGuardrailProfileRequestSchema>;
+
+export const assignGuardrailProfileRequestSchema = z
+  .object({
+    profileId: idSchema.nullable(),
+  })
+  .strict();
+export type AssignGuardrailProfileRequest = z.infer<typeof assignGuardrailProfileRequestSchema>;
 
 export const guardrailEvidenceSchema = z.object({
   path: z.string().min(1),
@@ -894,6 +938,7 @@ export type GuardrailFinding = z.infer<typeof guardrailFindingSchema>;
 
 export const guardrailReportSchema = z.object({
   algorithmVersion: z.string().min(1),
+  profile: guardrailProfileSchema.nullable().default(null),
   snapshot: z.object({
     id: idSchema,
     commitSha: commitShaSchema,
@@ -933,6 +978,7 @@ export type GuardrailFindingComparison = z.infer<typeof guardrailFindingComparis
 
 export const guardrailComparisonSchema = z.object({
   algorithmVersion: z.string().min(1),
+  profile: guardrailProfileSchema.nullable().default(null),
   base: guardrailReportSchema,
   head: guardrailReportSchema,
   overall: guardrailComparisonOverallSchema,
