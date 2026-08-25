@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RepoVista API",
-    "version": "0.8.0",
+    "version": "0.9.0",
     "description": "Evidence-first repository indexing with private GitHub App access, Workspace authorization, immutable Guardrail policy profiles, deterministic Architecture Guardrails and SARIF, auditable sessions, API tokens, versioned semantic indexes, transparent hybrid retrieval, architecture stories, pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, and grounded answers."
   },
   "servers": [
@@ -1056,6 +1056,107 @@
           "409": {
             "$ref": "#/components/responses/Conflict"
           }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/guardrails/explanations": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SnapshotId"
+        }
+      ],
+      "post": {
+        "operationId": "createGuardrailExplanation",
+        "summary": "Generate an evidence-verified explanation for one deterministic Guardrail Finding",
+        "tags": ["Guardrails", "Answers"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGuardrailExplanationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "An identical explanation request was reused",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/CreateGuardrailExplanationResponse"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "A new immutable verified explanation was created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/CreateGuardrailExplanationResponse"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "502": { "$ref": "#/components/responses/UpstreamFailure" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/guardrails/explanations/{explanationId}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/SnapshotId" },
+        { "$ref": "#/components/parameters/GuardrailExplanationId" }
+      ],
+      "get": {
+        "operationId": "getGuardrailExplanation",
+        "summary": "Read one immutable evidence-verified Guardrail explanation",
+        "tags": ["Guardrails", "Answers"],
+        "responses": {
+          "200": {
+            "description": "Verified Guardrail explanation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/GuardrailExplanation"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" }
         }
       }
     },
@@ -2768,6 +2869,14 @@
           "$ref": "#/components/schemas/Uuid"
         }
       },
+      "GuardrailExplanationId": {
+        "name": "explanationId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Uuid"
+        }
+      },
       "JobId": {
         "name": "jobId",
         "in": "path",
@@ -4014,6 +4123,69 @@
               "$ref": "#/components/schemas/GuardrailFinding"
             }
           }
+        }
+      },
+      "CreateGuardrailExplanationRequest": {
+        "type": "object",
+        "required": ["findingId"],
+        "additionalProperties": false,
+        "properties": {
+          "findingId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "provider": {
+            "type": "string",
+            "enum": ["fake", "ollama", "openai-compatible"]
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
+      },
+      "GuardrailExplanation": {
+        "type": "object",
+        "required": [
+          "id",
+          "snapshot",
+          "profile",
+          "profileFingerprint",
+          "finding",
+          "answer",
+          "promptVersion",
+          "createdAt"
+        ],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "snapshot": {
+            "type": "object",
+            "required": ["id", "commitSha", "parserVersion", "algorithmVersion"],
+            "properties": {
+              "id": { "$ref": "#/components/schemas/Uuid" },
+              "commitSha": { "type": "string", "pattern": "^[a-fA-F0-9]{7,64}$" },
+              "parserVersion": { "type": "string", "minLength": 1 },
+              "algorithmVersion": { "type": "string", "minLength": 1 }
+            }
+          },
+          "profile": {
+            "oneOf": [{ "$ref": "#/components/schemas/GuardrailProfile" }, { "type": "null" }]
+          },
+          "profileFingerprint": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+          "finding": { "$ref": "#/components/schemas/GuardrailFinding" },
+          "answer": { "$ref": "#/components/schemas/GroundedAnswer" },
+          "promptVersion": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "createdAt": { "$ref": "#/components/schemas/DateTime" }
+        }
+      },
+      "CreateGuardrailExplanationResponse": {
+        "type": "object",
+        "required": ["explanation", "reused"],
+        "properties": {
+          "explanation": { "$ref": "#/components/schemas/GuardrailExplanation" },
+          "reused": { "type": "boolean" }
         }
       },
       "SnapshotFileSummary": {

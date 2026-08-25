@@ -267,6 +267,162 @@ describe("GuardrailsPanel", () => {
     expect(openSource).toHaveBeenCalledWith("src/a/index.ts", 3, 3);
   });
 
+  it("generates a verified explanation and opens only returned fixed citations", async () => {
+    const explanation = {
+      id: "01900000-0000-7000-8000-000000000020",
+      snapshot: { ...report.snapshot, algorithmVersion: report.algorithmVersion },
+      profile: strictProfile,
+      profileFingerprint: strictProfile.fingerprint,
+      finding: report.findings[0],
+      answer: {
+        summary: "The fixed import evidence shows a cycle between two packages.",
+        steps: [{ text: "Inspect the import edge.", evidenceIds: ["guardrail-evidence:1"] }],
+        limitations: ["AI does not change the deterministic Finding."],
+        status: "grounded",
+        citations: [
+          {
+            evidenceId: "guardrail-evidence:1",
+            path: "src/a/index.ts",
+            symbol: null,
+            startLine: 3,
+            endLine: 3,
+            quote: "import '../b';",
+          },
+        ],
+        provider: "fake",
+        model: "evidence-demo-v1",
+      },
+      promptVersion: "guardrail-explanation-v1",
+      createdAt: "2026-08-24T00:00:00.000Z",
+    };
+    const fetchImplementation = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      const policy = policyResponse(url);
+      if (policy) return policy;
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails`)) return envelope(report);
+      if (
+        url.endsWith(`/v1/snapshots/${snapshotId}/guardrails/explanations`) &&
+        init?.method === "POST"
+      ) {
+        return envelope({ explanation, reused: false });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchImplementation);
+    const openSource = vi.fn();
+    render(
+      <GuardrailsPanel
+        onOpenSource={openSource}
+        repositoryId={repositoryId}
+        snapshotId={snapshotId}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Explain Package dependency cycle/ }),
+    );
+    expect(await screen.findByText(/The fixed import evidence shows/)).toBeInTheDocument();
+    expect(screen.getByText("guardrail-explanation-v1")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /src\/a\/index.ts:3-3/ }));
+    expect(openSource).toHaveBeenCalledWith("src/a/index.ts", 3, 3);
+    const request = fetchImplementation.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(JSON.parse(String(request?.[1]?.body))).toEqual({
+      findingId: report.findings[0]?.id,
+    });
+  });
+
+  it("renders refused status and limitations without inventing a citation", async () => {
+    const explanation = {
+      id: "01900000-0000-7000-8000-000000000021",
+      snapshot: { ...report.snapshot, algorithmVersion: report.algorithmVersion },
+      profile: strictProfile,
+      profileFingerprint: strictProfile.fingerprint,
+      finding: report.findings[0],
+      answer: {
+        summary: "There is not enough verified evidence to answer this Finding.",
+        steps: [],
+        limitations: ["No supported citation was returned by the provider."],
+        status: "refused",
+        citations: [],
+        provider: "fake",
+        model: "evidence-demo-v1",
+      },
+      promptVersion: "guardrail-explanation-v1",
+      createdAt: "2026-08-24T00:00:00.000Z",
+    };
+    const fetchImplementation = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      const policy = policyResponse(url);
+      if (policy) return policy;
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails`)) return envelope(report);
+      if (
+        url.endsWith(`/v1/snapshots/${snapshotId}/guardrails/explanations`) &&
+        init?.method === "POST"
+      ) {
+        return envelope({ explanation, reused: false });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchImplementation);
+    render(
+      <GuardrailsPanel
+        onOpenSource={vi.fn()}
+        repositoryId={repositoryId}
+        snapshotId={snapshotId}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Explain Package dependency cycle/ }),
+    );
+    expect(await screen.findByText(/not enough verified evidence/)).toBeInTheDocument();
+    expect(
+      screen.getByText("No supported citation was returned by the provider."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /src\/a\/index.ts:3-3/ })).toBeNull();
+  });
+
+  it("shows the API request error and preserves the deterministic Finding", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      const policy = policyResponse(url);
+      if (policy) return policy;
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails`)) return envelope(report);
+      if (
+        url.endsWith(`/v1/snapshots/${snapshotId}/guardrails/explanations`) &&
+        init?.method === "POST"
+      ) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: "AI_PROVIDER_FAILED",
+              message: "The configured model provider is unavailable.",
+              requestId: "explain-request-9",
+              retryable: true,
+            },
+          }),
+          { status: 502, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchImplementation);
+    render(
+      <GuardrailsPanel
+        onOpenSource={vi.fn()}
+        repositoryId={repositoryId}
+        snapshotId={snapshotId}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Explain Package dependency cycle/ }),
+    );
+    expect(
+      await screen.findByText(
+        "The configured model provider is unavailable. Request ID: explain-request-9",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Package dependency cycle")).toBeInTheDocument();
+  });
+
   it("lets Editors assign a reviewed profile only to future Snapshots", async () => {
     auth.current.session = authenticatedSession("editor");
     setApiCsrfToken(auth.current.session.csrfToken);
@@ -329,6 +485,7 @@ describe("GuardrailsPanel", () => {
     expect(
       screen.queryByRole("button", { name: "Apply to future Snapshots" }),
     ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Explain .* with AI/ })).not.toBeInTheDocument();
   });
 
   it("downloads SARIF with credentials", async () => {

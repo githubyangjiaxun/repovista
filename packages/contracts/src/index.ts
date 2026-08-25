@@ -396,6 +396,9 @@ export type Citation = z.infer<typeof citationSchema>;
 export const answerStatusSchema = z.enum(["grounded", "partial", "refused"]);
 export type AnswerStatus = z.infer<typeof answerStatusSchema>;
 
+export const modelProviderSchema = z.enum(["fake", "ollama", "openai-compatible"]);
+export type ModelProviderName = z.infer<typeof modelProviderSchema>;
+
 export const groundedAnswerSchema = z.object({
   summary: z.string(),
   steps: z.array(
@@ -422,7 +425,7 @@ export type AskResult = z.infer<typeof askResultSchema>;
 
 export const askRequestSchema = z.object({
   question: z.string().trim().min(2).max(4_000),
-  provider: z.enum(["fake", "ollama", "openai-compatible"]).optional(),
+  provider: modelProviderSchema.optional(),
   model: z.string().max(200).optional(),
 });
 export type AskRequest = z.infer<typeof askRequestSchema>;
@@ -956,6 +959,42 @@ export const guardrailReportSchema = z.object({
   findings: z.array(guardrailFindingSchema),
 });
 export type GuardrailReport = z.infer<typeof guardrailReportSchema>;
+
+export const createGuardrailExplanationRequestSchema = z
+  .object({
+    findingId: z.string().trim().min(1).max(300),
+    provider: modelProviderSchema.optional(),
+    model: z.string().trim().min(1).max(200).optional(),
+  })
+  .strict();
+export type CreateGuardrailExplanationRequest = z.infer<
+  typeof createGuardrailExplanationRequestSchema
+>;
+
+export const guardrailExplanationSchema = z.object({
+  id: idSchema,
+  snapshot: z.object({
+    id: idSchema,
+    commitSha: commitShaSchema,
+    parserVersion: z.string().min(1),
+    algorithmVersion: z.string().min(1),
+  }),
+  profile: guardrailProfileSchema.nullable().default(null),
+  profileFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  finding: guardrailFindingSchema,
+  answer: groundedAnswerSchema,
+  promptVersion: z.string().min(1).max(100),
+  createdAt: z.iso.datetime(),
+});
+export type GuardrailExplanation = z.infer<typeof guardrailExplanationSchema>;
+
+export const createGuardrailExplanationResponseSchema = z.object({
+  explanation: guardrailExplanationSchema,
+  reused: z.boolean(),
+});
+export type CreateGuardrailExplanationResponse = z.infer<
+  typeof createGuardrailExplanationResponseSchema
+>;
 
 export const guardrailComparisonStatusSchema = z.enum([
   "added",

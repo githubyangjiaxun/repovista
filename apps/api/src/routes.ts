@@ -1,11 +1,17 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import path from "node:path";
-import { createModelProvider, verifyModelAnswer } from "@repovista/ai";
+import {
+  createModelProvider,
+  GUARDRAIL_EXPLANATION_PROMPT_VERSION,
+  guardrailExplanationQuestion,
+  verifyModelAnswer,
+} from "@repovista/ai";
 import type { AppConfig } from "@repovista/config";
 import type { GraphLevel, RelationType } from "@repovista/contracts";
 import {
   askRequestSchema,
   assignGuardrailProfileRequestSchema,
+  createGuardrailExplanationRequestSchema,
   createGuardrailProfileRequestSchema,
   createPullRequestAnalysisRequestSchema,
   createRepositoryRequestSchema,
@@ -47,6 +53,10 @@ import { type RetrievalDependencies, retrieveEvidence } from "./retrieval.js";
 
 const repositoryParamsSchema = z.object({ repositoryId: idSchema });
 const snapshotParamsSchema = z.object({ snapshotId: idSchema });
+const guardrailExplanationParamsSchema = z.object({
+  snapshotId: idSchema,
+  explanationId: idSchema,
+});
 const guardrailProfileParamsSchema = z.object({ profileId: idSchema });
 const guardrailCompareQuerySchema = z.object({ baseSnapshotId: idSchema });
 const snapshotSymbolParamsSchema = z.object({ snapshotId: idSchema, symbolId: idSchema });
@@ -138,6 +148,8 @@ const svgExportQuerySchema = z.object({
 const askBodySchema = askRequestSchema.extend({
   snapshotId: idSchema.optional(),
 });
+
+const guardrailExplanationBodySchema = createGuardrailExplanationRequestSchema;
 
 const eventQuerySchema = z.object({
   after: z.coerce.number().int().nonnegative().default(0),
@@ -430,6 +442,44 @@ function compactEvidence<T extends SearchEvidenceRecord>(record: T): T {
     contentHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
     endLine: record.startLine + Math.max(0, selected.length - 1),
   };
+}
+
+async function guardrailFindingEvidence(
+  store: RepoVistaStore,
+  snapshotId: string,
+  commitSha: string,
+  finding: Awaited<ReturnType<typeof loadGuardrailReport>>["findings"][number],
+): Promise<SearchEvidenceRecord[]> {
+  const records: SearchEvidenceRecord[] = [];
+  const seen = new Set<string>();
+  for (const [index, evidence] of finding.evidence.slice(0, 20).entries()) {
+    const key = `${evidence.path}:${evidence.startLine}:${evidence.endLine}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const source = await store.getSourceFile(
+      snapshotId,
+      requireSafePath(evidence.path),
+      evidence.startLine,
+      Math.min(evidence.endLine, evidence.startLine + 399),
+    );
+    if (!source || source.commitSha !== commitSha || source.content.length === 0) continue;
+    const compact = compactEvidence({
+      id: `guardrail-evidence:${finding.fingerprint.slice(-16)}:${index + 1}`,
+      snapshotId,
+      commitSha,
+      fileId: source.id,
+      path: source.path,
+      symbolId: null,
+      symbol: null,
+      startLine: source.startLine,
+      endLine: source.startLine + Math.max(0, source.content.split(/\r?\n/).length - 1),
+      content: source.content,
+      contentHash: `sha256:${createHash("sha256").update(source.content).digest("hex")}`,
+      score: 1 - index / 100,
+    });
+    records.push(compact);
+  }
+  return records;
 }
 
 function sseEvent(id: number, event: string, payload: Record<string, unknown>): string {
@@ -1203,6 +1253,134 @@ export function registerRoutes(
       )
       .send(response(request, await loadGuardrailReport(store, snapshotId)));
   });
+
+  app.post(
+    "/v1/snapshots/:snapshotId/guardrails/explanations",
+    {
+      config: {
+        rateLimit: { max: config.ANONYMOUS_QUESTIONS_PER_HOUR, timeWindow: "1 hour" },
+      },
+    },
+    async (request, reply) => {
+      const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+      const body = parseInput(guardrailExplanationBodySchema, request.body);
+      const auth = await resolveRequestAuth(request, store);
+      const access = await requireSnapshotAccess(request, store, snapshotId);
+      verifySessionCsrf(request, config, auth);
+      requireWritePrincipal(auth.principal);
+      const graphData = await store.getSnapshotGraphData(snapshotId);
+      if (!graphData) {
+        throw new DomainError("SNAPSHOT_NOT_FOUND", "The requested snapshot does not exist.");
+      }
+      requireReadySnapshot(graphData.snapshot);
+      const report = await loadGuardrailReport(store, snapshotId);
+      const finding = report.findings.find((item) => item.id === body.findingId);
+      if (!finding) {
+        throw new DomainError(
+          "GUARDRAIL_FINDING_NOT_FOUND",
+          "The requested Finding does not belong to this Snapshot.",
+        );
+      }
+      const commitSha = graphData.snapshot.commitSha;
+      const providerName =
+        body.provider ?? (config.MODEL_PROVIDER === "none" ? "fake" : config.MODEL_PROVIDER);
+      const provider = createModelProvider({
+        provider: providerName,
+        ollamaBaseUrl: config.OLLAMA_BASE_URL,
+        openAIBaseUrl: config.OPENAI_COMPATIBLE_BASE_URL,
+        openAIApiKey: config.OPENAI_COMPATIBLE_API_KEY,
+        model: body.model ?? config.CHAT_MODEL,
+      });
+      const model = body.model ?? provider.defaultModel;
+      const existing = await store.findGuardrailExplanation(
+        snapshotId,
+        access?.workspaceId ?? auth.principal.workspaceId,
+        finding.fingerprint,
+        provider.id,
+        model,
+        GUARDRAIL_EXPLANATION_PROMPT_VERSION,
+      );
+      if (existing) {
+        return reply
+          .header(
+            "Cache-Control",
+            access?.visibility === "private"
+              ? "private, no-store"
+              : "public, max-age=0, must-revalidate",
+          )
+          .send(response(request, { explanation: existing, reused: true }));
+      }
+      const evidence = await guardrailFindingEvidence(store, snapshotId, commitSha, finding);
+      if (evidence.length === 0) {
+        throw new DomainError(
+          "GUARDRAIL_EXPLANATION_EVIDENCE_UNAVAILABLE",
+          "The Finding has no readable evidence in this Snapshot.",
+        );
+      }
+      const draft = await provider.generate({
+        question: guardrailExplanationQuestion(finding),
+        evidence,
+        model,
+      });
+      const answer = verifyModelAnswer(draft, evidence, provider.id, model);
+      const result = await store.createGuardrailExplanation({
+        workspaceId: access?.workspaceId ?? auth.principal.workspaceId,
+        snapshotId,
+        finding,
+        answer,
+        profile: report.profile,
+        commitSha,
+        parserVersion: report.snapshot.parserVersion,
+        algorithmVersion: report.algorithmVersion,
+        provider: provider.id,
+        model,
+        promptVersion: GUARDRAIL_EXPLANATION_PROMPT_VERSION,
+        actorUserId: auth.principal.userId,
+        actorKind: auth.principal.kind,
+        profileFingerprint: report.profile?.fingerprint ?? BUILT_IN_GUARDRAIL_PROFILE.fingerprint,
+      });
+      return reply
+        .code(result.reused ? 200 : 201)
+        .header(
+          "Cache-Control",
+          access?.visibility === "private"
+            ? "private, no-store"
+            : "public, max-age=0, must-revalidate",
+        )
+        .send(response(request, result));
+    },
+  );
+
+  app.get(
+    "/v1/snapshots/:snapshotId/guardrails/explanations/:explanationId",
+    async (request, reply) => {
+      const { snapshotId, explanationId } = parseInput(
+        guardrailExplanationParamsSchema,
+        request.params,
+      );
+      const access = await requireSnapshotAccess(request, store, snapshotId);
+      const auth = await resolveRequestAuth(request, store);
+      const explanation = await store.getGuardrailExplanation(
+        explanationId,
+        snapshotId,
+        access?.workspaceId ?? auth.principal.workspaceId,
+      );
+      if (!explanation) {
+        throw new DomainError(
+          "GUARDRAIL_EXPLANATION_NOT_FOUND",
+          "The requested Guardrail explanation does not exist.",
+        );
+      }
+      return reply
+        .header(
+          "Cache-Control",
+          access?.visibility === "private"
+            ? "private, no-store"
+            : "public, max-age=0, must-revalidate",
+        )
+        .send(response(request, explanation));
+    },
+  );
 
   app.get("/v1/snapshots/:snapshotId/guardrails/sarif", async (request, reply) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);

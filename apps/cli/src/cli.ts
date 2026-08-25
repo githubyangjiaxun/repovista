@@ -115,6 +115,7 @@ const commandHelp: Record<string, string> = {
   guardrails: [
     "Usage: repovista guardrails <snapshot-id> [options]",
     "       repovista guardrails compare <base-snapshot-id> <head-snapshot-id> [options]",
+    "       repovista guardrails explain <snapshot-id> <finding-id> [options]",
     "       repovista guardrails profiles [--json]",
     "       repovista guardrails profile create <key> --name <name> [options]",
     "       repovista guardrails profile assign <repository-id> <profile-id|default>",
@@ -122,6 +123,8 @@ const commandHelp: Record<string, string> = {
     "Report options:",
     "  --sarif <file>          Save a SARIF 2.1.0 report to a local file",
     "  --json                  Emit the complete Guardrails JSON report",
+    "  --provider <name>       fake, ollama, or openai-compatible (for explain)",
+    "  --model <name>          Override the configured explanation model",
     "",
     "Profile create options (unspecified thresholds use the built-in default):",
     "  --name <name>                 Human-readable profile name (required)",
@@ -477,6 +480,41 @@ function formatGuardrailProfile(profile: GuardrailProfile): string {
   ].join("\n");
 }
 
+function formatGuardrailExplanation(result: {
+  explanation: import("@repovista/contracts").GuardrailExplanation;
+  reused: boolean;
+}): string {
+  const explanation = result.explanation;
+  const lines = [
+    `Verified explanation: ${explanation.answer.status}${result.reused ? " (reused)" : ""}`,
+    `Finding: ${explanation.finding.id} [${explanation.finding.severity}] ${explanation.finding.ruleId}`,
+    `Location: ${explanation.finding.path}:${explanation.finding.startLine}-${explanation.finding.endLine}`,
+    `Commit: ${explanation.snapshot.commitSha.slice(0, 12)}`,
+    `Profile: ${explanation.profile?.profileKey ?? "legacy"} · ${explanation.profileFingerprint}`,
+    `Provider: ${explanation.answer.provider}/${explanation.answer.model}`,
+    `Prompt: ${explanation.promptVersion}`,
+    "",
+    explanation.answer.summary,
+  ];
+  if (explanation.answer.steps.length > 0) {
+    lines.push("", "Explanation:");
+    for (const [index, step] of explanation.answer.steps.entries()) {
+      lines.push(`${index + 1}. ${step.text}`);
+    }
+  }
+  if (explanation.answer.citations.length > 0) {
+    lines.push("", "Evidence:");
+    for (const citation of explanation.answer.citations) {
+      lines.push(`- ${citation.path}:${citation.startLine}-${citation.endLine}`);
+    }
+  }
+  if (explanation.answer.limitations.length > 0) {
+    lines.push("", "Limitations:");
+    for (const limitation of explanation.answer.limitations) lines.push(`- ${limitation}`);
+  }
+  return lines.join("\n");
+}
+
 function writeJson(output: CliOutput, value: unknown): void {
   output.stdout(JSON.stringify(value, null, 2));
 }
@@ -702,6 +740,8 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
         large_file_lines: "string",
         large_symbol_lines: "string",
         name: "string",
+        model: "string",
+        provider: "string",
         sarif: "string",
       },
       doctor: {},
@@ -1165,6 +1205,28 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
         if (json) writeJson(output, comparison);
         else output.stdout(formatGuardrailComparison(comparison));
         return comparison.summary.regressions > 0 ? 2 : 0;
+      }
+      if (parsed.positionals[0] === "explain") {
+        if (parsed.positionals.length !== 3) {
+          throw new UsageError("guardrails explain requires a snapshot ID and finding ID.");
+        }
+        const snapshotId = requireId(parsed.positionals[1], "Snapshot ID");
+        const findingId = parsed.positionals[2];
+        if (!findingId) throw new UsageError("Finding ID is required.");
+        const provider = optionalString(parsed.options.provider);
+        if (provider && !["fake", "ollama", "openai-compatible"].includes(provider)) {
+          throw new UsageError("--provider must be fake, ollama, or openai-compatible.");
+        }
+        const result = await client.createGuardrailExplanation(snapshotId, {
+          findingId,
+          ...(provider ? { provider: provider as "fake" | "ollama" | "openai-compatible" } : {}),
+          ...(optionalString(parsed.options.model)
+            ? { model: optionalString(parsed.options.model) }
+            : {}),
+        });
+        if (json) writeJson(output, result);
+        else output.stdout(formatGuardrailExplanation(result));
+        return result.explanation.answer.status === "refused" ? 2 : 0;
       }
       if (parsed.positionals.length !== 1) {
         throw new UsageError("guardrails requires exactly one snapshot ID.");

@@ -2,6 +2,7 @@
 
 import type {
   GuardrailComparison,
+  GuardrailExplanation,
   GuardrailProfile,
   GuardrailReport,
   Snapshot,
@@ -19,7 +20,12 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useOptionalAuth } from "@/components/auth-provider";
-import { apiErrorMessage, apiFetch, fetchGuardrailSarif } from "@/lib/api";
+import {
+  apiErrorMessage,
+  apiFetch,
+  fetchGuardrailSarif,
+  type GuardrailExplanationResult,
+} from "@/lib/api";
 
 function metricText(metric: Record<string, string | number>): string {
   return Object.entries(metric)
@@ -49,6 +55,7 @@ export function GuardrailsPanel({
   const canManageProfiles = Boolean(
     session?.authenticated && session.workspace && session.workspace.role !== "viewer",
   );
+  const canRequestExplanations = !session?.authenticated || session.workspace?.role !== "viewer";
   const [report, setReport] = useState<GuardrailReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -64,7 +71,11 @@ export function GuardrailsPanel({
   const [profilesError, setProfilesError] = useState<string | null>(null);
   const [assigningProfile, setAssigningProfile] = useState(false);
   const [assignmentMessage, setAssignmentMessage] = useState<string | null>(null);
+  const [explanations, setExplanations] = useState<Record<string, GuardrailExplanation>>({});
+  const [explanationErrors, setExplanationErrors] = useState<Record<string, string>>({});
+  const [explainingFindingId, setExplainingFindingId] = useState<string | null>(null);
   const profileRequest = useRef(0);
+  const explanationRequest = useRef(0);
 
   const baselineSnapshots = availableSnapshots.filter(
     (item) => item.id !== snapshotId && item.status === "ready" && Boolean(item.commitSha),
@@ -76,6 +87,10 @@ export function GuardrailsPanel({
     setReport(null);
     setLoading(true);
     setError(null);
+    setExplanations({});
+    setExplanationErrors({});
+    setExplainingFindingId(null);
+    explanationRequest.current += 1;
     apiFetch<GuardrailReport>(`/v1/snapshots/${snapshotId}/guardrails`)
       .then((result) => {
         if (active) setReport(result);
@@ -209,6 +224,31 @@ export function GuardrailsPanel({
       }
     } finally {
       if (profileRequest.current === request) setAssigningProfile(false);
+    }
+  }
+
+  async function explainFinding(findingId: string) {
+    const request = ++explanationRequest.current;
+    setExplainingFindingId(findingId);
+    setExplanationErrors((current) => ({ ...current, [findingId]: "" }));
+    try {
+      const result = await apiFetch<GuardrailExplanationResult>(
+        `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/explanations`,
+        {
+          method: "POST",
+          body: JSON.stringify({ findingId }),
+        },
+      );
+      if (request !== explanationRequest.current) return;
+      setExplanations((current) => ({ ...current, [findingId]: result.explanation }));
+    } catch (cause) {
+      if (request !== explanationRequest.current) return;
+      setExplanationErrors((current) => ({
+        ...current,
+        [findingId]: apiErrorMessage(cause, "Unable to generate a verified explanation."),
+      }));
+    } finally {
+      if (request === explanationRequest.current) setExplainingFindingId(null);
     }
   }
 
@@ -546,6 +586,93 @@ export function GuardrailsPanel({
                 <h2>{finding.title}</h2>
                 <p>{finding.message}</p>
                 <small>{metricText(finding.metric)}</small>
+                {canRequestExplanations ? (
+                  <div className="guardrail-explanation-actions">
+                    <button
+                      aria-label={`Explain ${finding.title} with AI`}
+                      aria-busy={explainingFindingId === finding.id}
+                      disabled={explainingFindingId === finding.id}
+                      onClick={() => void explainFinding(finding.id)}
+                      type="button"
+                    >
+                      {explainingFindingId === finding.id ? (
+                        <LoaderCircle className="spin" size={14} />
+                      ) : null}
+                      {explainingFindingId === finding.id
+                        ? "Verifying explanation…"
+                        : "Explain with AI"}
+                    </button>
+                  </div>
+                ) : null}
+                {explanationErrors[finding.id] ? (
+                  <div className="guardrail-explanation-error" role="alert">
+                    {explanationErrors[finding.id]}
+                  </div>
+                ) : null}
+                {explanations[finding.id] ? (
+                  <section
+                    className="guardrail-explanation"
+                    aria-label="Verified Guardrail explanation"
+                  >
+                    <div className="guardrail-explanation-meta">
+                      <strong>
+                        Verified explanation · {explanations[finding.id]?.answer.status}
+                      </strong>
+                      <span>
+                        {explanations[finding.id]?.answer.provider} ·{" "}
+                        {explanations[finding.id]?.answer.model}
+                      </span>
+                    </div>
+                    <div className="guardrail-explanation-provenance">
+                      <span>
+                        {explanations[finding.id]?.finding.ruleId} ·{" "}
+                        {explanations[finding.id]?.finding.severity}
+                      </span>
+                      <code title={explanations[finding.id]?.finding.fingerprint}>
+                        {explanations[finding.id]?.finding.fingerprint.slice(0, 19)}
+                      </code>
+                    </div>
+                    <p>{explanations[finding.id]?.answer.summary}</p>
+                    {explanations[finding.id]?.answer.steps.length ? (
+                      <ol>
+                        {explanations[finding.id]?.answer.steps.map((step, index) => (
+                          <li key={`${finding.id}-explanation-${index}`}>{step.text}</li>
+                        ))}
+                      </ol>
+                    ) : null}
+                    {explanations[finding.id]?.answer.limitations.length ? (
+                      <ul className="guardrail-explanation-limitations">
+                        {explanations[finding.id]?.answer.limitations.map((limitation, index) => (
+                          <li key={`${finding.id}-limitation-${index}`}>{limitation}</li>
+                        ))}
+                      </ul>
+                    ) : null}
+                    <div className="guardrail-explanation-provenance">
+                      <span title={explanations[finding.id]?.snapshot.commitSha}>
+                        commit {explanations[finding.id]?.snapshot.commitSha.slice(0, 12)}
+                      </span>
+                      <span title={explanations[finding.id]?.profileFingerprint}>
+                        profile {explanations[finding.id]?.profileFingerprint.slice(0, 19)}
+                      </span>
+                      <code>{explanations[finding.id]?.promptVersion}</code>
+                      <span>
+                        {explanations[finding.id]?.answer.citations.length} fixed citations
+                      </span>
+                    </div>
+                    {explanations[finding.id]?.answer.citations.map((citation) => (
+                      <button
+                        key={`${finding.id}-${citation.evidenceId}`}
+                        onClick={() =>
+                          void onOpenSource(citation.path, citation.startLine, citation.endLine)
+                        }
+                        type="button"
+                      >
+                        <FileCode2 size={13} /> {citation.path}:{citation.startLine}-
+                        {citation.endLine}
+                      </button>
+                    ))}
+                  </section>
+                ) : null}
               </div>
               <button
                 aria-label={`Open evidence for ${finding.title}`}

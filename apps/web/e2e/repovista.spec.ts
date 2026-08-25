@@ -762,6 +762,54 @@ async function installMockApi(
     }
 
     if (
+      request.method() === "POST" &&
+      url.pathname === `/v1/snapshots/${snapshotId}/guardrails/explanations`
+    ) {
+      const finding = currentGuardrailReport.findings[0];
+      expect(await request.postDataJSON()).toEqual({ findingId: finding?.id });
+      await json(
+        route,
+        {
+          reused: false,
+          explanation: {
+            id: "01900000-0000-7000-8000-000000000099",
+            snapshot: {
+              ...currentGuardrailReport.snapshot,
+              algorithmVersion: currentGuardrailReport.algorithmVersion,
+            },
+            profile: currentGuardrailReport.profile,
+            profileFingerprint: currentGuardrailReport.profile.fingerprint,
+            finding,
+            answer: {
+              summary: "The fixed source evidence shows this file exceeds the selected threshold.",
+              steps: [
+                { text: "Review the fixed file range.", evidenceIds: ["guardrail-evidence:1"] },
+              ],
+              limitations: ["AI does not change the deterministic Finding."],
+              status: "grounded",
+              citations: [
+                {
+                  evidenceId: "guardrail-evidence:1",
+                  path: finding?.path,
+                  symbol: null,
+                  startLine: finding?.startLine,
+                  endLine: finding?.endLine,
+                  quote: "export async function startServer() {}",
+                },
+              ],
+              provider: "fake",
+              model: "evidence-demo-v1",
+            },
+            promptVersion: "guardrail-explanation-v1",
+            createdAt: "2026-08-24T00:00:00.000Z",
+          },
+        },
+        201,
+      );
+      return;
+    }
+
+    if (
       request.method() === "GET" &&
       url.pathname === `/v1/snapshots/${baseSnapshotId}/guardrails`
     ) {
@@ -1405,6 +1453,22 @@ test("compares guardrails with a historical Ready Snapshot and opens both eviden
     repository.latestCommitSha.slice(0, 7),
   );
   await expect(page.getByText("Evidence lines 1-801")).toBeVisible();
+});
+
+test("generates a verified AI explanation without changing the deterministic Finding", async ({
+  context,
+  page,
+}) => {
+  await installMockApi(context);
+  await page.goto(`/repositories/${repositoryId}?snapshotId=${snapshotId}&tab=guardrails`);
+  await page.getByRole("button", { name: /Explain .* with AI/ }).click();
+  await expect(page.getByText(/The fixed source evidence shows/)).toBeVisible();
+  await expect(page.getByText("guardrail-explanation-v1")).toBeVisible();
+  await page
+    .getByRole("button", { name: /src\/server.ts:/ })
+    .last()
+    .click();
+  await expect(page.getByText(/Evidence lines/)).toBeVisible();
 });
 
 test("lists existing repositories and opens an immutable snapshot", async ({ context, page }) => {

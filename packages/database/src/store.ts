@@ -19,6 +19,7 @@ import type {
 } from "@repovista/contracts";
 import {
   embeddingIndexSchema,
+  guardrailExplanationSchema,
   guardrailProfileSchema,
   idSchema,
   pullRequestAnalysisSchema,
@@ -47,6 +48,8 @@ import type {
   ClaimedIndexJob,
   CompletePullRequestAnalysisInput,
   CreateApiTokenInput,
+  CreateGuardrailExplanationInput,
+  CreateGuardrailExplanationResult,
   CreateGuardrailProfileInput,
   CreateGuardrailProfileResult,
   CreateImportInput,
@@ -62,6 +65,7 @@ import type {
   GitHubInstallationInput,
   GitHubWebhookInput,
   GitHubWebhookProcessResult,
+  GuardrailExplanationRecord,
   GuardrailProfileRecord,
   IncrementalIndexBase,
   InstallationState,
@@ -144,6 +148,26 @@ interface GuardrailProfileRow {
   thresholds_json: unknown;
   fingerprint: string;
   created_by: string | null;
+  created_at: Date | string;
+}
+
+interface GuardrailExplanationRow {
+  id: string;
+  workspace_id: string;
+  snapshot_id: string;
+  finding_id: string;
+  finding_fingerprint: string;
+  rule_id: string;
+  commit_sha: string;
+  parser_version: string;
+  algorithm_version: string;
+  profile_fingerprint: string;
+  profile_json: unknown;
+  finding_json: unknown;
+  answer_json: unknown;
+  provider: string;
+  model_name: string;
+  prompt_version: string;
   created_at: Date | string;
 }
 
@@ -346,6 +370,24 @@ function mapGuardrailProfile(row: GuardrailProfileRow): GuardrailProfileRecord {
     fingerprint: row.fingerprint,
     builtIn: false,
     createdBy: row.created_by,
+    createdAt: iso(row.created_at),
+  });
+}
+
+function mapGuardrailExplanation(row: GuardrailExplanationRow): GuardrailExplanationRecord {
+  return guardrailExplanationSchema.parse({
+    id: row.id,
+    snapshot: {
+      id: row.snapshot_id,
+      commitSha: row.commit_sha,
+      parserVersion: row.parser_version,
+      algorithmVersion: row.algorithm_version,
+    },
+    profile: row.profile_json ?? null,
+    profileFingerprint: row.profile_fingerprint,
+    finding: row.finding_json,
+    answer: row.answer_json,
+    promptVersion: row.prompt_version,
     createdAt: iso(row.created_at),
   });
 }
@@ -1671,6 +1713,145 @@ export class RepoVistaStore {
     return result.rows[0] ? mapGuardrailProfile(result.rows[0]) : null;
   }
 
+  async getGuardrailExplanation(
+    explanationId: string,
+    snapshotId: string,
+    workspaceId: string,
+  ): Promise<GuardrailExplanationRecord | null> {
+    const result = await this.pool.query<GuardrailExplanationRow>(
+      "SELECT id, workspace_id, snapshot_id, finding_id, finding_fingerprint, rule_id, " +
+        "commit_sha, parser_version, algorithm_version, profile_fingerprint, profile_json, " +
+        "finding_json, answer_json, provider, model_name, prompt_version, created_at " +
+        "FROM guardrail_explanations WHERE id = $1 AND snapshot_id = $2 AND workspace_id = $3",
+      [explanationId, snapshotId, workspaceId],
+    );
+    return result.rows[0] ? mapGuardrailExplanation(result.rows[0]) : null;
+  }
+
+  async findGuardrailExplanation(
+    snapshotId: string,
+    workspaceId: string,
+    findingFingerprint: string,
+    provider: string,
+    model: string,
+    promptVersion: string,
+  ): Promise<GuardrailExplanationRecord | null> {
+    const result = await this.pool.query<GuardrailExplanationRow>(
+      "SELECT id, workspace_id, snapshot_id, finding_id, finding_fingerprint, rule_id, " +
+        "commit_sha, parser_version, algorithm_version, profile_fingerprint, profile_json, " +
+        "finding_json, answer_json, provider, model_name, prompt_version, created_at " +
+        "FROM guardrail_explanations WHERE workspace_id = $1 AND snapshot_id = $2 " +
+        "AND finding_fingerprint = $3 AND provider = $4 AND model_name = $5 AND prompt_version = $6",
+      [workspaceId, snapshotId, findingFingerprint, provider, model, promptVersion],
+    );
+    return result.rows[0] ? mapGuardrailExplanation(result.rows[0]) : null;
+  }
+
+  async createGuardrailExplanation(
+    input: CreateGuardrailExplanationInput,
+  ): Promise<CreateGuardrailExplanationResult> {
+    return withTransaction(this.pool, async (client) => {
+      const snapshot = await client.query<{ commit_sha: string | null; parser_version: string }>(
+        "SELECT commit_sha, parser_version FROM repository_snapshots " +
+          "WHERE id = $1 AND workspace_id = $2 AND status = 'ready'",
+        [input.snapshotId, input.workspaceId],
+      );
+      const snapshotRow = snapshot.rows[0];
+      if (!snapshotRow?.commit_sha) {
+        throw new DomainError(
+          "SNAPSHOT_NOT_READY",
+          "A Guardrail explanation requires a ready snapshot with a fixed Commit.",
+        );
+      }
+      if (
+        snapshotRow.commit_sha !== input.commitSha ||
+        snapshotRow.parser_version !== input.parserVersion
+      ) {
+        throw new DomainError(
+          "GUARDRAIL_EXPLANATION_PROVENANCE_INVALID",
+          "The explanation provenance does not match the selected snapshot.",
+        );
+      }
+
+      const id = createId();
+      const inserted = await client.query<GuardrailExplanationRow>(
+        "INSERT INTO guardrail_explanations (" +
+          "id, workspace_id, snapshot_id, finding_id, finding_fingerprint, rule_id, commit_sha, " +
+          "parser_version, algorithm_version, profile_fingerprint, profile_json, finding_json, " +
+          "answer_json, provider, model_name, prompt_version, created_by" +
+          ") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, " +
+          "$13::jsonb, $14, $15, $16, $17) " +
+          "ON CONFLICT (workspace_id, snapshot_id, finding_fingerprint, provider, model_name, prompt_version) " +
+          "DO NOTHING RETURNING id, workspace_id, snapshot_id, finding_id, " +
+          "finding_fingerprint, rule_id, commit_sha, parser_version, algorithm_version, " +
+          "profile_fingerprint, profile_json, finding_json, answer_json, provider, model_name, " +
+          "prompt_version, created_at",
+        [
+          id,
+          input.workspaceId,
+          input.snapshotId,
+          input.finding.id,
+          input.finding.fingerprint,
+          input.finding.ruleId,
+          input.commitSha,
+          input.parserVersion,
+          input.algorithmVersion,
+          input.profileFingerprint,
+          input.profile ? JSON.stringify(input.profile) : null,
+          JSON.stringify(input.finding),
+          JSON.stringify(input.answer),
+          input.provider,
+          input.model,
+          input.promptVersion,
+          input.actorUserId,
+        ],
+      );
+      const row = inserted.rows[0];
+      if (!row) {
+        const existing = await client.query<GuardrailExplanationRow>(
+          "SELECT id, workspace_id, snapshot_id, finding_id, finding_fingerprint, rule_id, " +
+            "commit_sha, parser_version, algorithm_version, profile_fingerprint, profile_json, " +
+            "finding_json, answer_json, provider, model_name, prompt_version, created_at " +
+            "FROM guardrail_explanations WHERE workspace_id = $1 AND snapshot_id = $2 " +
+            "AND finding_fingerprint = $3 AND provider = $4 AND model_name = $5 AND prompt_version = $6",
+          [
+            input.workspaceId,
+            input.snapshotId,
+            input.finding.fingerprint,
+            input.provider,
+            input.model,
+            input.promptVersion,
+          ],
+        );
+        const existingRow = existing.rows[0];
+        if (existingRow) {
+          return { explanation: mapGuardrailExplanation(existingRow), reused: true };
+        }
+        throw new DomainError(
+          "GUARDRAIL_EXPLANATION_CREATE_FAILED",
+          "The Guardrail explanation was not created.",
+        );
+      }
+      await this.appendAuditEvent(client, {
+        workspaceId: input.workspaceId,
+        actorUserId: input.actorUserId,
+        actorKind: input.actorKind,
+        action: "guardrail_explanation.create",
+        resourceType: "guardrail_explanation",
+        resourceId: id,
+        metadata: {
+          snapshotId: input.snapshotId,
+          findingId: input.finding.id,
+          findingFingerprint: input.finding.fingerprint,
+          provider: input.provider,
+          model: input.model,
+          promptVersion: input.promptVersion,
+        },
+      });
+      return { explanation: mapGuardrailExplanation(row), reused: false };
+    });
+  }
+
   async createRepositoryImport(input: CreateImportInput): Promise<CreateImportResult> {
     return withTransaction(this.pool, async (client) => {
       if (input.githubInstallationId) {
@@ -1788,11 +1969,12 @@ export class RepoVistaStore {
       const jobId = createId();
       await client.query(
         "INSERT INTO repository_snapshots (" +
-          "id, repository_id, requested_ref, status, parser_version, guardrail_profile_id" +
-          ") VALUES ($1, $2, $3, 'requested', $4, $5)",
+          "id, repository_id, workspace_id, requested_ref, status, parser_version, guardrail_profile_id" +
+          ") VALUES ($1, $2, $3, $4, 'requested', $5, $6)",
         [
           snapshotId,
           repositoryId,
+          input.workspaceId,
           input.requestedRef ?? null,
           input.parserVersion,
           guardrailProfileId,
@@ -2028,9 +2210,16 @@ export class RepoVistaStore {
       const snapshotId = createId();
       const jobId = createId();
       await client.query(
-        "INSERT INTO repository_snapshots (id, repository_id, requested_ref, status, parser_version, " +
-          "promote_latest, guardrail_profile_id) VALUES ($1, $2, $3, 'requested', $4, false, $5)",
-        [snapshotId, input.repositoryId, commitSha, input.parserVersion, guardrailProfileId],
+        "INSERT INTO repository_snapshots (id, repository_id, workspace_id, requested_ref, status, parser_version, " +
+          "promote_latest, guardrail_profile_id) VALUES ($1, $2, $3, $4, 'requested', $5, false, $6)",
+        [
+          snapshotId,
+          input.repositoryId,
+          input.workspaceId,
+          commitSha,
+          input.parserVersion,
+          guardrailProfileId,
+        ],
       );
       await client.query(
         "INSERT INTO analysis_jobs (id, workspace_id, repository_id, snapshot_id, job_type, status, idempotency_key) " +
@@ -3399,11 +3588,19 @@ export class RepoVistaStore {
       const jobId = createId();
       await client.query(
         "INSERT INTO repository_snapshots (" +
-          "id, repository_id, commit_sha, parent_commit_sha, requested_ref, ref_name, status, " +
+          "id, repository_id, workspace_id, commit_sha, parent_commit_sha, requested_ref, ref_name, status, " +
           "parser_version, guardrail_profile_id" +
-          ") VALUES ($1, $2, $3, NULL, $4, $5, 'requested', $6, " +
+          ") VALUES ($1, $2, $3, $4, NULL, $5, $6, 'requested', $7, " +
           "(SELECT guardrail_profile_id FROM repositories WHERE id = $2))",
-        [snapshotId, repositoryId, null, push.after, push.defaultBranch, parserVersion],
+        [
+          snapshotId,
+          repositoryId,
+          workspaceId,
+          null,
+          push.after,
+          push.defaultBranch,
+          parserVersion,
+        ],
       );
       await client.query(
         "INSERT INTO analysis_jobs (" +

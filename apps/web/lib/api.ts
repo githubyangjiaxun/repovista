@@ -6,6 +6,7 @@ import type {
   GitHubIntegrationStatus,
   GraphResponse,
   GuardrailComparison,
+  GuardrailExplanation,
   GuardrailReport,
   Job,
   PullRequestAnalysis,
@@ -272,6 +273,12 @@ export interface SnapshotFilePage {
 }
 
 export type AskResult = ContractAskResult;
+export type { GuardrailExplanation };
+
+export interface GuardrailExplanationResult {
+  explanation: GuardrailExplanation;
+  reused: boolean;
+}
 
 export type { CreateEmbeddingIndexResponse, RetrievalStatus, SearchResult };
 export type { GuardrailReport };

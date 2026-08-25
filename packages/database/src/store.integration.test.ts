@@ -346,6 +346,104 @@ integration("RepoVistaStore with PostgreSQL", () => {
     });
     expect(messageId).toMatch(/^[0-9a-f-]{36}$/);
 
+    const finding = {
+      id: "large_symbol:integration",
+      fingerprint: `sha256:${"a".repeat(64)}`,
+      ruleId: "large_symbol" as const,
+      severity: "warning" as const,
+      title: "Large symbol",
+      message: "hello exceeds the configured symbol threshold.",
+      path: "src/index.ts",
+      startLine: 2,
+      endLine: 4,
+      metric: { lines: 3, symbol: "hello" },
+      evidence: [
+        {
+          path: "src/index.ts",
+          startLine: 2,
+          endLine: 4,
+          description: "The fixed function span.",
+        },
+      ],
+    };
+    const createdExplanation = await store.createGuardrailExplanation({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      snapshotId: job.snapshotId,
+      finding,
+      answer,
+      profile: null,
+      profileFingerprint: `sha256:${"b".repeat(64)}`,
+      commitSha: indexed.commitSha,
+      parserVersion: "integration-test-v1",
+      algorithmVersion: "architecture-guardrails-v1",
+      provider: "fake",
+      model: "integration-test",
+      promptVersion: "guardrail-explanation-v1",
+      actorUserId: null,
+      actorKind: "anonymous",
+    });
+    expect(createdExplanation).toMatchObject({ reused: false, explanation: { finding } });
+    const reusedExplanation = await store.createGuardrailExplanation({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      snapshotId: job.snapshotId,
+      finding,
+      answer,
+      profile: null,
+      profileFingerprint: `sha256:${"b".repeat(64)}`,
+      commitSha: indexed.commitSha,
+      parserVersion: "integration-test-v1",
+      algorithmVersion: "architecture-guardrails-v1",
+      provider: "fake",
+      model: "integration-test",
+      promptVersion: "guardrail-explanation-v1",
+      actorUserId: null,
+      actorKind: "anonymous",
+    });
+    expect(reusedExplanation).toMatchObject({
+      reused: true,
+      explanation: { id: createdExplanation.explanation.id },
+    });
+    await expect(
+      store.findGuardrailExplanation(
+        job.snapshotId,
+        PUBLIC_WORKSPACE_ID,
+        finding.fingerprint,
+        "fake",
+        "integration-test",
+        "guardrail-explanation-v1",
+      ),
+    ).resolves.toEqual(createdExplanation.explanation);
+    await expect(
+      store.getGuardrailExplanation(
+        createdExplanation.explanation.id,
+        job.snapshotId,
+        PUBLIC_WORKSPACE_ID,
+      ),
+    ).resolves.toEqual(createdExplanation.explanation);
+
+    const concurrentInput = {
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      snapshotId: job.snapshotId,
+      finding,
+      answer: { ...answer, model: "integration-race" },
+      profile: null,
+      profileFingerprint: `sha256:${"b".repeat(64)}`,
+      commitSha: indexed.commitSha,
+      parserVersion: "integration-test-v1",
+      algorithmVersion: "architecture-guardrails-v1",
+      provider: "fake",
+      model: "integration-race",
+      promptVersion: "guardrail-explanation-v1",
+      actorUserId: null,
+      actorKind: "anonymous" as const,
+    };
+    const concurrent = await Promise.all([
+      store.createGuardrailExplanation(concurrentInput),
+      store.createGuardrailExplanation(concurrentInput),
+    ]);
+    expect(concurrent.map((item) => item.reused).sort()).toEqual([false, true]);
+    expect(new Set(concurrent.map((item) => item.explanation.id)).size).toBe(1);
+
     const share = await store.createShareReport(
       job.repositoryId,
       job.snapshotId,

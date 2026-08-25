@@ -5,9 +5,11 @@ import {
   askResultSchema,
   authSessionSchema,
   type CreateEmbeddingIndexResponse,
+  type CreateGuardrailExplanationResponse,
   type CreateRepositoryRequest,
   type CreateRepositoryResponse,
   createEmbeddingIndexResponseSchema,
+  createGuardrailExplanationResponseSchema,
   createRepositoryResponseSchema,
   type GitHubInstallation,
   type GitHubInstallationRepositoryPage,
@@ -289,6 +291,29 @@ export class RepoVistaClient {
       `/v1/repositories/${encodeURIComponent(repositoryId)}/guardrail-profile`,
       { method: "PUT", body: JSON.stringify({ profileId }) },
       (value) => guardrailProfileSchema.parse(value),
+    );
+  }
+
+  createGuardrailExplanation(
+    snapshotId: string,
+    input: {
+      findingId: string;
+      provider?: "fake" | "ollama" | "openai-compatible";
+      model?: string;
+    },
+  ): Promise<CreateGuardrailExplanationResponse> {
+    return this.requestEnvelope(
+      `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/explanations`,
+      { method: "POST", body: JSON.stringify(input) },
+      (value) => createGuardrailExplanationResponseSchema.parse(value),
+    );
+  }
+
+  getGuardrailExplanation(snapshotId: string, explanationId: string) {
+    return this.requestEnvelope(
+      `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/explanations/${encodeURIComponent(explanationId)}`,
+      {},
+      (value) => createGuardrailExplanationResponseSchema.shape.explanation.parse(value),
     );
   }
 

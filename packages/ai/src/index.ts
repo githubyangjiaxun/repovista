@@ -1,4 +1,4 @@
-import type { Evidence, GroundedAnswer } from "@repovista/contracts";
+import type { Evidence, GroundedAnswer, GuardrailFinding } from "@repovista/contracts";
 import { DomainError, type ModelAnswerDraft, type VerifiedAnswer } from "@repovista/domain";
 import { z } from "zod";
 
@@ -15,17 +15,50 @@ export interface ModelProvider {
   healthCheck(): Promise<boolean>;
 }
 
-const draftSchema = z.object({
-  summary: z.string(),
-  steps: z.array(
-    z.object({
-      text: z.string(),
-      evidenceIds: z.array(z.string()),
-    }),
-  ),
-  limitations: z.array(z.string()).default([]),
-  status: z.enum(["grounded", "partial", "refused"]),
-});
+export const GUARDRAIL_EXPLANATION_PROMPT_VERSION = "guardrail-explanation-v1";
+
+/**
+ * Build the only user instruction accepted by the Guardrail explanation flow.
+ * Finding text is deliberately delimited as untrusted data; the server remains
+ * authoritative for the Finding and its provenance.
+ */
+export function guardrailExplanationQuestion(finding: GuardrailFinding): string {
+  return [
+    "Explain the deterministic architecture guardrail finding below for a developer.",
+    "Use only the supplied source evidence to explain likely cause, impact, and a cautious next step.",
+    "Do not change or reinterpret the rule, severity, fingerprint, path, line range, Commit, or policy profile.",
+    "Every explanatory step must cite one or more supplied Evidence IDs. If the evidence is insufficient, refuse.",
+    "BEGIN_UNTRUSTED_FINDING",
+    `FINDING_ID: ${finding.id}`,
+    `RULE_ID: ${finding.ruleId}`,
+    `SEVERITY: ${finding.severity}`,
+    `TITLE: ${finding.title}`,
+    `MESSAGE: ${finding.message}`,
+    `LOCATION: ${finding.path}:${finding.startLine}-${finding.endLine}`,
+    `METRIC_JSON: ${JSON.stringify(finding.metric)}`,
+    "END_UNTRUSTED_FINDING",
+  ].join("\n");
+}
+
+const MODEL_RESPONSE_MAX_CHARACTERS = 256_000;
+
+const draftSchema = z
+  .object({
+    summary: z.string().trim().min(1).max(16_000),
+    steps: z
+      .array(
+        z
+          .object({
+            text: z.string().trim().min(1).max(16_000),
+            evidenceIds: z.array(z.string().min(1).max(300)).max(20),
+          })
+          .strict(),
+      )
+      .max(50),
+    limitations: z.array(z.string().trim().min(1).max(4_000)).max(20).default([]),
+    status: z.enum(["grounded", "partial", "refused"]),
+  })
+  .strict();
 
 function evidencePrompt(evidence: readonly Evidence[]): string {
   return evidence
@@ -177,6 +210,9 @@ export class OpenAICompatibleProvider implements ModelProvider {
     const content = payload.choices?.[0]?.message?.content;
     if (!content) {
       throw new DomainError("AI_OUTPUT_INVALID", "The model returned no answer.");
+    }
+    if (content.length > MODEL_RESPONSE_MAX_CHARACTERS) {
+      throw new DomainError("AI_OUTPUT_INVALID", "The model answer exceeded the size limit.");
     }
     try {
       return draftSchema.parse(JSON.parse(content));

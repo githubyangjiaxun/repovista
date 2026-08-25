@@ -136,11 +136,12 @@ export function buildApp(dependencies: AppDependencies = {}): {
                           error.code === "GITHUB_WEBHOOK_DELIVERY_CONFLICT" ||
                           error.code === "EXPORT_NOT_AVAILABLE" ||
                           error.code === "PR_ANALYSIS_REVISION_CONFLICT" ||
-                          error.code === "GUARDRAIL_COMPARISON_INCOMPATIBLE"
+                          error.code === "GUARDRAIL_COMPARISON_INCOMPATIBLE" ||
+                          error.code === "GUARDRAIL_EXPLANATION_EVIDENCE_UNAVAILABLE"
                         ? 409
-                        : error.code === "GITHUB_API_FAILED"
-                          ? 502
-                          : error.code.startsWith("AI_")
+                        : error.code === "AI_CONFIG_INVALID"
+                          ? 503
+                          : error.code === "GITHUB_API_FAILED" || error.code.startsWith("AI_")
                             ? 502
                             : 400;
       reply.status(status).send({

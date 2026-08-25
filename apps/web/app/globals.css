@@ -3749,14 +3749,14 @@ a {
   color: #91cfff;
 }
 
-.guardrail-finding-body > div {
+.guardrail-finding-body > div:first-child {
   display: flex;
   gap: 8px;
   align-items: center;
 }
 
-.guardrail-finding-body > div span,
-.guardrail-finding-body > div code {
+.guardrail-finding-body > div:first-child span,
+.guardrail-finding-body > div:first-child code {
   color: var(--muted);
   font-size: 10px;
   text-transform: uppercase;
@@ -3784,6 +3784,97 @@ a {
   display: inline-flex;
   gap: 6px;
   align-items: center;
+  color: var(--accent);
+  background: transparent;
+  cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.guardrail-explanation-actions {
+  margin-top: 12px;
+}
+
+.guardrail-explanation-actions button {
+  min-height: 32px;
+  padding: 7px 10px;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  border: 1px solid rgba(126, 232, 190, 0.35);
+  border-radius: 8px;
+  color: var(--accent);
+  background: rgba(126, 232, 190, 0.06);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.guardrail-explanation-actions button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.guardrail-explanation-error {
+  margin-top: 10px;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.guardrail-explanation {
+  margin-top: 13px;
+  padding: 13px;
+  display: grid;
+  gap: 8px;
+  border: 1px solid rgba(126, 232, 190, 0.24);
+  border-radius: 10px;
+  background: rgba(126, 232, 190, 0.045);
+}
+
+.guardrail-explanation-meta,
+.guardrail-explanation-provenance {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.guardrail-explanation-meta strong {
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.guardrail-explanation p {
+  margin: 0;
+  color: var(--text);
+}
+
+.guardrail-explanation ol {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted-strong);
+  line-height: 1.5;
+}
+
+.guardrail-explanation-limitations {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.guardrail-explanation button {
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px 0;
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  border: 0;
   color: var(--accent);
   background: transparent;
   cursor: pointer;

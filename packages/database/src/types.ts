@@ -7,6 +7,8 @@ import type {
   GitHubInstallation,
   GitHubWebhookResult,
   GroundedAnswer,
+  GuardrailExplanation,
+  GuardrailFinding,
   GuardrailProfile,
   GuardrailThresholds,
   Job,
@@ -494,6 +496,30 @@ export interface SaveAnswerInput {
   evidence: SearchEvidenceRecord[];
   latencyMs: number;
 }
+
+export interface CreateGuardrailExplanationInput {
+  workspaceId: string;
+  snapshotId: string;
+  finding: GuardrailFinding;
+  answer: GroundedAnswer;
+  profile: GuardrailProfile | null;
+  commitSha: string;
+  parserVersion: string;
+  algorithmVersion: string;
+  profileFingerprint: string;
+  provider: string;
+  model: string;
+  promptVersion: string;
+  actorUserId: string | null;
+  actorKind: Principal["kind"];
+}
+
+export interface CreateGuardrailExplanationResult {
+  explanation: GuardrailExplanation;
+  reused: boolean;
+}
+
+export type GuardrailExplanationRecord = GuardrailExplanation;
 
 export interface ShareReportRecord {
   id: string;

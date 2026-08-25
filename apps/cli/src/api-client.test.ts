@@ -61,6 +61,40 @@ const guardrailReport = {
   ],
 } as const;
 
+const guardrailExplanationResult = {
+  reused: false,
+  explanation: {
+    id: jobId,
+    snapshot: {
+      ...guardrailReport.snapshot,
+      algorithmVersion: guardrailReport.algorithmVersion,
+    },
+    profile: guardrailProfile,
+    profileFingerprint: guardrailProfile.fingerprint,
+    finding: guardrailReport.findings[0],
+    answer: {
+      summary: "The file is larger than the fixed threshold.",
+      steps: [{ text: "Inspect the fixed source range.", evidenceIds: ["guardrail-evidence:1"] }],
+      limitations: [],
+      status: "grounded",
+      citations: [
+        {
+          evidenceId: "guardrail-evidence:1",
+          path: "src/index.ts",
+          symbol: null,
+          startLine: 1,
+          endLine: 10,
+          quote: "const value = 1;",
+        },
+      ],
+      provider: "fake",
+      model: "evidence-demo-v1",
+    },
+    promptVersion: "guardrail-explanation-v1",
+    createdAt: "2026-08-24T00:00:00.000Z",
+  },
+};
+
 function jsonResponse(payload: unknown, status = 200, requestId = "request-1"): Response {
   return new Response(JSON.stringify(payload), {
     headers: { "Content-Type": "application/json", "X-Request-ID": requestId },
@@ -93,7 +127,7 @@ describe("RepoVistaClient", () => {
       expect.objectContaining({ method: "POST" }),
     );
     const request = fetchImplementation.mock.calls[0]?.[1] as RequestInit;
-    expect((request.headers as Headers).get("User-Agent")).toBe("RepoVista-CLI/0.8.0");
+    expect((request.headers as Headers).get("User-Agent")).toBe("RepoVista-CLI/0.9.0");
     expect(JSON.parse(String(request.body))).toEqual({
       url: "https://github.com/acme/demo",
       ref: "main",
@@ -242,6 +276,31 @@ describe("RepoVistaClient", () => {
     expect(new Headers(sarifRequest.headers).get("Authorization")).toMatch(/^Bearer rv_/);
   });
 
+  it("creates an immutable verified Guardrail explanation", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async () =>
+      jsonResponse(
+        { data: guardrailExplanationResult, meta: { requestId: "request-explain" } },
+        201,
+      ),
+    );
+    const client = new RepoVistaClient({
+      apiUrl: "http://localhost:4000",
+      fetch: fetchImplementation,
+    });
+    await expect(
+      client.createGuardrailExplanation(snapshotId, {
+        findingId: guardrailReport.findings[0].id,
+        provider: "fake",
+      }),
+    ).resolves.toEqual(guardrailExplanationResult);
+    const request = fetchImplementation.mock.calls[0]?.[1] as RequestInit;
+    expect(request.method).toBe("POST");
+    expect(JSON.parse(String(request.body))).toEqual({
+      findingId: guardrailReport.findings[0].id,
+      provider: "fake",
+    });
+  });
+
   it("loads a guardrail baseline comparison and validates its envelope", async () => {
     const comparison = {
       algorithmVersion: "architecture-guardrails-v1",
@@ -270,7 +329,7 @@ describe("RepoVistaClient", () => {
       expect(String(input)).toBe(
         `http://localhost:4000/v1/snapshots/${repositoryId}/guardrails/compare?baseSnapshotId=${snapshotId}`,
       );
-      expect(new Headers(init?.headers).get("User-Agent")).toBe("RepoVista-CLI/0.8.0");
+      expect(new Headers(init?.headers).get("User-Agent")).toBe("RepoVista-CLI/0.9.0");
       return jsonResponse({ data: comparison, meta: { requestId: "request-compare" } });
     });
     const client = new RepoVistaClient({
