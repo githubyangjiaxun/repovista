@@ -27,6 +27,23 @@ The map, source browser, search, reading path, and share reports remain useful w
 key. The default `fake` provider is a transparent deterministic evidence summarizer, so the full
 workflow can be evaluated locally before connecting Ollama or an OpenAI-compatible endpoint.
 
+## What v1.0 includes
+
+- Cursor-paginated history for verified Guardrail explanations across immutable Snapshots of the
+  same Repository and logical Finding.
+- A server-owned SHA-256 `subjectKey` shared with deterministic Guardrails pairing rules; clients
+  cannot submit or override the logical Finding identity.
+- Pure structural comparison of two saved explanations across provenance, Finding, and Answer
+  fields. Results are only `same` or `changed` and never claim a winner, improvement, or regression.
+- CLI `guardrails explanations history/compare` workflows and an accessible Web history panel with
+  lazy loading, pagination, Viewer read access, race protection, and Base/Head fixed-source links.
+- Forward migration `0008_guardrail_explanation_history.sql`, including v0.9 record backfill and a
+  stable `(workspace_id, subject_key, created_at DESC, id DESC)` history index.
+
+History and comparison do not call an AI provider. They only read explanations that already passed
+the v0.9 citation verifier. See the [v1.0 acceptance record](docs/releases/v1.0-验收记录.md) for the
+reproducible database, API, CLI, Web, Chromium, Compose, and Git evidence.
+
 ## What v0.9 includes
 
 - Optional Verified Guardrail Explanations for a server-selected Finding. AI never chooses the rule,
@@ -217,6 +234,9 @@ pnpm --filter @repovista/cli dev search <snapshot-id> \
   "where is response compression configured" --mode hybrid --limit 10
 pnpm --filter @repovista/cli dev guardrails compare <base-snapshot-id> <head-snapshot-id>
 pnpm --filter @repovista/cli dev guardrails explain <snapshot-id> <finding-id>
+pnpm --filter @repovista/cli dev guardrails explanations history <snapshot-id> <finding-id>
+pnpm --filter @repovista/cli dev guardrails explanations compare \
+  <repository-id> <base-explanation-id> <head-explanation-id>
 ```
 
 Every command supports `--json`; `--api-url` points the CLI at a different API origin. Run

@@ -63,9 +63,15 @@
 - [Done](./docs/releases/v0.9-开发计划.md) Citation verification, evidence-only refusal, immutable provenance, and concurrent idempotent persistence.
 - [Done](./docs/releases/v0.9-开发计划.md) API, CLI, Web explanation workflows, migration, E2E, and release evidence.
 
+## v1.0 — Guardrail Explanation History and Comparison（implemented 2026-08-25）
+
+- [Done](./docs/releases/v1.0-开发计划.md) Deterministic logical Finding identity and v0.9 explanation backfill.
+- [Done](./docs/releases/v1.0-开发计划.md) Cursor-paginated same-Repository explanation history with Workspace isolation.
+- [Done](./docs/releases/v1.0-开发计划.md) Pure structural comparison, CLI/Web workflows, fixed dual-Snapshot evidence, and release evidence.
+
 ## Next candidates
 
-- Explanation history and comparison views without weakening the immutable provenance boundary.
 - Contributor-oriented public demo fixtures and documented deployment hardening profiles.
+- Optional human review labels and export formats that remain separate from deterministic CI decisions.
 
 Roadmap ordering may change based on measured usage and contributor feedback.

@@ -7,6 +7,33 @@ Keep a Changelog structure.
 
 No unreleased changes.
 
+## [1.0.0] - 2026-08-25
+
+### Added
+
+- Cross-Snapshot Verified Guardrail Explanation history, entered through a server-recomputed current
+  Finding and scoped to the same Workspace, Repository, and deterministic logical subject.
+- Stable SHA-256 `subjectKey` generation shared with Guardrails baseline pairing, plus migration
+  `0008_guardrail_explanation_history.sql` to backfill existing v0.9 explanations.
+- Cursor-paginated history summaries and deterministic comparison of two saved explanations across
+  provenance, Finding, and Answer fields.
+- CLI `guardrails explanations history/compare` commands and a lazy Web history/compare panel with
+  Viewer read access, pagination, stale-response protection, and Base/Head Snapshot evidence links.
+
+### Trust boundary
+
+- History and comparison never call an AI provider, edit an explanation, write an audit creation
+  event, or infer model/code quality. Comparison states are only `same` and `changed`.
+- Clients cannot submit `subjectKey`, Finding JSON, Repository identity, or comparison conclusions.
+  Cross-Workspace, cross-Repository, missing, and different-subject records are rejected without
+  leaking inaccessible records.
+
+### Verification
+
+- OpenAPI contains 61 operations. Full lint, typecheck, unit/API/CLI/Web tests, production builds,
+  Chromium E2E, benchmark, isolated PostgreSQL integration, Compose configuration/images, and Git
+  integrity are recorded in the [v1.0 acceptance record](docs/releases/v1.0-验收记录.md).
+
 ## [0.9.0] - 2026-08-25
 
 ### Added
@@ -31,7 +58,7 @@ No unreleased changes.
 
 ### Verification
 
-- OpenAPI contains 59 operations. AI, API, CLI, Web, database migration/concurrency, Chromium E2E,
+- OpenAPI contained 59 operations. AI, API, CLI, Web, database migration/concurrency, Chromium E2E,
   full workspace checks, benchmark, Compose images, and Git integrity are recorded in the
   [v0.9 acceptance record](docs/releases/v0.9-验收记录.md).
 

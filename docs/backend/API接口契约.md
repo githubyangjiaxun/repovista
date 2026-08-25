@@ -1,6 +1,6 @@
 # API 接口契约
 
-状态：v0.9 已实现并验收（2026-08-25）
+状态：v1.0 已实现并验收（2026-08-25）
 Base path：`/v1`
 机器事实来源：`openapi/openapi.json`
 
@@ -96,7 +96,7 @@ Operation。所有 UUID 资源查询先做 Workspace Access Check；无权资源
 共 49 个 Operation。
 
 v0.6 增加两个 Snapshot 派生读接口；v0.7 增加一个基线比较接口；v0.8 增加五个策略 Profile
-接口；v0.9 再增加两个解释接口，共 59 个 Operation：
+接口；v0.9 增加两个解释接口；v1.0 增加历史和解释比较接口，共 61 个 Operation：
 
 | Method | Path | 用途 |
 |---|---|---|
@@ -142,6 +142,20 @@ POST 严格只接受 `findingId` 和可选 `provider/model`；客户端不能上
 `refused`。相同 Snapshot/Finding fingerprint/provider/model/prompt 的请求优先复用已有记录，并在
 数据库唯一键下保证并发收敛。写请求沿用 Session CSRF、Viewer/Token Scope 和匿名公开 Demo
 边界；私有响应为 `private, no-store`。
+
+v1.0 Explanation History 与结构比较路由：
+
+| Method | Path | 用途 |
+|---|---|---|
+| GET | `/v1/snapshots/{snapshotId}/guardrails/explanations?findingId=...&limit=...&cursor=...` | 从当前 Snapshot 的服务端真实 Finding 出发，分页读取同 Repository 同逻辑 Finding 的解释摘要 |
+| GET | `/v1/repositories/{repositoryId}/guardrails/explanations/compare?baseExplanationId=...&headExplanationId=...` | 对两条同逻辑 Finding 的不可变解释执行 provenance/Finding/Answer 结构比较 |
+
+历史入口重新计算当前 Snapshot Guardrails，并由服务端生成 `subjectKey`；客户端不能提交逻辑身份、
+Repository、Rule 或 Finding JSON。历史按 `createdAt DESC, id DESC` 使用 opaque cursor 分页，摘要不
+返回 Citation Quote。比较只返回 `same/changed` 和 Base/Head 完整已验证解释，不调用 Provider、不
+写入新解释或审计创建事件，也不输出“改进、退步、胜者”。两个 GET 均允许 Viewer 读取；跨
+Workspace/Repository、缺失记录和不同 `subjectKey` 使用稳定 Not Found/Conflict 边界。私有响应为
+`private, no-store`，公开 Demo 为 `public, max-age=0, must-revalidate`。
 
 ## 3. 创建分析
 

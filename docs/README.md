@@ -1,6 +1,6 @@
 # RepoVista 工程文档
 
-状态：v0.9 已实现并完成 Verified Guardrail Explanations、CLI/Web 链路、数据库并发幂等与 OpenAPI 同步（2026-08-25）
+状态：v1.0 已实现并完成 Explanation History、纯结构比较、CLI/Web 链路、数据库回填与 OpenAPI 同步（2026-08-25）
 
 本目录描述当前代码，而不是早期愿景。发生冲突时，事实来源优先级如下：
 
@@ -111,6 +111,18 @@
 | [v0.9 测试与发布计划](./operations/v0.9测试与发布计划.md) | 单元、API、数据库、E2E、Compose 和 Git 门禁 |
 | [v0.9 验收记录](./releases/v0.9-验收记录.md) | 实际命令、结果、已知边界、提交和远端审计 |
 
+## v1.0 实施完成
+
+| 文档 | 内容 |
+|---|---|
+| [版本开发计划](./releases/v1.0-开发计划.md) | Explanation History、逻辑 Finding 身份、结构比较与完成定义 |
+| [v1.0 后端开发文档](./backend/v1.0后端开发文档.md) | 历史/比较 API、权限、缓存、cursor 和稳定错误 |
+| [v1.0 数据库设计](./database/v1.0数据库设计.md) | `subject_key` 回填、历史索引、查询与迁移不变量 |
+| [v1.0 前端开发文档](./frontend/v1.0前端开发文档.md) | 按需历史、分页、双版本比较、竞态和固定 Citation |
+| [v1.0 解释历史可信边界](./ai/v1.0解释历史可信边界.md) | 不调用模型、不评判质量、不可伪造逻辑 Finding 身份 |
+| [v1.0 测试与发布计划](./operations/v1.0测试与发布计划.md) | 单元、API、数据库、E2E、Compose 和 Git 门禁 |
+| [v1.0 验收记录](./releases/v1.0-验收记录.md) | 实际命令、测试结果、边界、提交和远端审计 |
+
 ## 前端
 
 | 文档 | 内容 |
@@ -123,7 +135,7 @@
 | 文档 | 内容 |
 |---|---|
 | [后端开发文档](./backend/后端开发文档.md) | Fastify 请求边界、配置、错误和模块职责 |
-| [API 接口契约](./backend/API接口契约.md) | 59 个 v0.9 Operation、Cookie/Bearer、Workspace、策略 Profile、Guardrails/比较/解释/SARIF、SSE、Retrieval、Story 与 PR Impact |
+| [API 接口契约](./backend/API接口契约.md) | 61 个 v1.0 Operation、Cookie/Bearer、Workspace、策略 Profile、Guardrails/解释历史/结构比较/SARIF、SSE、Retrieval、Story 与 PR Impact |
 | [任务与索引流水线](./backend/任务与索引流水线.md) | 租约任务、安全克隆、扫描、解析和持久化 |
 
 ## 数据与可信 AI
@@ -134,6 +146,7 @@
 | [迁移与查询规范](./database/迁移与查询规范.md) | Migration、事务、集成测试和查询纪律 |
 | [AI 可信问答设计](./ai/AI可信问答设计.md) | 检索、Provider、引用验证、拒答和隐私 |
 | [v0.9 AI 可信解释设计](./ai/v0.9可信解释设计.md) | 确定性 Finding 上的可核验辅助解释与 provenance 边界 |
+| [v1.0 解释历史可信边界](./ai/v1.0解释历史可信边界.md) | 已验证解释的只读历史与纯结构差异边界 |
 
 ## 工程与发布
 
