@@ -57,9 +57,15 @@
 - [Done](./docs/releases/v0.8-开发计划.md) Snapshot policy provenance, idempotent creation, versioning, and fingerprint compatibility gates.
 - [Done](./docs/releases/v0.8-开发计划.md) API, CLI, Web assignment workflows, audit events, migration, and release evidence.
 
+## v0.9 — Verified Guardrail Explanations（implemented 2026-08-25）
+
+- [Done](./docs/releases/v0.9-开发计划.md) Fixed server-owned prompts and bounded same-Snapshot evidence for deterministic Findings.
+- [Done](./docs/releases/v0.9-开发计划.md) Citation verification, evidence-only refusal, immutable provenance, and concurrent idempotent persistence.
+- [Done](./docs/releases/v0.9-开发计划.md) API, CLI, Web explanation workflows, migration, E2E, and release evidence.
+
 ## Next candidates
 
-- Optional verified explanations: let an AI summarize an existing finding while preserving its rule,
-  fingerprint, Commit, and evidence boundaries.
+- Explanation history and comparison views without weakening the immutable provenance boundary.
+- Contributor-oriented public demo fixtures and documented deployment hardening profiles.
 
 Roadmap ordering may change based on measured usage and contributor feedback.

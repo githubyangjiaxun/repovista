@@ -1,6 +1,6 @@
 # RepoVista 工程文档
 
-状态：v0.8 已实现并完成 Guardrails Policy Profiles、CLI/Web 链路、权限/兼容性测试与 OpenAPI 同步（2026-08-24）
+状态：v0.9 已实现并完成 Verified Guardrail Explanations、CLI/Web 链路、数据库并发幂等与 OpenAPI 同步（2026-08-25）
 
 本目录描述当前代码，而不是早期愿景。发生冲突时，事实来源优先级如下：
 
@@ -99,6 +99,18 @@
 | [v0.8 测试与发布计划](./operations/v0.8测试与发布计划.md) | 各层测试、数据库、E2E、Compose 和 Git 门禁 |
 | [v0.8 验收记录](./releases/v0.8-验收记录.md) | 实际门禁结果、数据库 Skip、Git 提交和远端审计 |
 
+## v0.9 实施完成
+
+| 文档 | 内容 |
+|---|---|
+| [版本开发计划](./releases/v0.9-开发计划.md) | Verified Guardrail Explanations 的范围、信任边界和完成定义 |
+| [v0.9 后端开发文档](./backend/v0.9后端开发文档.md) | 解释 API、权限、证据边界、幂等和错误契约 |
+| [v0.9 数据库设计](./database/v0.9数据库设计.md) | 不可变解释、显式 provenance、复合外键和并发唯一键 |
+| [v0.9 前端开发文档](./frontend/v0.9前端开发文档.md) | Finding 内解释交互、状态、固定引用和竞态保护 |
+| [v0.9 AI 可信解释设计](./ai/v0.9可信解释设计.md) | 固定 Prompt、模型不可信输入、Citation verifier 和拒答 |
+| [v0.9 测试与发布计划](./operations/v0.9测试与发布计划.md) | 单元、API、数据库、E2E、Compose 和 Git 门禁 |
+| [v0.9 验收记录](./releases/v0.9-验收记录.md) | 实际命令、结果、已知边界、提交和远端审计 |
+
 ## 前端
 
 | 文档 | 内容 |
@@ -111,7 +123,7 @@
 | 文档 | 内容 |
 |---|---|
 | [后端开发文档](./backend/后端开发文档.md) | Fastify 请求边界、配置、错误和模块职责 |
-| [API 接口契约](./backend/API接口契约.md) | 57 个 v0.8 Operation、Cookie/Bearer、Workspace、策略 Profile、Guardrails/比较/SARIF、SSE、Retrieval、Story 与 PR Impact |
+| [API 接口契约](./backend/API接口契约.md) | 59 个 v0.9 Operation、Cookie/Bearer、Workspace、策略 Profile、Guardrails/比较/解释/SARIF、SSE、Retrieval、Story 与 PR Impact |
 | [任务与索引流水线](./backend/任务与索引流水线.md) | 租约任务、安全克隆、扫描、解析和持久化 |
 
 ## 数据与可信 AI
@@ -121,6 +133,7 @@
 | [数据库设计](./database/数据库设计.md) | PostgreSQL/pgvector 当前表结构、约束和索引 |
 | [迁移与查询规范](./database/迁移与查询规范.md) | Migration、事务、集成测试和查询纪律 |
 | [AI 可信问答设计](./ai/AI可信问答设计.md) | 检索、Provider、引用验证、拒答和隐私 |
+| [v0.9 AI 可信解释设计](./ai/v0.9可信解释设计.md) | 确定性 Finding 上的可核验辅助解释与 provenance 边界 |
 
 ## 工程与发布
 

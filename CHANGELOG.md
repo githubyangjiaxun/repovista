@@ -7,6 +7,34 @@ Keep a Changelog structure.
 
 No unreleased changes.
 
+## [0.9.0] - 2026-08-25
+
+### Added
+
+- Verified Guardrail Explanations for server-selected deterministic Findings, using fixed bounded
+  source evidence and the existing citation verifier.
+- Immutable explanation provenance for Snapshot, Commit, parser, Guardrails algorithm, Profile
+  fingerprint, Finding fingerprint, provider/model, and prompt version.
+- Two explanation API operations, CLI `guardrails explain`, and an accessible Web explanation panel
+  with fixed citation navigation.
+- PostgreSQL migration `0007_guardrail_explanations.sql`, pre-model idempotent lookup, concurrent
+  `ON CONFLICT` convergence, and append-only audit events.
+
+### Security
+
+- Client requests cannot submit source, Finding JSON, arbitrary prompts, rules, severity, or
+  provenance. Unknown request fields are rejected.
+- Invalid evidence IDs and unsupported model statements are removed; answers without valid citations
+  are forced to `refused`.
+- Raw model responses and complete source files are not persisted. Stored citation quotes are bounded,
+  server-selected excerpts with verified Snapshot paths and line ranges.
+
+### Verification
+
+- OpenAPI contains 59 operations. AI, API, CLI, Web, database migration/concurrency, Chromium E2E,
+  full workspace checks, benchmark, Compose images, and Git integrity are recorded in the
+  [v0.9 acceptance record](docs/releases/v0.9-验收记录.md).
+
 ## [0.8.0] - 2026-08-24
 
 ### Added

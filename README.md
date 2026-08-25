@@ -27,6 +27,23 @@ The map, source browser, search, reading path, and share reports remain useful w
 key. The default `fake` provider is a transparent deterministic evidence summarizer, so the full
 workflow can be evaluated locally before connecting Ollama or an OpenAI-compatible endpoint.
 
+## What v0.9 includes
+
+- Optional Verified Guardrail Explanations for a server-selected Finding. AI never chooses the rule,
+  severity, fingerprint, policy, Commit, or source location.
+- Fixed `guardrail-explanation-v1` prompts and bounded same-Snapshot source evidence. Unknown model
+  citations are removed; an answer with no valid citation becomes `refused`.
+- Immutable, Workspace-scoped explanation records with explicit Snapshot/Commit/parser/algorithm,
+  Profile fingerprint, Finding fingerprint, provider/model, and prompt provenance.
+- API, CLI `guardrails explain`, and Web “Explain with AI” workflows with citation navigation and
+  idempotent reuse before another model request is made.
+- Concurrent requests converge on one database record. Raw model responses and complete source files
+  are not stored; only verifier-approved bounded citation excerpts may be retained.
+
+The deterministic Guardrails report and SARIF remain the only CI decision source. Explanations are a
+reviewable aid, not a security proof or an automatic fix. See the [v0.9 acceptance record](docs/releases/v0.9-验收记录.md)
+for reproducible release evidence and explicit external-provider limitations.
+
 ## What v0.7 includes
 
 - Deterministic Guardrails Snapshot baseline comparison for two Ready Snapshots from the same
@@ -199,6 +216,7 @@ pnpm --filter @repovista/cli dev embed <snapshot-id> --wait
 pnpm --filter @repovista/cli dev search <snapshot-id> \
   "where is response compression configured" --mode hybrid --limit 10
 pnpm --filter @repovista/cli dev guardrails compare <base-snapshot-id> <head-snapshot-id>
+pnpm --filter @repovista/cli dev guardrails explain <snapshot-id> <finding-id>
 ```
 
 Every command supports `--json`; `--api-url` points the CLI at a different API origin. Run

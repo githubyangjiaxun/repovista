@@ -1,6 +1,6 @@
 # API 接口契约
 
-状态：v0.8 已实现并验收（2026-08-24）
+状态：v0.9 已实现并验收（2026-08-25）
 Base path：`/v1`
 机器事实来源：`openapi/openapi.json`
 
@@ -96,7 +96,7 @@ Operation。所有 UUID 资源查询先做 Workspace Access Check；无权资源
 共 49 个 Operation。
 
 v0.6 增加两个 Snapshot 派生读接口；v0.7 增加一个基线比较接口；v0.8 增加五个策略 Profile
-接口，共 57 个 Operation：
+接口；v0.9 再增加两个解释接口，共 59 个 Operation：
 
 | Method | Path | 用途 |
 |---|---|---|
@@ -128,6 +128,20 @@ Cookie + CSRF 或 Workspace-bound Bearer Token 权限，读取结果遵循公开
 属于同一 Repository、均为 Ready、Parser Version/Guardrails 算法/阈值一致；不兼容返回
 `GUARDRAIL_COMPARISON_INCOMPATIBLE` 和 HTTP `409`。公开比较使用
 `public, max-age=0, must-revalidate`，任一侧为私有则使用 `private, no-store`。
+
+v0.9 Verified Guardrail Explanation 路由：
+
+| Method | Path | 用途 |
+|---|---|---|
+| POST | `/v1/snapshots/{snapshotId}/guardrails/explanations` | 对服务端重新计算并选中的 Finding 生成或复用可核验解释 |
+| GET | `/v1/snapshots/{snapshotId}/guardrails/explanations/{explanationId}` | 在 Snapshot/Workspace 边界内读取不可变解释 |
+
+POST 严格只接受 `findingId` 和可选 `provider/model`；客户端不能上传 Finding、源码或 Prompt。
+服务端固定 Snapshot/Commit/Profile/Finding provenance，并只从 Finding 的最多 20 个固定范围读取
+每段最多 400 行、8,000 字符的 Evidence。模型输出经 citation verifier 过滤；没有有效引用时强制
+`refused`。相同 Snapshot/Finding fingerprint/provider/model/prompt 的请求优先复用已有记录，并在
+数据库唯一键下保证并发收敛。写请求沿用 Session CSRF、Viewer/Token Scope 和匿名公开 Demo
+边界；私有响应为 `private, no-store`。
 
 ## 3. 创建分析
 
