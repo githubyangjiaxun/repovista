@@ -8,6 +8,7 @@ import type {
   GitHubWebhookResult,
   GroundedAnswer,
   GuardrailExplanation,
+  GuardrailExplanationSummary,
   GuardrailFinding,
   GuardrailProfile,
   GuardrailThresholds,
@@ -520,6 +521,21 @@ export interface CreateGuardrailExplanationResult {
 }
 
 export type GuardrailExplanationRecord = GuardrailExplanation;
+
+export interface ListGuardrailExplanationHistoryOptions {
+  cursor?: string;
+  limit: number;
+}
+
+export interface GuardrailExplanationHistoryPage {
+  explanations: GuardrailExplanationSummary[];
+  nextCursor: string | null;
+}
+
+export interface GuardrailExplanationPair {
+  base: GuardrailExplanation;
+  head: GuardrailExplanation;
+}
 
 export interface ShareReportRecord {
   id: string;

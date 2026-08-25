@@ -13,6 +13,7 @@ const symbolId = "01900000-0000-7000-8000-000000000005";
 const messageId = "01900000-0000-7000-8000-000000000006";
 const userId = "01900000-0000-7000-8000-000000000010";
 const profileId = "01900000-0000-7000-8000-000000000011";
+const subjectKey = `sha256:${"c".repeat(64)}`;
 
 const guardrailProfile = {
   id: profileId,
@@ -119,6 +120,61 @@ const snapshot = {
   failure: null,
 };
 
+const guardrailFinding = {
+  id: "large_file:abc",
+  fingerprint: `sha256:${"d".repeat(64)}`,
+  ruleId: "large_file",
+  severity: "warning",
+  title: "Large source file",
+  message: "src/index.ts is large.",
+  path: "src/index.ts",
+  startLine: 1,
+  endLine: 801,
+  metric: { lines: 801, bytes: 120000 },
+  evidence: [{ path: "src/index.ts", startLine: 1, endLine: 801, description: "File size." }],
+} as const;
+
+function guardrailExplanationFixture(
+  id: string,
+  targetSnapshotId: string,
+  commitSha: string,
+  summary: string,
+) {
+  return {
+    id,
+    subjectKey,
+    snapshot: {
+      id: targetSnapshotId,
+      commitSha,
+      parserVersion: snapshot.parserVersion,
+      algorithmVersion: "architecture-guardrails-v1",
+    },
+    profile: defaultGuardrailProfile,
+    profileFingerprint: defaultGuardrailProfile.fingerprint,
+    finding: guardrailFinding,
+    answer: {
+      summary,
+      steps: [{ text: "Inspect the fixed source range.", evidenceIds: ["guardrail-evidence:1"] }],
+      limitations: ["AI does not change the Finding."],
+      status: "grounded",
+      citations: [
+        {
+          evidenceId: "guardrail-evidence:1",
+          path: guardrailFinding.path,
+          symbol: null,
+          startLine: 1,
+          endLine: 10,
+          quote: "const value = 1;",
+        },
+      ],
+      provider: "fake",
+      model: "evidence-demo-v1",
+    },
+    promptVersion: "guardrail-explanation-v1",
+    createdAt: "2026-08-24T00:00:00.000Z",
+  } as const;
+}
+
 function envelope(data: unknown): Response {
   return new Response(JSON.stringify({ data, meta: { requestId: "request-1" } }), {
     headers: { "Content-Type": "application/json" },
@@ -151,7 +207,7 @@ describe("RepoVista CLI", () => {
     const exitCode = await runCli(["--version"], dependencies);
 
     expect(exitCode).toBe(0);
-    expect(stdout).toEqual(["0.9.0"]);
+    expect(stdout).toEqual(["1.0.0"]);
     expect(stderr).toEqual([]);
     expect(fetchImplementation).not.toHaveBeenCalled();
   });
@@ -493,6 +549,7 @@ describe("RepoVista CLI", () => {
       reused: false,
       explanation: {
         id: messageId,
+        subjectKey,
         snapshot: {
           id: snapshotId,
           commitSha: snapshot.commitSha,
@@ -537,6 +594,135 @@ describe("RepoVista CLI", () => {
     expect(stdout.join("\n")).toContain("guardrail-explanation-v1");
     const request = fetchImplementation.mock.calls[0]?.[1] as RequestInit;
     expect(JSON.parse(String(request.body))).toEqual({ findingId: finding.id, provider: "fake" });
+  });
+
+  it("prints paginated verified explanation history", async () => {
+    const explanation = guardrailExplanationFixture(
+      messageId,
+      snapshotId,
+      snapshot.commitSha,
+      "The file exceeds the deterministic threshold.",
+    );
+    const history = {
+      subjectKey,
+      finding: guardrailFinding,
+      explanations: [
+        {
+          id: explanation.id,
+          subjectKey,
+          snapshot: explanation.snapshot,
+          profileFingerprint: explanation.profileFingerprint,
+          finding: guardrailFinding,
+          answer: {
+            status: explanation.answer.status,
+            summary: explanation.answer.summary,
+            provider: explanation.answer.provider,
+            model: explanation.answer.model,
+            stepCount: explanation.answer.steps.length,
+            citationCount: explanation.answer.citations.length,
+            limitationCount: explanation.answer.limitations.length,
+          },
+          promptVersion: explanation.promptVersion,
+          createdAt: explanation.createdAt,
+        },
+      ],
+      nextCursor: "next-page",
+    };
+    const fetchImplementation = vi.fn<typeof fetch>(async () => envelope(history));
+    const { dependencies, stdout } = harness(fetchImplementation as typeof fetch);
+
+    const exitCode = await runCli(
+      [
+        "guardrails",
+        "explanations",
+        "history",
+        snapshotId,
+        guardrailFinding.id,
+        "--limit",
+        "10",
+        "--cursor",
+        "current-page",
+      ],
+      dependencies,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stdout.join("\n")).toContain("Verified explanation history");
+    expect(stdout.join("\n")).toContain(subjectKey);
+    expect(stdout.join("\n")).toContain("Next cursor: next-page");
+    expect(String(fetchImplementation.mock.calls[0]?.[0])).toContain(
+      `findingId=${encodeURIComponent(guardrailFinding.id)}&cursor=current-page&limit=10`,
+    );
+  });
+
+  it("compares verified explanations without ranking their quality", async () => {
+    const base = guardrailExplanationFixture(
+      messageId,
+      snapshotId,
+      snapshot.commitSha,
+      "The file exceeds the deterministic threshold.",
+    );
+    const head = {
+      ...guardrailExplanationFixture(
+        userId,
+        repositoryId,
+        "1123456789abcdef0123456789abcdef01234567",
+        "The fixed file remains over the configured threshold.",
+      ),
+      createdAt: "2026-08-25T00:00:00.000Z",
+    };
+    const comparison = {
+      subjectKey,
+      changed: true,
+      base,
+      head,
+      differences: {
+        provenance: {
+          snapshotId: "changed",
+          commitSha: "changed",
+          parserVersion: "same",
+          algorithmVersion: "same",
+          profileFingerprint: "same",
+          provider: "same",
+          model: "same",
+          promptVersion: "same",
+        },
+        finding: {
+          id: "same",
+          fingerprint: "same",
+          severity: "same",
+          title: "same",
+          message: "same",
+          path: "same",
+          range: "same",
+          metric: "same",
+          evidence: "same",
+        },
+        answer: {
+          status: "same",
+          summary: "changed",
+          steps: "same",
+          limitations: "same",
+          citations: "same",
+        },
+      },
+    };
+    const fetchImplementation = vi.fn<typeof fetch>(async () => envelope(comparison));
+    const { dependencies, stdout } = harness(fetchImplementation as typeof fetch);
+
+    const exitCode = await runCli(
+      ["guardrails", "explanations", "compare", repositoryId, messageId, userId],
+      dependencies,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(stdout.join("\n")).toContain("Verified explanation comparison: changed");
+    expect(stdout.join("\n")).toContain("summary: changed");
+    expect(stdout.join("\n")).toContain("does not rank explanation quality");
+    expect(stdout.join("\n")).not.toContain("regressed");
+    expect(String(fetchImplementation.mock.calls[0]?.[0])).toContain(
+      `baseExplanationId=${messageId}&headExplanationId=${userId}`,
+    );
   });
 
   it("compares guardrails and returns exit code 2 for regressions", async () => {

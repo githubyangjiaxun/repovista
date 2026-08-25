@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { IndexedRepository } from "@repovista/domain";
 import { PUBLIC_WORKSPACE_ID } from "@repovista/domain";
+import { guardrailFindingSubjectKey } from "@repovista/guardrails";
 import { computePullRequestImpact } from "@repovista/impact";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDatabase } from "./migrate.js";
@@ -382,7 +383,11 @@ integration("RepoVistaStore with PostgreSQL", () => {
       actorUserId: null,
       actorKind: "anonymous",
     });
-    expect(createdExplanation).toMatchObject({ reused: false, explanation: { finding } });
+    const expectedSubjectKey = guardrailFindingSubjectKey(finding);
+    expect(createdExplanation).toMatchObject({
+      reused: false,
+      explanation: { finding, subjectKey: expectedSubjectKey },
+    });
     const reusedExplanation = await store.createGuardrailExplanation({
       workspaceId: PUBLIC_WORKSPACE_ID,
       snapshotId: job.snapshotId,
@@ -420,6 +425,86 @@ integration("RepoVistaStore with PostgreSQL", () => {
         PUBLIC_WORKSPACE_ID,
       ),
     ).resolves.toEqual(createdExplanation.explanation);
+
+    const alternateExplanation = await store.createGuardrailExplanation({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      snapshotId: job.snapshotId,
+      finding,
+      answer: {
+        ...answer,
+        summary: "hello is still represented by the same fixed symbol evidence.",
+        model: "integration-history",
+      },
+      profile: null,
+      profileFingerprint: `sha256:${"b".repeat(64)}`,
+      commitSha: indexed.commitSha,
+      parserVersion: "integration-test-v1",
+      algorithmVersion: "architecture-guardrails-v1",
+      provider: "fake",
+      model: "integration-history",
+      promptVersion: "guardrail-explanation-v1",
+      actorUserId: null,
+      actorKind: "anonymous",
+    });
+    expect(alternateExplanation).toMatchObject({
+      reused: false,
+      explanation: { subjectKey: expectedSubjectKey },
+    });
+
+    await pool.query(
+      "UPDATE guardrail_explanations SET created_at = $1 WHERE id = ANY($2::uuid[])",
+      [
+        "2026-08-25T00:00:00.000Z",
+        [createdExplanation.explanation.id, alternateExplanation.explanation.id],
+      ],
+    );
+    const firstHistoryPage = await store.listGuardrailExplanationHistory(
+      PUBLIC_WORKSPACE_ID,
+      job.repositoryId,
+      expectedSubjectKey,
+      { limit: 1 },
+    );
+    expect(firstHistoryPage.explanations).toHaveLength(1);
+    expect(firstHistoryPage.explanations[0]).toMatchObject({
+      subjectKey: expectedSubjectKey,
+      answer: { citationCount: 1, stepCount: 1 },
+    });
+    expect(firstHistoryPage.nextCursor).not.toBeNull();
+    const secondHistoryPage = await store.listGuardrailExplanationHistory(
+      PUBLIC_WORKSPACE_ID,
+      job.repositoryId,
+      expectedSubjectKey,
+      { limit: 1, cursor: firstHistoryPage.nextCursor ?? undefined },
+    );
+    expect(secondHistoryPage.explanations).toHaveLength(1);
+    expect(secondHistoryPage.nextCursor).toBeNull();
+    expect(
+      new Set([firstHistoryPage.explanations[0]?.id, secondHistoryPage.explanations[0]?.id]),
+    ).toEqual(new Set([createdExplanation.explanation.id, alternateExplanation.explanation.id]));
+    await expect(
+      store.listGuardrailExplanationHistory(
+        PUBLIC_WORKSPACE_ID,
+        job.repositoryId,
+        expectedSubjectKey,
+        { limit: 1, cursor: "not-a-valid-cursor" },
+      ),
+    ).rejects.toMatchObject({ code: "PAGINATION_CURSOR_INVALID" });
+    const pair = await store.getGuardrailExplanationPair(
+      PUBLIC_WORKSPACE_ID,
+      job.repositoryId,
+      createdExplanation.explanation.id,
+      alternateExplanation.explanation.id,
+    );
+    expect(pair).toMatchObject({
+      base: {
+        id: createdExplanation.explanation.id,
+        subjectKey: expectedSubjectKey,
+      },
+      head: {
+        id: alternateExplanation.explanation.id,
+        subjectKey: expectedSubjectKey,
+      },
+    });
 
     const concurrentInput = {
       workspaceId: PUBLIC_WORKSPACE_ID,

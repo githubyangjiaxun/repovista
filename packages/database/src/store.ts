@@ -20,6 +20,7 @@ import type {
 import {
   embeddingIndexSchema,
   guardrailExplanationSchema,
+  guardrailExplanationSummarySchema,
   guardrailProfileSchema,
   idSchema,
   pullRequestAnalysisSchema,
@@ -38,6 +39,7 @@ import {
   PUBLIC_USER_ID,
   PUBLIC_WORKSPACE_ID,
 } from "@repovista/domain";
+import { guardrailFindingSubjectKey } from "@repovista/guardrails";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import type {
@@ -65,11 +67,14 @@ import type {
   GitHubInstallationInput,
   GitHubWebhookInput,
   GitHubWebhookProcessResult,
+  GuardrailExplanationHistoryPage,
+  GuardrailExplanationPair,
   GuardrailExplanationRecord,
   GuardrailProfileRecord,
   IncrementalIndexBase,
   InstallationState,
   JobEventRecord,
+  ListGuardrailExplanationHistoryOptions,
   ListSnapshotFilesOptions,
   PullRequestAnalysisCursor,
   PullRequestAnalysisJob,
@@ -155,6 +160,7 @@ interface GuardrailExplanationRow {
   id: string;
   workspace_id: string;
   snapshot_id: string;
+  subject_key: string;
   finding_id: string;
   finding_fingerprint: string;
   rule_id: string;
@@ -377,6 +383,7 @@ function mapGuardrailProfile(row: GuardrailProfileRow): GuardrailProfileRecord {
 function mapGuardrailExplanation(row: GuardrailExplanationRow): GuardrailExplanationRecord {
   return guardrailExplanationSchema.parse({
     id: row.id,
+    subjectKey: row.subject_key,
     snapshot: {
       id: row.snapshot_id,
       commitSha: row.commit_sha,
@@ -390,6 +397,80 @@ function mapGuardrailExplanation(row: GuardrailExplanationRow): GuardrailExplana
     promptVersion: row.prompt_version,
     createdAt: iso(row.created_at),
   });
+}
+
+function mapGuardrailExplanationSummary(row: GuardrailExplanationRow) {
+  const explanation = mapGuardrailExplanation(row);
+  return guardrailExplanationSummarySchema.parse({
+    id: explanation.id,
+    subjectKey: explanation.subjectKey,
+    snapshot: explanation.snapshot,
+    profileFingerprint: explanation.profileFingerprint,
+    finding: {
+      id: explanation.finding.id,
+      fingerprint: explanation.finding.fingerprint,
+      ruleId: explanation.finding.ruleId,
+      severity: explanation.finding.severity,
+      title: explanation.finding.title,
+      message: explanation.finding.message,
+      path: explanation.finding.path,
+      startLine: explanation.finding.startLine,
+      endLine: explanation.finding.endLine,
+    },
+    answer: {
+      status: explanation.answer.status,
+      summary: explanation.answer.summary,
+      provider: explanation.answer.provider,
+      model: explanation.answer.model,
+      stepCount: explanation.answer.steps.length,
+      citationCount: explanation.answer.citations.length,
+      limitationCount: explanation.answer.limitations.length,
+    },
+    promptVersion: explanation.promptVersion,
+    createdAt: explanation.createdAt,
+  });
+}
+
+interface GuardrailExplanationHistoryCursor {
+  createdAt: string;
+  id: string;
+}
+
+function invalidGuardrailExplanationCursor(): never {
+  throw new DomainError(
+    "PAGINATION_CURSOR_INVALID",
+    "The Guardrail explanation history cursor is invalid.",
+  );
+}
+
+function decodeGuardrailExplanationCursor(value: string): GuardrailExplanationHistoryCursor {
+  if (value.length > 1_000 || !/^[A-Za-z0-9_-]+$/.test(value)) {
+    return invalidGuardrailExplanationCursor();
+  }
+  try {
+    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as unknown;
+    if (typeof decoded !== "object" || decoded === null) {
+      return invalidGuardrailExplanationCursor();
+    }
+    const cursor = decoded as Record<string, unknown>;
+    if (
+      cursor.v !== 1 ||
+      typeof cursor.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(cursor.createdAt)) ||
+      typeof cursor.id !== "string" ||
+      !idSchema.safeParse(cursor.id).success
+    ) {
+      return invalidGuardrailExplanationCursor();
+    }
+    return { createdAt: new Date(cursor.createdAt).toISOString(), id: cursor.id };
+  } catch (error) {
+    if (isDomainError(error)) throw error;
+    return invalidGuardrailExplanationCursor();
+  }
+}
+
+function encodeGuardrailExplanationCursor(cursor: GuardrailExplanationHistoryCursor): string {
+  return Buffer.from(JSON.stringify({ v: 1, ...cursor }), "utf8").toString("base64url");
 }
 
 interface EmbeddingIndexRow {
@@ -1720,7 +1801,7 @@ export class RepoVistaStore {
   ): Promise<GuardrailExplanationRecord | null> {
     const result = await this.pool.query<GuardrailExplanationRow>(
       "SELECT id, workspace_id, snapshot_id, finding_id, finding_fingerprint, rule_id, " +
-        "commit_sha, parser_version, algorithm_version, profile_fingerprint, profile_json, " +
+        "subject_key, commit_sha, parser_version, algorithm_version, profile_fingerprint, profile_json, " +
         "finding_json, answer_json, provider, model_name, prompt_version, created_at " +
         "FROM guardrail_explanations WHERE id = $1 AND snapshot_id = $2 AND workspace_id = $3",
       [explanationId, snapshotId, workspaceId],
@@ -1738,13 +1819,71 @@ export class RepoVistaStore {
   ): Promise<GuardrailExplanationRecord | null> {
     const result = await this.pool.query<GuardrailExplanationRow>(
       "SELECT id, workspace_id, snapshot_id, finding_id, finding_fingerprint, rule_id, " +
-        "commit_sha, parser_version, algorithm_version, profile_fingerprint, profile_json, " +
+        "subject_key, commit_sha, parser_version, algorithm_version, profile_fingerprint, profile_json, " +
         "finding_json, answer_json, provider, model_name, prompt_version, created_at " +
         "FROM guardrail_explanations WHERE workspace_id = $1 AND snapshot_id = $2 " +
         "AND finding_fingerprint = $3 AND provider = $4 AND model_name = $5 AND prompt_version = $6",
       [workspaceId, snapshotId, findingFingerprint, provider, model, promptVersion],
     );
     return result.rows[0] ? mapGuardrailExplanation(result.rows[0]) : null;
+  }
+
+  async listGuardrailExplanationHistory(
+    workspaceId: string,
+    repositoryId: string,
+    subjectKey: string,
+    options: ListGuardrailExplanationHistoryOptions,
+  ): Promise<GuardrailExplanationHistoryPage> {
+    const cursor = options.cursor ? decodeGuardrailExplanationCursor(options.cursor) : null;
+    const result = await this.pool.query<GuardrailExplanationRow>(
+      "SELECT e.id, e.workspace_id, e.snapshot_id, e.finding_id, e.finding_fingerprint, " +
+        "e.rule_id, e.subject_key, e.commit_sha, e.parser_version, e.algorithm_version, " +
+        "e.profile_fingerprint, e.profile_json, e.finding_json, e.answer_json, e.provider, " +
+        "e.model_name, e.prompt_version, e.created_at FROM guardrail_explanations e " +
+        "JOIN repository_snapshots s ON s.id = e.snapshot_id " +
+        "WHERE e.workspace_id = $1 AND s.repository_id = $2 AND e.subject_key = $3 " +
+        "AND ($4::timestamptz IS NULL OR (e.created_at, e.id) < ($4::timestamptz, $5::uuid)) " +
+        "ORDER BY e.created_at DESC, e.id DESC LIMIT $6",
+      [
+        workspaceId,
+        repositoryId,
+        subjectKey,
+        cursor?.createdAt ?? null,
+        cursor?.id ?? null,
+        options.limit + 1,
+      ],
+    );
+    const visible = result.rows.slice(0, options.limit);
+    const last = visible.at(-1);
+    return {
+      explanations: visible.map(mapGuardrailExplanationSummary),
+      nextCursor:
+        result.rows.length > options.limit && last
+          ? encodeGuardrailExplanationCursor({ createdAt: iso(last.created_at), id: last.id })
+          : null,
+    };
+  }
+
+  async getGuardrailExplanationPair(
+    workspaceId: string,
+    repositoryId: string,
+    baseExplanationId: string,
+    headExplanationId: string,
+  ): Promise<GuardrailExplanationPair | null> {
+    const result = await this.pool.query<GuardrailExplanationRow>(
+      "SELECT e.id, e.workspace_id, e.snapshot_id, e.finding_id, e.finding_fingerprint, " +
+        "e.rule_id, e.subject_key, e.commit_sha, e.parser_version, e.algorithm_version, " +
+        "e.profile_fingerprint, e.profile_json, e.finding_json, e.answer_json, e.provider, " +
+        "e.model_name, e.prompt_version, e.created_at FROM guardrail_explanations e " +
+        "JOIN repository_snapshots s ON s.id = e.snapshot_id " +
+        "WHERE e.workspace_id = $1 AND s.repository_id = $2 AND e.id = ANY($3::uuid[])",
+      [workspaceId, repositoryId, [baseExplanationId, headExplanationId]],
+    );
+    if (result.rows.length !== 2) return null;
+    const records = new Map(result.rows.map((row) => [row.id, mapGuardrailExplanation(row)]));
+    const base = records.get(baseExplanationId);
+    const head = records.get(headExplanationId);
+    return base && head ? { base, head } : null;
   }
 
   async createGuardrailExplanation(
@@ -1774,16 +1913,17 @@ export class RepoVistaStore {
       }
 
       const id = createId();
+      const subjectKey = guardrailFindingSubjectKey(input.finding);
       const inserted = await client.query<GuardrailExplanationRow>(
         "INSERT INTO guardrail_explanations (" +
-          "id, workspace_id, snapshot_id, finding_id, finding_fingerprint, rule_id, commit_sha, " +
+          "id, workspace_id, snapshot_id, finding_id, finding_fingerprint, rule_id, subject_key, commit_sha, " +
           "parser_version, algorithm_version, profile_fingerprint, profile_json, finding_json, " +
           "answer_json, provider, model_name, prompt_version, created_by" +
-          ") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, " +
-          "$13::jsonb, $14, $15, $16, $17) " +
+          ") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, " +
+          "$14::jsonb, $15, $16, $17, $18) " +
           "ON CONFLICT (workspace_id, snapshot_id, finding_fingerprint, provider, model_name, prompt_version) " +
           "DO NOTHING RETURNING id, workspace_id, snapshot_id, finding_id, " +
-          "finding_fingerprint, rule_id, commit_sha, parser_version, algorithm_version, " +
+          "finding_fingerprint, rule_id, subject_key, commit_sha, parser_version, algorithm_version, " +
           "profile_fingerprint, profile_json, finding_json, answer_json, provider, model_name, " +
           "prompt_version, created_at",
         [
@@ -1793,6 +1933,7 @@ export class RepoVistaStore {
           input.finding.id,
           input.finding.fingerprint,
           input.finding.ruleId,
+          subjectKey,
           input.commitSha,
           input.parserVersion,
           input.algorithmVersion,
@@ -1810,7 +1951,7 @@ export class RepoVistaStore {
       if (!row) {
         const existing = await client.query<GuardrailExplanationRow>(
           "SELECT id, workspace_id, snapshot_id, finding_id, finding_fingerprint, rule_id, " +
-            "commit_sha, parser_version, algorithm_version, profile_fingerprint, profile_json, " +
+            "subject_key, commit_sha, parser_version, algorithm_version, profile_fingerprint, profile_json, " +
             "finding_json, answer_json, provider, model_name, prompt_version, created_at " +
             "FROM guardrail_explanations WHERE workspace_id = $1 AND snapshot_id = $2 " +
             "AND finding_fingerprint = $3 AND provider = $4 AND model_name = $5 AND prompt_version = $6",

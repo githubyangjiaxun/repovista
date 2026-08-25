@@ -5,6 +5,8 @@ const repositoryId = "01900000-0000-7000-8000-000000000001";
 const snapshotId = "01900000-0000-7000-8000-000000000002";
 const jobId = "01900000-0000-7000-8000-000000000003";
 const profileId = "01900000-0000-7000-8000-000000000004";
+const explanationId2 = "01900000-0000-7000-8000-000000000007";
+const subjectKey = `sha256:${"b".repeat(64)}`;
 
 const guardrailProfile = {
   id: profileId,
@@ -65,6 +67,7 @@ const guardrailExplanationResult = {
   reused: false,
   explanation: {
     id: jobId,
+    subjectKey,
     snapshot: {
       ...guardrailReport.snapshot,
       algorithmVersion: guardrailReport.algorithmVersion,
@@ -93,6 +96,42 @@ const guardrailExplanationResult = {
     promptVersion: "guardrail-explanation-v1",
     createdAt: "2026-08-24T00:00:00.000Z",
   },
+};
+
+const guardrailExplanationHistory = {
+  subjectKey,
+  finding: guardrailReport.findings[0],
+  explanations: [
+    {
+      id: jobId,
+      subjectKey,
+      snapshot: guardrailExplanationResult.explanation.snapshot,
+      profileFingerprint: guardrailProfile.fingerprint,
+      finding: {
+        id: guardrailReport.findings[0].id,
+        fingerprint: guardrailReport.findings[0].fingerprint,
+        ruleId: guardrailReport.findings[0].ruleId,
+        severity: guardrailReport.findings[0].severity,
+        title: guardrailReport.findings[0].title,
+        message: guardrailReport.findings[0].message,
+        path: guardrailReport.findings[0].path,
+        startLine: guardrailReport.findings[0].startLine,
+        endLine: guardrailReport.findings[0].endLine,
+      },
+      answer: {
+        status: "grounded",
+        summary: guardrailExplanationResult.explanation.answer.summary,
+        provider: "fake",
+        model: "evidence-demo-v1",
+        stepCount: 1,
+        citationCount: 1,
+        limitationCount: 0,
+      },
+      promptVersion: "guardrail-explanation-v1",
+      createdAt: "2026-08-24T00:00:00.000Z",
+    },
+  ],
+  nextCursor: "eyJjcmVhdGVkQXQiOiIyMDI2LTA4LTI0VDAwOjAwOjAwLjAwMFoifQ",
 };
 
 function jsonResponse(payload: unknown, status = 200, requestId = "request-1"): Response {
@@ -127,7 +166,7 @@ describe("RepoVistaClient", () => {
       expect.objectContaining({ method: "POST" }),
     );
     const request = fetchImplementation.mock.calls[0]?.[1] as RequestInit;
-    expect((request.headers as Headers).get("User-Agent")).toBe("RepoVista-CLI/0.9.0");
+    expect((request.headers as Headers).get("User-Agent")).toBe("RepoVista-CLI/1.0.0");
     expect(JSON.parse(String(request.body))).toEqual({
       url: "https://github.com/acme/demo",
       ref: "main",
@@ -301,6 +340,86 @@ describe("RepoVistaClient", () => {
     });
   });
 
+  it("loads explanation history and compares two verified explanations", async () => {
+    const head = {
+      ...guardrailExplanationResult.explanation,
+      id: explanationId2,
+      snapshot: {
+        ...guardrailExplanationResult.explanation.snapshot,
+        id: repositoryId,
+        commitSha: "1123456789abcdef0123456789abcdef01234567",
+      },
+      answer: {
+        ...guardrailExplanationResult.explanation.answer,
+        summary: "The fixed file remains larger than the configured threshold.",
+      },
+      createdAt: "2026-08-25T00:00:00.000Z",
+    };
+    const comparison = {
+      subjectKey,
+      changed: true,
+      base: guardrailExplanationResult.explanation,
+      head,
+      differences: {
+        provenance: {
+          snapshotId: "changed",
+          commitSha: "changed",
+          parserVersion: "same",
+          algorithmVersion: "same",
+          profileFingerprint: "same",
+          provider: "same",
+          model: "same",
+          promptVersion: "same",
+        },
+        finding: {
+          id: "same",
+          fingerprint: "same",
+          severity: "same",
+          title: "same",
+          message: "same",
+          path: "same",
+          range: "same",
+          metric: "same",
+          evidence: "same",
+        },
+        answer: {
+          status: "same",
+          summary: "changed",
+          steps: "same",
+          limitations: "same",
+          citations: "same",
+        },
+      },
+    } as const;
+    const fetchImplementation = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({ data: guardrailExplanationHistory, meta: { requestId: "history" } }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ data: comparison, meta: { requestId: "comparison" } }));
+    const client = new RepoVistaClient({
+      apiUrl: "http://localhost:4000",
+      fetch: fetchImplementation,
+    });
+
+    await expect(
+      client.listGuardrailExplanationHistory(snapshotId, guardrailReport.findings[0].id, {
+        cursor: "next-page",
+        limit: 10,
+      }),
+    ).resolves.toEqual(guardrailExplanationHistory);
+    await expect(
+      client.compareGuardrailExplanations(repositoryId, jobId, explanationId2),
+    ).resolves.toEqual(comparison);
+
+    expect(String(fetchImplementation.mock.calls[0]?.[0])).toBe(
+      `http://localhost:4000/v1/snapshots/${snapshotId}/guardrails/explanations?findingId=large_file%3Aabc&cursor=next-page&limit=10`,
+    );
+    expect(String(fetchImplementation.mock.calls[1]?.[0])).toBe(
+      `http://localhost:4000/v1/repositories/${repositoryId}/guardrails/explanations/compare?baseExplanationId=${jobId}&headExplanationId=${explanationId2}`,
+    );
+  });
+
   it("loads a guardrail baseline comparison and validates its envelope", async () => {
     const comparison = {
       algorithmVersion: "architecture-guardrails-v1",
@@ -329,7 +448,7 @@ describe("RepoVistaClient", () => {
       expect(String(input)).toBe(
         `http://localhost:4000/v1/snapshots/${repositoryId}/guardrails/compare?baseSnapshotId=${snapshotId}`,
       );
-      expect(new Headers(init?.headers).get("User-Agent")).toBe("RepoVista-CLI/0.9.0");
+      expect(new Headers(init?.headers).get("User-Agent")).toBe("RepoVista-CLI/1.0.0");
       return jsonResponse({ data: comparison, meta: { requestId: "request-compare" } });
     });
     const client = new RepoVistaClient({

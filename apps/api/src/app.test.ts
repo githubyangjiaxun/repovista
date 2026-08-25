@@ -3,7 +3,11 @@ import { CSRF_COOKIE, hashSecret, SESSION_COOKIE } from "@repovista/auth";
 import { loadConfig } from "@repovista/config";
 import type { DatabasePool, RepoVistaStore } from "@repovista/database";
 import { DomainError, PUBLIC_WORKSPACE_ID } from "@repovista/domain";
-import { BUILT_IN_GUARDRAIL_PROFILE, guardrailProfileFingerprint } from "@repovista/guardrails";
+import {
+  BUILT_IN_GUARDRAIL_PROFILE,
+  guardrailFindingSubjectKey,
+  guardrailProfileFingerprint,
+} from "@repovista/guardrails";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "./app.js";
 
@@ -349,10 +353,16 @@ function createStore(): RepoVistaStore {
     saveAnswer: vi.fn(async () => messageId),
     findGuardrailExplanation: vi.fn(async () => null),
     getGuardrailExplanation: vi.fn(async () => null),
+    listGuardrailExplanationHistory: vi.fn(async () => ({
+      explanations: [],
+      nextCursor: null,
+    })),
+    getGuardrailExplanationPair: vi.fn(async () => null),
     createGuardrailExplanation: vi.fn(async (input) => ({
       reused: false,
       explanation: {
         id: messageId,
+        subjectKey: guardrailFindingSubjectKey(input.finding),
         snapshot: {
           id: input.snapshotId,
           commitSha: input.commitSha,
@@ -1951,6 +1961,7 @@ describe("RepoVista API", () => {
     expect(finding).toBeTruthy();
     const existing = {
       id: messageId,
+      subjectKey: guardrailFindingSubjectKey(finding),
       snapshot: {
         id: snapshotId,
         commitSha: snapshot.commitSha,
@@ -2022,6 +2033,7 @@ describe("RepoVista API", () => {
     const finding = reportResponse.json().data.findings[0];
     const explanation = {
       id: messageId,
+      subjectKey: guardrailFindingSubjectKey(finding),
       snapshot: {
         id: snapshotId,
         commitSha: snapshot.commitSha,
@@ -2057,6 +2069,231 @@ describe("RepoVista API", () => {
       snapshotId,
       PUBLIC_WORKSPACE_ID,
     );
+  });
+
+  it("lists same-subject explanation history from a server-selected Finding", async () => {
+    const store = createStore();
+    const graph = await store.getSnapshotGraphData(snapshotId);
+    if (!graph) throw new Error("Expected graph fixture.");
+    const firstFile = graph.files[0];
+    if (!firstFile) throw new Error("Expected file fixture.");
+    vi.mocked(store.getSnapshotGraphData).mockResolvedValue({
+      ...graph,
+      files: [{ ...firstFile, lineCount: 900, byteSize: 120_000 }],
+    });
+    const { app } = createTestApp(store);
+    openApps.push(app);
+    const reportResponse = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/guardrails`,
+    });
+    const finding = reportResponse.json().data.findings[0];
+    expect(finding).toBeTruthy();
+    const subjectKey = guardrailFindingSubjectKey(finding);
+    vi.mocked(store.listGuardrailExplanationHistory).mockResolvedValue({
+      explanations: [
+        {
+          id: messageId,
+          subjectKey,
+          snapshot: {
+            id: snapshotId,
+            commitSha: snapshot.commitSha,
+            parserVersion: snapshot.parserVersion,
+            algorithmVersion: "architecture-guardrails-v1",
+          },
+          profileFingerprint: BUILT_IN_GUARDRAIL_PROFILE.fingerprint,
+          finding: {
+            id: finding.id,
+            fingerprint: finding.fingerprint,
+            ruleId: finding.ruleId,
+            severity: finding.severity,
+            title: finding.title,
+            message: finding.message,
+            path: finding.path,
+            startLine: finding.startLine,
+            endLine: finding.endLine,
+          },
+          answer: {
+            status: "grounded",
+            summary: "Verified history item.",
+            provider: "fake",
+            model: "evidence-demo-v1",
+            stepCount: 1,
+            citationCount: 1,
+            limitationCount: 0,
+          },
+          promptVersion: "guardrail-explanation-v1",
+          createdAt: "2026-08-25T00:00:00.000Z",
+        },
+      ],
+      nextCursor: "next-page",
+    });
+
+    const result = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/guardrails/explanations?findingId=${encodeURIComponent(finding.id)}&limit=1`,
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.json().data).toMatchObject({ subjectKey, nextCursor: "next-page" });
+    expect(result.json().data.explanations).toHaveLength(1);
+    expect(store.listGuardrailExplanationHistory).toHaveBeenCalledWith(
+      PUBLIC_WORKSPACE_ID,
+      repositoryId,
+      subjectKey,
+      { limit: 1 },
+    );
+  });
+
+  it("rejects forged or missing Finding IDs before reading explanation history", async () => {
+    const { app, store } = createTestApp();
+    openApps.push(app);
+    const result = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/guardrails/explanations?findingId=missing-finding`,
+    });
+    expect(result.statusCode).toBe(404);
+    expect(result.json().error.code).toBe("GUARDRAIL_FINDING_NOT_FOUND");
+    expect(store.listGuardrailExplanationHistory).not.toHaveBeenCalled();
+  });
+
+  it("compares two stored explanations without invoking the model", async () => {
+    const store = createStore();
+    const graph = await store.getSnapshotGraphData(snapshotId);
+    if (!graph) throw new Error("Expected graph fixture.");
+    const firstFile = graph.files[0];
+    if (!firstFile) throw new Error("Expected file fixture.");
+    vi.mocked(store.getSnapshotGraphData).mockResolvedValue({
+      ...graph,
+      files: [{ ...firstFile, lineCount: 900, byteSize: 120_000 }],
+    });
+    const { app } = createTestApp(store);
+    openApps.push(app);
+    const reportResponse = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/guardrails`,
+    });
+    const finding = reportResponse.json().data.findings[0];
+    expect(finding).toBeTruthy();
+    const subjectKey = guardrailFindingSubjectKey(finding);
+    const baseExplanationId = "01900000-0000-7000-8000-000000000020";
+    const headExplanationId = "01900000-0000-7000-8000-000000000021";
+    const base = {
+      id: baseExplanationId,
+      subjectKey,
+      snapshot: {
+        id: baseSnapshotId,
+        commitSha: baseSha,
+        parserVersion: snapshot.parserVersion,
+        algorithmVersion: "architecture-guardrails-v1",
+      },
+      profile: BUILT_IN_GUARDRAIL_PROFILE,
+      profileFingerprint: BUILT_IN_GUARDRAIL_PROFILE.fingerprint,
+      finding,
+      answer: {
+        summary: "Base verified explanation.",
+        steps: [],
+        limitations: [],
+        status: "grounded" as const,
+        citations: [],
+        provider: "fake",
+        model: "evidence-demo-v1",
+      },
+      promptVersion: "guardrail-explanation-v1",
+      createdAt: "2026-08-24T00:00:00.000Z",
+    };
+    const head = {
+      ...base,
+      id: headExplanationId,
+      snapshot: { ...base.snapshot, id: headSnapshotId, commitSha: headSha },
+      answer: { ...base.answer, summary: "Head verified explanation." },
+      createdAt: "2026-08-25T00:00:00.000Z",
+    };
+    vi.mocked(store.getGuardrailExplanationPair).mockResolvedValue({ base, head });
+
+    const result = await app.inject({
+      method: "GET",
+      url:
+        `/v1/repositories/${repositoryId}/guardrails/explanations/compare?` +
+        new URLSearchParams({ baseExplanationId, headExplanationId }).toString(),
+    });
+
+    expect(result.statusCode).toBe(200);
+    expect(result.json().data.changed).toBe(true);
+    expect(result.json().data.differences.provenance.commitSha).toBe("changed");
+    expect(result.json().data.differences.answer.summary).toBe("changed");
+    expect(store.getGuardrailExplanationPair).toHaveBeenCalledWith(
+      PUBLIC_WORKSPACE_ID,
+      repositoryId,
+      baseExplanationId,
+      headExplanationId,
+    );
+    expect(store.createGuardrailExplanation).not.toHaveBeenCalled();
+  });
+
+  it("rejects comparison for explanations with different logical Findings", async () => {
+    const store = createStore();
+    const subjectKey = `sha256:${"1".repeat(64)}`;
+    const explanation = {
+      id: "01900000-0000-7000-8000-000000000020",
+      subjectKey,
+      snapshot: {
+        id: snapshotId,
+        commitSha: snapshot.commitSha,
+        parserVersion: snapshot.parserVersion,
+        algorithmVersion: "architecture-guardrails-v1",
+      },
+      profile: BUILT_IN_GUARDRAIL_PROFILE,
+      profileFingerprint: BUILT_IN_GUARDRAIL_PROFILE.fingerprint,
+      finding: {
+        id: "large_file:test",
+        fingerprint: `sha256:${"2".repeat(64)}`,
+        ruleId: "large_file" as const,
+        severity: "warning" as const,
+        title: "Large source file",
+        message: "Large.",
+        path: "src/index.ts",
+        startLine: 1,
+        endLine: 900,
+        metric: { lines: 900, bytes: 120_000 },
+        evidence: [
+          {
+            path: "src/index.ts",
+            startLine: 1,
+            endLine: 900,
+            description: "File size and line count.",
+          },
+        ],
+      },
+      answer: {
+        summary: "Verified.",
+        steps: [],
+        limitations: [],
+        status: "grounded" as const,
+        citations: [],
+        provider: "fake",
+        model: "evidence-demo-v1",
+      },
+      promptVersion: "guardrail-explanation-v1",
+      createdAt: "2026-08-25T00:00:00.000Z",
+    };
+    vi.mocked(store.getGuardrailExplanationPair).mockResolvedValue({
+      base: explanation,
+      head: { ...explanation, id: "01900000-0000-7000-8000-000000000021" },
+    });
+    const { app } = createTestApp(store);
+    openApps.push(app);
+    const result = await app.inject({
+      method: "GET",
+      url:
+        `/v1/repositories/${repositoryId}/guardrails/explanations/compare?` +
+        new URLSearchParams({
+          baseExplanationId: explanation.id,
+          headExplanationId: "01900000-0000-7000-8000-000000000021",
+        }).toString(),
+    });
+    expect(result.statusCode).toBe(409);
+    expect(result.json().error.code).toBe("GUARDRAIL_EXPLANATION_COMPARISON_INCOMPATIBLE");
   });
 
   it("rejects a Finding ID that is not present in the selected Snapshot", async () => {

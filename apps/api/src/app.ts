@@ -137,6 +137,7 @@ export function buildApp(dependencies: AppDependencies = {}): {
                           error.code === "EXPORT_NOT_AVAILABLE" ||
                           error.code === "PR_ANALYSIS_REVISION_CONFLICT" ||
                           error.code === "GUARDRAIL_COMPARISON_INCOMPATIBLE" ||
+                          error.code === "GUARDRAIL_EXPLANATION_COMPARISON_INCOMPATIBLE" ||
                           error.code === "GUARDRAIL_EXPLANATION_EVIDENCE_UNAVAILABLE"
                         ? 409
                         : error.code === "AI_CONFIG_INVALID"

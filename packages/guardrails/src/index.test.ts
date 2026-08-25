@@ -3,8 +3,10 @@ import {
   BUILT_IN_GUARDRAIL_PROFILE,
   buildGuardrailReport,
   buildSarifReport,
+  compareGuardrailExplanations,
   compareGuardrailReports,
   DEFAULT_GUARDRAIL_THRESHOLDS,
+  guardrailFindingSubjectKey,
   guardrailProfileFingerprint,
 } from "./index.js";
 
@@ -126,6 +128,29 @@ describe("architecture guardrails", () => {
     });
     expect(first).toBe(second);
     expect(first).toMatch(/^sha256:[a-f0-9]{64}$/);
+  });
+
+  it("creates stable cross-snapshot subject keys without using snapshot fingerprints", () => {
+    const baseReport = buildGuardrailReport({
+      snapshot: { ...snapshot, id: "01900000-0000-7000-8000-000000000020" },
+      files: [file("f1", "src/main.ts", 801)],
+      symbols: [],
+      edges: [],
+    });
+    const headReport = buildGuardrailReport({
+      snapshot: { ...snapshot, id: "01900000-0000-7000-8000-000000000021" },
+      files: [file("f1", "src/main.ts", 900)],
+      symbols: [],
+      edges: [],
+    });
+    const base = baseReport.findings[0];
+    const head = headReport.findings[0];
+    expect(base?.fingerprint).not.toBe(head?.fingerprint);
+    expect(base && guardrailFindingSubjectKey(base)).toBe(head && guardrailFindingSubjectKey(head));
+    expect(base && guardrailFindingSubjectKey(base)).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(compareGuardrailReports(baseReport, headReport).findings[0]?.key).toBe(
+      base && guardrailFindingSubjectKey(base),
+    );
   });
 
   it("rejects invalid profile fingerprints and threshold overrides", () => {
@@ -290,6 +315,50 @@ describe("architecture guardrails", () => {
     expect(compareGuardrailReports(legacy, current).profile).toEqual(BUILT_IN_GUARDRAIL_PROFILE);
   });
 
+  it("frames logical Finding identity without delimiter collisions", () => {
+    const first = {
+      id: "large_symbol:first",
+      fingerprint: `sha256:${"1".repeat(64)}`,
+      ruleId: "large_symbol" as const,
+      severity: "warning" as const,
+      title: "Large symbol",
+      message: "Widget is large.",
+      path: "src/a|b.ts",
+      startLine: 2,
+      endLine: 200,
+      metric: { lines: 199, symbol: "Widget" },
+      evidence: [
+        {
+          path: "src/a|b.ts",
+          startLine: 2,
+          endLine: 200,
+          description: "Symbol source range.",
+        },
+      ],
+    };
+    const delimiterCollision = {
+      ...first,
+      id: "large_symbol:second",
+      fingerprint: `sha256:${"2".repeat(64)}`,
+      path: "src/a",
+      metric: { lines: 199, symbol: "b.ts|Widget" },
+    };
+    const sameLogicalFinding = {
+      ...first,
+      id: "large_symbol:later",
+      fingerprint: `sha256:${"3".repeat(64)}`,
+      severity: "error" as const,
+      message: "Widget is much larger in the later Snapshot.",
+      endLine: 400,
+      metric: { lines: 399, symbol: "Widget" },
+    };
+
+    expect(guardrailFindingSubjectKey(first)).not.toBe(
+      guardrailFindingSubjectKey(delimiterCollision),
+    );
+    expect(guardrailFindingSubjectKey(first)).toBe(guardrailFindingSubjectKey(sameLogicalFinding));
+  });
+
   it("keeps equivalent object key order and duplicate pairing deterministic", () => {
     const base = buildGuardrailReport({
       snapshot,
@@ -322,5 +391,59 @@ describe("architecture guardrails", () => {
     expect(comparison.overall).toBe("unchanged");
     expect(comparison.summary.unchanged).toBe(2);
     expect(compareGuardrailReports(base, reordered).findings).toEqual(comparison.findings);
+  });
+
+  it("compares verified explanation fields without assigning quality labels", () => {
+    const finding = buildGuardrailReport({
+      snapshot,
+      files: [file("f1", "src/main.ts", 801)],
+      symbols: [],
+      edges: [],
+    }).findings[0];
+    expect(finding).toBeDefined();
+    if (!finding) return;
+    const subjectKey = guardrailFindingSubjectKey(finding);
+    const base = {
+      id: "01900000-0000-7000-8000-000000000030",
+      subjectKey,
+      snapshot: {
+        id: snapshot.id,
+        commitSha: snapshot.commitSha,
+        parserVersion: snapshot.parserVersion,
+        algorithmVersion: "architecture-guardrails-v1",
+      },
+      profile: BUILT_IN_GUARDRAIL_PROFILE,
+      profileFingerprint: BUILT_IN_GUARDRAIL_PROFILE.fingerprint,
+      finding,
+      answer: {
+        summary: "Base explanation.",
+        steps: [],
+        limitations: [],
+        status: "grounded" as const,
+        citations: [],
+        provider: "fake",
+        model: "evidence-demo-v1",
+      },
+      promptVersion: "guardrail-explanation-v1",
+      createdAt: "2026-08-25T00:00:00.000Z",
+    };
+    const head = {
+      ...base,
+      id: "01900000-0000-7000-8000-000000000031",
+      snapshot: {
+        ...base.snapshot,
+        id: "01900000-0000-7000-8000-000000000032",
+        commitSha: "1111111111111111111111111111111111111111",
+      },
+      answer: { ...base.answer, summary: "Head explanation." },
+      createdAt: "2026-08-26T00:00:00.000Z",
+    };
+    const result = compareGuardrailExplanations(base, head);
+    expect(result.changed).toBe(true);
+    expect(result.differences.provenance.commitSha).toBe("changed");
+    expect(result.differences.finding.severity).toBe("same");
+    expect(result.differences.answer.summary).toBe("changed");
+    expect(JSON.stringify(result)).not.toContain("improved");
+    expect(JSON.stringify(result)).not.toContain("regressed");
   });
 });

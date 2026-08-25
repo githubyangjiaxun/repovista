@@ -3,6 +3,8 @@ import type {
   GuardrailComparison,
   GuardrailComparisonStatus,
   GuardrailEvidence,
+  GuardrailExplanation,
+  GuardrailExplanationComparison,
   GuardrailFinding,
   GuardrailProfile,
   GuardrailReport,
@@ -532,7 +534,7 @@ export interface SarifLog {
   runs: Array<Record<string, unknown>>;
 }
 
-export function buildSarifReport(report: GuardrailReport, toolVersion = "0.9.0"): SarifLog {
+export function buildSarifReport(report: GuardrailReport, toolVersion = "1.0.0"): SarifLog {
   const ruleIds = [...new Set(report.findings.map((finding) => finding.ruleId))].sort();
   const rules = ruleIds.map((id) => ({ id, name: id.replaceAll("_", " ") }));
   return {
@@ -598,20 +600,29 @@ function stableSerialize(value: unknown): string {
     .join(",")}}`;
 }
 
-function comparisonKey(item: GuardrailFinding): string {
+function findingSubjectIdentity(item: GuardrailFinding): string {
   const metric = item.metric;
   switch (item.ruleId) {
     case "dependency_cycle":
-      return `${item.ruleId}|${String(metric.packages ?? item.message)}`;
+      return JSON.stringify([item.ruleId, String(metric.packages ?? item.message)]);
     case "large_file":
     case "parse_failure":
-      return `${item.ruleId}|${item.path}`;
+      return JSON.stringify([item.ruleId, item.path]);
     case "large_symbol":
     case "high_fan_in":
-      return `${item.ruleId}|${item.path}|${String(metric.symbol ?? item.message)}`;
+      return JSON.stringify([item.ruleId, item.path, String(metric.symbol ?? item.message)]);
     case "unresolved_import":
-      return `${item.ruleId}|${item.path}|${item.startLine}|${String(metric.target ?? item.message)}`;
+      return JSON.stringify([
+        item.ruleId,
+        item.path,
+        String(item.startLine),
+        String(metric.target ?? item.message),
+      ]);
   }
+}
+
+export function guardrailFindingSubjectKey(item: GuardrailFinding): string {
+  return `sha256:${sha(findingSubjectIdentity(item))}`;
 }
 
 function findingSortKey(item: GuardrailFinding): string {
@@ -650,7 +661,7 @@ function pairFindings(
   const groupedBase = new Map<string, GuardrailFinding[]>();
   const groupedHead = new Map<string, GuardrailFinding[]>();
   for (const item of base) {
-    const key = comparisonKey(item);
+    const key = findingSubjectIdentity(item);
     groupedBase.set(
       key,
       [...(groupedBase.get(key) ?? []), item].sort((a, b) =>
@@ -659,7 +670,7 @@ function pairFindings(
     );
   }
   for (const item of head) {
-    const key = comparisonKey(item);
+    const key = findingSubjectIdentity(item);
     groupedHead.set(
       key,
       [...(groupedHead.get(key) ?? []), item].sort((a, b) =>
@@ -680,7 +691,15 @@ function pairFindings(
     const right = groupedHead.get(key) ?? [];
     const length = Math.max(left.length, right.length);
     for (let index = 0; index < length; index += 1) {
-      pairs.push({ base: left[index] ?? null, head: right[index] ?? null, key });
+      const baseFinding = left[index] ?? null;
+      const headFinding = right[index] ?? null;
+      const subject = baseFinding ?? headFinding;
+      if (!subject) continue;
+      pairs.push({
+        base: baseFinding,
+        head: headFinding,
+        key: guardrailFindingSubjectKey(subject),
+      });
     }
   }
   return pairs;
@@ -758,5 +777,66 @@ export function compareGuardrailReports(
     overall,
     summary,
     findings,
+  };
+}
+
+function difference(left: unknown, right: unknown): "same" | "changed" {
+  return stableSerialize(left) === stableSerialize(right) ? "same" : "changed";
+}
+
+export function compareGuardrailExplanations(
+  base: GuardrailExplanation,
+  head: GuardrailExplanation,
+): GuardrailExplanationComparison {
+  const baseSubjectKey = guardrailFindingSubjectKey(base.finding);
+  const headSubjectKey = guardrailFindingSubjectKey(head.finding);
+  if (
+    base.subjectKey !== baseSubjectKey ||
+    head.subjectKey !== headSubjectKey ||
+    base.subjectKey !== head.subjectKey
+  ) {
+    throw new Error("Guardrail explanations describe different logical findings.");
+  }
+  const differences: GuardrailExplanationComparison["differences"] = {
+    provenance: {
+      snapshotId: difference(base.snapshot.id, head.snapshot.id),
+      commitSha: difference(base.snapshot.commitSha, head.snapshot.commitSha),
+      parserVersion: difference(base.snapshot.parserVersion, head.snapshot.parserVersion),
+      algorithmVersion: difference(base.snapshot.algorithmVersion, head.snapshot.algorithmVersion),
+      profileFingerprint: difference(base.profileFingerprint, head.profileFingerprint),
+      provider: difference(base.answer.provider, head.answer.provider),
+      model: difference(base.answer.model, head.answer.model),
+      promptVersion: difference(base.promptVersion, head.promptVersion),
+    },
+    finding: {
+      id: difference(base.finding.id, head.finding.id),
+      fingerprint: difference(base.finding.fingerprint, head.finding.fingerprint),
+      severity: difference(base.finding.severity, head.finding.severity),
+      title: difference(base.finding.title, head.finding.title),
+      message: difference(base.finding.message, head.finding.message),
+      path: difference(base.finding.path, head.finding.path),
+      range: difference(
+        [base.finding.startLine, base.finding.endLine],
+        [head.finding.startLine, head.finding.endLine],
+      ),
+      metric: difference(base.finding.metric, head.finding.metric),
+      evidence: difference(base.finding.evidence, head.finding.evidence),
+    },
+    answer: {
+      status: difference(base.answer.status, head.answer.status),
+      summary: difference(base.answer.summary, head.answer.summary),
+      steps: difference(base.answer.steps, head.answer.steps),
+      limitations: difference(base.answer.limitations, head.answer.limitations),
+      citations: difference(base.answer.citations, head.answer.citations),
+    },
+  };
+  return {
+    subjectKey: base.subjectKey,
+    changed: Object.values(differences).some((group) =>
+      Object.values(group).some((value) => value === "changed"),
+    ),
+    base,
+    head,
+    differences,
   };
 }

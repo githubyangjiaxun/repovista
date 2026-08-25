@@ -7,6 +7,9 @@ import type {
   GraphResponse,
   GuardrailComparison,
   GuardrailExplanation,
+  GuardrailExplanationComparison,
+  GuardrailExplanationHistory,
+  GuardrailExplanationSummary,
   GuardrailReport,
   Job,
   PullRequestAnalysis,
@@ -273,7 +276,12 @@ export interface SnapshotFilePage {
 }
 
 export type AskResult = ContractAskResult;
-export type { GuardrailExplanation };
+export type {
+  GuardrailExplanation,
+  GuardrailExplanationComparison,
+  GuardrailExplanationHistory,
+  GuardrailExplanationSummary,
+};
 
 export interface GuardrailExplanationResult {
   explanation: GuardrailExplanation;

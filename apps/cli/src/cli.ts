@@ -1,5 +1,11 @@
 import { chmod, writeFile } from "node:fs/promises";
-import type { AskResult, GuardrailComparison, GuardrailProfile } from "@repovista/contracts";
+import type {
+  AskResult,
+  GuardrailComparison,
+  GuardrailExplanationComparison,
+  GuardrailExplanationHistory,
+  GuardrailProfile,
+} from "@repovista/contracts";
 import {
   createGuardrailProfileRequestSchema,
   createRepositoryRequestSchema,
@@ -116,6 +122,8 @@ const commandHelp: Record<string, string> = {
     "Usage: repovista guardrails <snapshot-id> [options]",
     "       repovista guardrails compare <base-snapshot-id> <head-snapshot-id> [options]",
     "       repovista guardrails explain <snapshot-id> <finding-id> [options]",
+    "       repovista guardrails explanations history <snapshot-id> <finding-id> [options]",
+    "       repovista guardrails explanations compare <repository-id> <base-id> <head-id> [options]",
     "       repovista guardrails profiles [--json]",
     "       repovista guardrails profile create <key> --name <name> [options]",
     "       repovista guardrails profile assign <repository-id> <profile-id|default>",
@@ -125,6 +133,8 @@ const commandHelp: Record<string, string> = {
     "  --json                  Emit the complete Guardrails JSON report",
     "  --provider <name>       fake, ollama, or openai-compatible (for explain)",
     "  --model <name>          Override the configured explanation model",
+    "  --limit <n>             Explanation history page size from 1 to 50 (default: 20)",
+    "  --cursor <value>        Continue explanation history from a server cursor",
     "",
     "Profile create options (unspecified thresholds use the built-in default):",
     "  --name <name>                 Human-readable profile name (required)",
@@ -515,6 +525,60 @@ function formatGuardrailExplanation(result: {
   return lines.join("\n");
 }
 
+function formatGuardrailExplanationHistory(history: GuardrailExplanationHistory): string {
+  const lines = [
+    "Verified explanation history",
+    `Subject: ${history.subjectKey}`,
+    `Finding: ${history.finding.id} [${history.finding.severity}] ${history.finding.ruleId}`,
+    `Location: ${history.finding.path}:${history.finding.startLine}-${history.finding.endLine}`,
+  ];
+  if (history.explanations.length === 0) {
+    lines.push("", "No saved explanations for this logical Finding.");
+  } else {
+    lines.push("", "Saved explanations:");
+    for (const explanation of history.explanations) {
+      lines.push(
+        `- ${explanation.id}`,
+        `  Snapshot: ${explanation.snapshot.id} · Commit: ${explanation.snapshot.commitSha.slice(0, 12)}`,
+        `  Status: ${explanation.answer.status} · Provider: ${explanation.answer.provider}/${explanation.answer.model}`,
+        `  Prompt: ${explanation.promptVersion} · Profile: ${explanation.profileFingerprint}`,
+        `  Evidence: ${explanation.answer.citationCount} citation(s) · Created: ${explanation.createdAt}`,
+        `  ${explanation.answer.summary}`,
+      );
+    }
+  }
+  lines.push("", `Next cursor: ${history.nextCursor ?? "none"}`);
+  return lines.join("\n");
+}
+
+function formatGuardrailExplanationComparison(comparison: GuardrailExplanationComparison): string {
+  const lines = [
+    `Verified explanation comparison: ${comparison.changed ? "changed" : "same"}`,
+    `Subject: ${comparison.subjectKey}`,
+    `Base: ${comparison.base.id} · Snapshot: ${comparison.base.snapshot.id} · Commit: ${comparison.base.snapshot.commitSha.slice(0, 12)}`,
+    `Head: ${comparison.head.id} · Snapshot: ${comparison.head.snapshot.id} · Commit: ${comparison.head.snapshot.commitSha.slice(0, 12)}`,
+    "",
+    "Structural differences:",
+  ];
+  for (const [groupName, fields] of Object.entries(comparison.differences)) {
+    lines.push(`${groupName}:`);
+    for (const [fieldName, status] of Object.entries(fields)) {
+      lines.push(`- ${fieldName}: ${status}`);
+    }
+  }
+  lines.push(
+    "",
+    `Base answer: ${comparison.base.answer.status} · ${comparison.base.answer.provider}/${comparison.base.answer.model}`,
+    comparison.base.answer.summary,
+    "",
+    `Head answer: ${comparison.head.answer.status} · ${comparison.head.answer.provider}/${comparison.head.answer.model}`,
+    comparison.head.answer.summary,
+    "",
+    "This is a deterministic structural comparison; it does not rank explanation quality.",
+  );
+  return lines.join("\n");
+}
+
 function writeJson(output: CliOutput, value: unknown): void {
   output.stdout(JSON.stringify(value, null, 2));
 }
@@ -733,12 +797,14 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
       search: { limit: "string", mode: "string" },
       embed: { poll_interval: "string", timeout: "string", wait: "boolean" },
       guardrails: {
+        cursor: "string",
         cycle_max_length: "string",
         description: "string",
         high_fan_in: "string",
         large_file_bytes: "string",
         large_file_lines: "string",
         large_symbol_lines: "string",
+        limit: "string",
         name: "string",
         model: "string",
         provider: "string",
@@ -1105,6 +1171,50 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     }
 
     if (command === "guardrails") {
+      if (parsed.positionals[0] === "explanations") {
+        const action = parsed.positionals[1];
+        if (action === "history") {
+          if (parsed.positionals.length !== 4) {
+            throw new UsageError(
+              "guardrails explanations history requires a snapshot ID and finding ID.",
+            );
+          }
+          const snapshotId = requireId(parsed.positionals[2], "Snapshot ID");
+          const findingId = parsed.positionals[3];
+          if (!findingId) throw new UsageError("Finding ID is required.");
+          const history = await client.listGuardrailExplanationHistory(snapshotId, findingId, {
+            limit: positiveInteger(optionalString(parsed.options.limit) ?? "20", "--limit", 50),
+            ...(optionalString(parsed.options.cursor)
+              ? { cursor: optionalString(parsed.options.cursor) }
+              : {}),
+          });
+          if (json) writeJson(output, history);
+          else output.stdout(formatGuardrailExplanationHistory(history));
+          return 0;
+        }
+        if (action === "compare") {
+          if (parsed.positionals.length !== 5) {
+            throw new UsageError(
+              "guardrails explanations compare requires a repository ID and two explanation IDs.",
+            );
+          }
+          const repositoryId = requireId(parsed.positionals[2], "Repository ID");
+          const baseExplanationId = requireId(parsed.positionals[3], "Base explanation ID");
+          const headExplanationId = requireId(parsed.positionals[4], "Head explanation ID");
+          if (baseExplanationId === headExplanationId) {
+            throw new UsageError("Base and head explanation IDs must be different.");
+          }
+          const comparison = await client.compareGuardrailExplanations(
+            repositoryId,
+            baseExplanationId,
+            headExplanationId,
+          );
+          if (json) writeJson(output, comparison);
+          else output.stdout(formatGuardrailExplanationComparison(comparison));
+          return 0;
+        }
+        throw new UsageError("guardrails explanations requires history or compare.");
+      }
       if (parsed.positionals[0] === "profiles") {
         if (parsed.positionals.length !== 1) {
           throw new UsageError("guardrails profiles accepts no additional arguments.");

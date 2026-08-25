@@ -971,8 +971,11 @@ export type CreateGuardrailExplanationRequest = z.infer<
   typeof createGuardrailExplanationRequestSchema
 >;
 
+export const guardrailExplanationSubjectKeySchema = z.string().regex(/^sha256:[a-f0-9]{64}$/);
+
 export const guardrailExplanationSchema = z.object({
   id: idSchema,
+  subjectKey: guardrailExplanationSubjectKeySchema,
   snapshot: z.object({
     id: idSchema,
     commitSha: commitShaSchema,
@@ -995,6 +998,90 @@ export const createGuardrailExplanationResponseSchema = z.object({
 export type CreateGuardrailExplanationResponse = z.infer<
   typeof createGuardrailExplanationResponseSchema
 >;
+
+export const guardrailExplanationSummarySchema = z.object({
+  id: idSchema,
+  subjectKey: guardrailExplanationSubjectKeySchema,
+  snapshot: z.object({
+    id: idSchema,
+    commitSha: commitShaSchema,
+    parserVersion: z.string().min(1),
+    algorithmVersion: z.string().min(1),
+  }),
+  profileFingerprint: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  finding: z.object({
+    id: z.string().min(1),
+    fingerprint: z.string().min(1),
+    ruleId: guardrailRuleIdSchema,
+    severity: guardrailSeveritySchema,
+    title: z.string().min(1),
+    message: z.string().min(1),
+    path: z.string().min(1),
+    startLine: z.number().int().positive(),
+    endLine: z.number().int().positive(),
+  }),
+  answer: z.object({
+    status: answerStatusSchema,
+    summary: z.string(),
+    provider: z.string(),
+    model: z.string(),
+    stepCount: z.number().int().nonnegative(),
+    citationCount: z.number().int().nonnegative(),
+    limitationCount: z.number().int().nonnegative(),
+  }),
+  promptVersion: z.string().min(1).max(100),
+  createdAt: z.iso.datetime(),
+});
+export type GuardrailExplanationSummary = z.infer<typeof guardrailExplanationSummarySchema>;
+
+export const guardrailExplanationHistorySchema = z.object({
+  subjectKey: guardrailExplanationSubjectKeySchema,
+  finding: guardrailFindingSchema,
+  explanations: z.array(guardrailExplanationSummarySchema),
+  nextCursor: z.string().nullable(),
+});
+export type GuardrailExplanationHistory = z.infer<typeof guardrailExplanationHistorySchema>;
+
+export const guardrailExplanationDifferenceSchema = z.enum(["same", "changed"]);
+export type GuardrailExplanationDifference = z.infer<typeof guardrailExplanationDifferenceSchema>;
+
+export const guardrailExplanationComparisonSchema = z.object({
+  subjectKey: guardrailExplanationSubjectKeySchema,
+  changed: z.boolean(),
+  base: guardrailExplanationSchema,
+  head: guardrailExplanationSchema,
+  differences: z.object({
+    provenance: z.object({
+      snapshotId: guardrailExplanationDifferenceSchema,
+      commitSha: guardrailExplanationDifferenceSchema,
+      parserVersion: guardrailExplanationDifferenceSchema,
+      algorithmVersion: guardrailExplanationDifferenceSchema,
+      profileFingerprint: guardrailExplanationDifferenceSchema,
+      provider: guardrailExplanationDifferenceSchema,
+      model: guardrailExplanationDifferenceSchema,
+      promptVersion: guardrailExplanationDifferenceSchema,
+    }),
+    finding: z.object({
+      id: guardrailExplanationDifferenceSchema,
+      fingerprint: guardrailExplanationDifferenceSchema,
+      severity: guardrailExplanationDifferenceSchema,
+      title: guardrailExplanationDifferenceSchema,
+      message: guardrailExplanationDifferenceSchema,
+      path: guardrailExplanationDifferenceSchema,
+      range: guardrailExplanationDifferenceSchema,
+      metric: guardrailExplanationDifferenceSchema,
+      evidence: guardrailExplanationDifferenceSchema,
+    }),
+    answer: z.object({
+      status: guardrailExplanationDifferenceSchema,
+      summary: guardrailExplanationDifferenceSchema,
+      steps: guardrailExplanationDifferenceSchema,
+      limitations: guardrailExplanationDifferenceSchema,
+      citations: guardrailExplanationDifferenceSchema,
+    }),
+  }),
+});
+export type GuardrailExplanationComparison = z.infer<typeof guardrailExplanationComparisonSchema>;
 
 export const guardrailComparisonStatusSchema = z.enum([
   "added",

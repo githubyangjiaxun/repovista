@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import "@testing-library/jest-dom/vitest";
-import type { AuthSession, Snapshot } from "@repovista/contracts";
+import type { AuthSession, GuardrailFinding, Snapshot } from "@repovista/contracts";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setApiCsrfToken } from "@/lib/api";
@@ -13,11 +13,20 @@ vi.mock("@/components/auth-provider", () => ({ useOptionalAuth: () => auth.curre
 const repositoryId = "01900000-0000-7000-8000-000000000001";
 const snapshotId = "01900000-0000-7000-8000-000000000002";
 const profileId = "01900000-0000-7000-8000-000000000003";
+const explanationSubjectKey = `sha256:${"c".repeat(64)}`;
+const baseExplanationId = "01900000-0000-7000-8000-000000000030";
+const headExplanationId = "01900000-0000-7000-8000-000000000031";
+const olderExplanationId = "01900000-0000-7000-8000-000000000032";
 
 function envelope(data: unknown): Response {
   return new Response(JSON.stringify({ data, meta: { requestId: "request-1" } }), {
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function fixtureValue<T>(value: T | null | undefined, message: string): T {
+  if (value === null || value === undefined) throw new Error(message);
+  return value;
 }
 
 const defaultProfile = {
@@ -96,6 +105,10 @@ const report = {
     },
   ],
 };
+const reportFinding = fixtureValue(
+  report.findings[0] as GuardrailFinding | undefined,
+  "Expected a Guardrail Finding fixture.",
+);
 
 const baselineSnapshot: Snapshot = {
   id: "01900000-0000-7000-8000-000000000008",
@@ -119,6 +132,10 @@ const baselineSnapshot: Snapshot = {
   readyAt: "2026-08-22T00:00:01.000Z",
   failure: null,
 };
+const baselineCommit = fixtureValue(
+  baselineSnapshot.commitSha,
+  "Expected a baseline Commit fixture.",
+);
 
 const comparison = {
   algorithmVersion: "architecture-guardrails-v1",
@@ -181,6 +198,138 @@ const comparison = {
       head: null,
     },
   ],
+};
+
+function explanationFixture(input: {
+  id: string;
+  snapshot: typeof report.snapshot;
+  summary: string;
+  citationPath: string;
+  createdAt: string;
+}): import("@repovista/contracts").GuardrailExplanation {
+  return {
+    id: input.id,
+    subjectKey: explanationSubjectKey,
+    snapshot: { ...input.snapshot, algorithmVersion: report.algorithmVersion },
+    profile: strictProfile,
+    profileFingerprint: strictProfile.fingerprint,
+    finding: reportFinding,
+    answer: {
+      summary: input.summary,
+      steps: [{ text: "Inspect the fixed import edge.", evidenceIds: ["guardrail-evidence:1"] }],
+      limitations: ["The comparison does not rank model quality."],
+      status: "grounded" as const,
+      citations: [
+        {
+          evidenceId: "guardrail-evidence:1",
+          path: input.citationPath,
+          symbol: null,
+          startLine: 3,
+          endLine: 3,
+          quote: "import '../b';",
+        },
+      ],
+      provider: "fake",
+      model: "evidence-demo-v1",
+    },
+    promptVersion: "guardrail-explanation-v1",
+    createdAt: input.createdAt,
+  };
+}
+
+const baseExplanation = explanationFixture({
+  id: baseExplanationId,
+  snapshot: {
+    ...report.snapshot,
+    id: baselineSnapshot.id,
+    commitSha: baselineCommit,
+  },
+  summary: "The earlier fixed import evidence shows the package cycle.",
+  citationPath: "src/a/index.ts",
+  createdAt: "2026-08-23T00:00:00.000Z",
+});
+
+const headExplanation = explanationFixture({
+  id: headExplanationId,
+  snapshot: report.snapshot,
+  summary: "The current fixed import evidence still shows the package cycle.",
+  citationPath: "src/b/index.ts",
+  createdAt: "2026-08-24T00:00:00.000Z",
+});
+
+function explanationSummary(explanation: ReturnType<typeof explanationFixture>) {
+  return {
+    id: explanation.id,
+    subjectKey: explanation.subjectKey,
+    snapshot: explanation.snapshot,
+    profileFingerprint: explanation.profileFingerprint,
+    finding: {
+      id: explanation.finding.id,
+      fingerprint: explanation.finding.fingerprint,
+      ruleId: explanation.finding.ruleId,
+      severity: explanation.finding.severity,
+      title: explanation.finding.title,
+      message: explanation.finding.message,
+      path: explanation.finding.path,
+      startLine: explanation.finding.startLine,
+      endLine: explanation.finding.endLine,
+    },
+    answer: {
+      status: explanation.answer.status,
+      summary: explanation.answer.summary,
+      provider: explanation.answer.provider,
+      model: explanation.answer.model,
+      stepCount: explanation.answer.steps.length,
+      citationCount: explanation.answer.citations.length,
+      limitationCount: explanation.answer.limitations.length,
+    },
+    promptVersion: explanation.promptVersion,
+    createdAt: explanation.createdAt,
+  };
+}
+
+const explanationHistory = {
+  subjectKey: explanationSubjectKey,
+  finding: report.findings[0],
+  explanations: [explanationSummary(headExplanation), explanationSummary(baseExplanation)],
+  nextCursor: "next-history-page",
+};
+
+const explanationComparison = {
+  subjectKey: explanationSubjectKey,
+  changed: true,
+  base: baseExplanation,
+  head: headExplanation,
+  differences: {
+    provenance: {
+      snapshotId: "changed" as const,
+      commitSha: "changed" as const,
+      parserVersion: "same" as const,
+      algorithmVersion: "same" as const,
+      profileFingerprint: "same" as const,
+      provider: "same" as const,
+      model: "same" as const,
+      promptVersion: "same" as const,
+    },
+    finding: {
+      id: "same" as const,
+      fingerprint: "same" as const,
+      severity: "same" as const,
+      title: "same" as const,
+      message: "same" as const,
+      path: "same" as const,
+      range: "same" as const,
+      metric: "same" as const,
+      evidence: "same" as const,
+    },
+    answer: {
+      status: "same" as const,
+      summary: "changed" as const,
+      steps: "same" as const,
+      limitations: "same" as const,
+      citations: "changed" as const,
+    },
+  },
 };
 
 function deferred<T>() {
@@ -270,6 +419,7 @@ describe("GuardrailsPanel", () => {
   it("generates a verified explanation and opens only returned fixed citations", async () => {
     const explanation = {
       id: "01900000-0000-7000-8000-000000000020",
+      subjectKey: explanationSubjectKey,
       snapshot: { ...report.snapshot, algorithmVersion: report.algorithmVersion },
       profile: strictProfile,
       profileFingerprint: strictProfile.fingerprint,
@@ -333,6 +483,7 @@ describe("GuardrailsPanel", () => {
   it("renders refused status and limitations without inventing a citation", async () => {
     const explanation = {
       id: "01900000-0000-7000-8000-000000000021",
+      subjectKey: explanationSubjectKey,
       snapshot: { ...report.snapshot, algorithmVersion: report.algorithmVersion },
       profile: strictProfile,
       profileFingerprint: strictProfile.fingerprint,
@@ -486,6 +637,240 @@ describe("GuardrailsPanel", () => {
       screen.queryByRole("button", { name: "Apply to future Snapshots" }),
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Explain .* with AI/ })).not.toBeInTheDocument();
+  });
+
+  it("loads explanation history on demand and appends only the server cursor page", async () => {
+    const olderExplanation = explanationFixture({
+      id: olderExplanationId,
+      snapshot: {
+        ...report.snapshot,
+        id: "01900000-0000-7000-8000-000000000033",
+        commitSha: "3333333333333333333333333333333333333333",
+      },
+      summary: "An older verified explanation for the same logical Finding.",
+      citationPath: "src/older/index.ts",
+      createdAt: "2026-08-22T00:00:00.000Z",
+    });
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      const policy = policyResponse(url);
+      if (policy) return policy;
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails`)) return envelope(report);
+      if (url.includes(`/v1/snapshots/${snapshotId}/guardrails/explanations?`)) {
+        if (url.includes("cursor=next-history-page")) {
+          return envelope({
+            ...explanationHistory,
+            explanations: [explanationSummary(olderExplanation)],
+            nextCursor: null,
+          });
+        }
+        return envelope(explanationHistory);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchImplementation);
+    render(
+      <GuardrailsPanel
+        onOpenSource={vi.fn()}
+        repositoryId={repositoryId}
+        snapshotId={snapshotId}
+      />,
+    );
+
+    expect(await screen.findByText("Package dependency cycle")).toBeInTheDocument();
+    expect(
+      fetchImplementation.mock.calls.some(([input]) =>
+        String(input).includes("/guardrails/explanations?"),
+      ),
+    ).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Explanation history" }));
+
+    expect(await screen.findByText(headExplanation.answer.summary)).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "Base explanation for Package dependency cycle" }),
+    ).toHaveValue(baseExplanationId);
+    expect(
+      screen.getByRole("combobox", { name: "Head explanation for Package dependency cycle" }),
+    ).toHaveValue(headExplanationId);
+
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    expect(await screen.findByText(olderExplanation.answer.summary)).toBeInTheDocument();
+    expect(
+      fetchImplementation.mock.calls.some(([input]) =>
+        String(input).includes("cursor=next-history-page"),
+      ),
+    ).toBe(true);
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+  });
+
+  it("lets Viewers read an empty explanation history without exposing AI generation", async () => {
+    auth.current.session = authenticatedSession("viewer");
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      const policy = policyResponse(url);
+      if (policy) return policy;
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails`)) return envelope(report);
+      if (url.includes(`/v1/snapshots/${snapshotId}/guardrails/explanations?`)) {
+        return envelope({ ...explanationHistory, explanations: [], nextCursor: null });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchImplementation);
+    render(
+      <GuardrailsPanel
+        onOpenSource={vi.fn()}
+        repositoryId={repositoryId}
+        snapshotId={snapshotId}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Explanation history" }));
+    expect(
+      await screen.findByText("No saved explanations exist for this logical Finding yet."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Explain .* with AI/ })).not.toBeInTheDocument();
+  });
+
+  it("compares saved explanations and opens Base and Head citations on fixed snapshots", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      const policy = policyResponse(url);
+      if (policy) return policy;
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails`)) return envelope(report);
+      if (url.includes(`/v1/snapshots/${snapshotId}/guardrails/explanations?`)) {
+        return envelope({ ...explanationHistory, nextCursor: null });
+      }
+      if (url.includes(`/v1/repositories/${repositoryId}/guardrails/explanations/compare?`)) {
+        expect(url).toContain(`baseExplanationId=${baseExplanationId}`);
+        expect(url).toContain(`headExplanationId=${headExplanationId}`);
+        return envelope(explanationComparison);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchImplementation);
+    const onOpenSnapshotSource = vi.fn();
+    render(
+      <GuardrailsPanel
+        onOpenSnapshotSource={onOpenSnapshotSource}
+        onOpenSource={vi.fn()}
+        repositoryId={repositoryId}
+        snapshotId={snapshotId}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Explanation history" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Compare saved explanations" }));
+    expect(await screen.findByText("Structural comparison · changed")).toBeInTheDocument();
+    expect(screen.getByText("summary: changed")).toBeInTheDocument();
+    expect(screen.getByText(/does not decide which model answer is better/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Base · src\/a\/index\.ts:3-3/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Head · src\/b\/index\.ts:3-3/ }));
+    expect(onOpenSnapshotSource).toHaveBeenNthCalledWith(
+      1,
+      baselineSnapshot.id,
+      "src/a/index.ts",
+      3,
+      3,
+    );
+    expect(onOpenSnapshotSource).toHaveBeenNthCalledWith(2, snapshotId, "src/b/index.ts", 3, 3);
+  });
+
+  it("shows history request IDs while preserving the deterministic Finding", async () => {
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      const policy = policyResponse(url);
+      if (policy) return policy;
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails`)) return envelope(report);
+      if (url.includes(`/v1/snapshots/${snapshotId}/guardrails/explanations?`)) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: "PAGINATION_CURSOR_INVALID",
+              message: "The explanation history cursor is invalid.",
+              requestId: "history-request-17",
+              retryable: false,
+            },
+          }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchImplementation);
+    render(
+      <GuardrailsPanel
+        onOpenSource={vi.fn()}
+        repositoryId={repositoryId}
+        snapshotId={snapshotId}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Explanation history" }));
+    expect(
+      await screen.findByText(
+        "The explanation history cursor is invalid. Request ID: history-request-17",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Package dependency cycle")).toBeInTheDocument();
+  });
+
+  it("ignores an explanation history response after the Snapshot changes", async () => {
+    const nextSnapshotId = "01900000-0000-7000-8000-000000000099";
+    const nextReport = {
+      ...report,
+      snapshot: {
+        ...report.snapshot,
+        id: nextSnapshotId,
+        commitSha: "9999999999999999999999999999999999999999",
+      },
+      findings: [{ ...reportFinding, title: "New snapshot dependency cycle" }],
+    };
+    const oldHistory = deferred<Response>();
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      const policy = policyResponse(url);
+      if (policy) return policy;
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails`)) return envelope(report);
+      if (url.endsWith(`/v1/snapshots/${nextSnapshotId}/guardrails`)) {
+        return envelope(nextReport);
+      }
+      if (url.includes(`/v1/snapshots/${snapshotId}/guardrails/explanations?`)) {
+        return oldHistory.promise;
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchImplementation);
+    const view = render(
+      <GuardrailsPanel
+        onOpenSource={vi.fn()}
+        repositoryId={repositoryId}
+        snapshotId={snapshotId}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Explanation history" }));
+    await waitFor(() =>
+      expect(
+        fetchImplementation.mock.calls.some(([input]) =>
+          String(input).includes(`/v1/snapshots/${snapshotId}/guardrails/explanations?`),
+        ),
+      ).toBe(true),
+    );
+    view.rerender(
+      <GuardrailsPanel
+        onOpenSource={vi.fn()}
+        repositoryId={repositoryId}
+        snapshotId={nextSnapshotId}
+      />,
+    );
+    expect(await screen.findByText("New snapshot dependency cycle")).toBeInTheDocument();
+
+    await act(async () => oldHistory.resolve(envelope(explanationHistory)));
+    await waitFor(() =>
+      expect(screen.queryByText(headExplanation.answer.summary)).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByLabelText(/Explanation history for/)).not.toBeInTheDocument();
   });
 
   it("downloads SARIF with credentials", async () => {

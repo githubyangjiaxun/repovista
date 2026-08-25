@@ -39,8 +39,10 @@ import {
   BUILT_IN_GUARDRAIL_PROFILE_ID,
   buildGuardrailReport,
   buildSarifReport,
+  compareGuardrailExplanations,
   compareGuardrailReports,
   GUARDRAILS_ALGORITHM_VERSION,
+  guardrailFindingSubjectKey,
   guardrailProfileFingerprint,
 } from "@repovista/guardrails";
 import { IMPACT_ALGORITHM_VERSION } from "@repovista/impact";
@@ -57,6 +59,23 @@ const guardrailExplanationParamsSchema = z.object({
   snapshotId: idSchema,
   explanationId: idSchema,
 });
+const guardrailExplanationHistoryQuerySchema = z
+  .object({
+    findingId: z.string().trim().min(1).max(300),
+    cursor: z.string().min(1).max(1_000).optional(),
+    limit: z.coerce.number().int().min(1).max(50).default(20),
+  })
+  .strict();
+const guardrailExplanationCompareQuerySchema = z
+  .object({
+    baseExplanationId: idSchema,
+    headExplanationId: idSchema,
+  })
+  .strict()
+  .refine((value) => value.baseExplanationId !== value.headExplanationId, {
+    message: "Base and head explanations must be different.",
+    path: ["headExplanationId"],
+  });
 const guardrailProfileParamsSchema = z.object({ profileId: idSchema });
 const guardrailCompareQuerySchema = z.object({ baseSnapshotId: idSchema });
 const snapshotSymbolParamsSchema = z.object({ snapshotId: idSchema, symbolId: idSchema });
@@ -213,7 +232,7 @@ async function requireSnapshotAccess(
   request: FastifyRequest,
   store: RepoVistaStore,
   snapshotId: string,
-): Promise<Awaited<ReturnType<RepoVistaStore["getSnapshotAccess"]>>> {
+): Promise<NonNullable<Awaited<ReturnType<RepoVistaStore["getSnapshotAccess"]>>>> {
   const principal = await requestPrincipal(request, store);
   const access =
     typeof store.getSnapshotAccess === "function"
@@ -229,7 +248,7 @@ async function requireSnapshotAccess(
         : null;
   if (!access)
     throw new DomainError("SNAPSHOT_NOT_FOUND", "The requested snapshot does not exist.");
-  return access;
+  return access as NonNullable<Awaited<ReturnType<RepoVistaStore["getSnapshotAccess"]>>>;
 }
 
 function requireWritePrincipal(principal: Principal): void {
@@ -1043,6 +1062,46 @@ export function registerRoutes(
     return response(request, await store.listSnapshots(repositoryId));
   });
 
+  app.get(
+    "/v1/repositories/:repositoryId/guardrails/explanations/compare",
+    async (request, reply) => {
+      const { repositoryId } = parseInput(repositoryParamsSchema, request.params);
+      const query = parseInput(guardrailExplanationCompareQuerySchema, request.query);
+      const access = await requireRepositoryAccess(request, store, repositoryId);
+      const pair = await store.getGuardrailExplanationPair(
+        access.workspaceId,
+        repositoryId,
+        query.baseExplanationId,
+        query.headExplanationId,
+      );
+      if (!pair) {
+        throw new DomainError(
+          "GUARDRAIL_EXPLANATION_NOT_FOUND",
+          "The requested Guardrail explanations do not exist in this Repository.",
+        );
+      }
+      const comparison = (() => {
+        try {
+          return compareGuardrailExplanations(pair.base, pair.head);
+        } catch (error) {
+          throw new DomainError(
+            "GUARDRAIL_EXPLANATION_COMPARISON_INCOMPATIBLE",
+            "Guardrail explanations can only be compared for the same logical Finding.",
+            { cause: error },
+          );
+        }
+      })();
+      return reply
+        .header(
+          "Cache-Control",
+          access.visibility === "private"
+            ? "private, no-store"
+            : "public, max-age=0, must-revalidate",
+        )
+        .send(response(request, comparison));
+    },
+  );
+
   app.post(
     "/v1/repositories/:repositoryId/pull-requests",
     {
@@ -1252,6 +1311,47 @@ export function registerRoutes(
           : "public, max-age=0, must-revalidate",
       )
       .send(response(request, await loadGuardrailReport(store, snapshotId)));
+  });
+
+  app.get("/v1/snapshots/:snapshotId/guardrails/explanations", async (request, reply) => {
+    const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    const query = parseInput(guardrailExplanationHistoryQuerySchema, request.query);
+    const access = await requireSnapshotAccess(request, store, snapshotId);
+    const graphData = await store.getSnapshotGraphData(snapshotId);
+    if (!graphData) {
+      throw new DomainError("SNAPSHOT_NOT_FOUND", "The requested snapshot does not exist.");
+    }
+    requireReadySnapshot(graphData.snapshot);
+    const report = await loadGuardrailReport(store, snapshotId);
+    const finding = report.findings.find((item) => item.id === query.findingId);
+    if (!finding) {
+      throw new DomainError(
+        "GUARDRAIL_FINDING_NOT_FOUND",
+        "The requested Finding does not belong to this Snapshot.",
+      );
+    }
+    const subjectKey = guardrailFindingSubjectKey(finding);
+    const history = await store.listGuardrailExplanationHistory(
+      access.workspaceId,
+      graphData.snapshot.repositoryId,
+      subjectKey,
+      { limit: query.limit, ...(query.cursor ? { cursor: query.cursor } : {}) },
+    );
+    return reply
+      .header(
+        "Cache-Control",
+        access.visibility === "private"
+          ? "private, no-store"
+          : "public, max-age=0, must-revalidate",
+      )
+      .send(
+        response(request, {
+          subjectKey,
+          finding,
+          explanations: history.explanations,
+          nextCursor: history.nextCursor,
+        }),
+      );
   });
 
   app.post(

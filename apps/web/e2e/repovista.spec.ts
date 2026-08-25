@@ -20,6 +20,9 @@ const baseCommitSha = "fedcba9876543210fedcba9876543210fedcba98";
 const prBaseCommitSha = "1111111111111111111111111111111111111111";
 const prHeadCommitSha = "2222222222222222222222222222222222222222";
 const baselineCommitSha = "1111111111111111111111111111111111111111";
+const guardrailExplanationSubjectKey = `sha256:${"c".repeat(64)}`;
+const baseGuardrailExplanationId = "01900000-0000-7000-8000-000000000040";
+const headGuardrailExplanationId = "01900000-0000-7000-8000-000000000041";
 
 const defaultGuardrailProfile = {
   id: "00000000-0000-7000-8000-000000000003",
@@ -176,6 +179,138 @@ const guardrailComparison = {
       head: currentGuardrailReport.findings[0],
     },
   ],
+};
+
+function guardrailExplanation(
+  targetReport: typeof currentGuardrailReport,
+  id: string,
+  summary: string,
+  createdAt: string,
+) {
+  const finding = targetReport.findings[0];
+  if (!finding) throw new Error("Expected a Guardrail Finding fixture.");
+  return {
+    id,
+    subjectKey: guardrailExplanationSubjectKey,
+    snapshot: {
+      ...targetReport.snapshot,
+      algorithmVersion: targetReport.algorithmVersion,
+    },
+    profile: targetReport.profile,
+    profileFingerprint: targetReport.profile.fingerprint,
+    finding,
+    answer: {
+      summary,
+      steps: [{ text: "Review the fixed file range.", evidenceIds: ["guardrail-evidence:1"] }],
+      limitations: ["AI does not change the deterministic Finding."],
+      status: "grounded",
+      citations: [
+        {
+          evidenceId: "guardrail-evidence:1",
+          path: finding.path,
+          symbol: null,
+          startLine: finding.startLine,
+          endLine: finding.endLine,
+          quote: "export async function startServer() {}",
+        },
+      ],
+      provider: "fake",
+      model: "evidence-demo-v1",
+    },
+    promptVersion: "guardrail-explanation-v1",
+    createdAt,
+  };
+}
+
+const baseGuardrailExplanation = guardrailExplanation(
+  baselineGuardrailReport,
+  baseGuardrailExplanationId,
+  "The baseline file exceeded its fixed threshold.",
+  "2026-08-23T00:00:00.000Z",
+);
+const headGuardrailExplanation = guardrailExplanation(
+  currentGuardrailReport,
+  headGuardrailExplanationId,
+  "The current file exceeds its fixed threshold.",
+  "2026-08-24T00:00:00.000Z",
+);
+
+function guardrailExplanationSummary(explanation: typeof headGuardrailExplanation) {
+  return {
+    id: explanation.id,
+    subjectKey: explanation.subjectKey,
+    snapshot: explanation.snapshot,
+    profileFingerprint: explanation.profileFingerprint,
+    finding: {
+      id: explanation.finding.id,
+      fingerprint: explanation.finding.fingerprint,
+      ruleId: explanation.finding.ruleId,
+      severity: explanation.finding.severity,
+      title: explanation.finding.title,
+      message: explanation.finding.message,
+      path: explanation.finding.path,
+      startLine: explanation.finding.startLine,
+      endLine: explanation.finding.endLine,
+    },
+    answer: {
+      status: explanation.answer.status,
+      summary: explanation.answer.summary,
+      provider: explanation.answer.provider,
+      model: explanation.answer.model,
+      stepCount: explanation.answer.steps.length,
+      citationCount: explanation.answer.citations.length,
+      limitationCount: explanation.answer.limitations.length,
+    },
+    promptVersion: explanation.promptVersion,
+    createdAt: explanation.createdAt,
+  };
+}
+
+const guardrailExplanationHistory = {
+  subjectKey: guardrailExplanationSubjectKey,
+  finding: currentGuardrailReport.findings[0],
+  explanations: [
+    guardrailExplanationSummary(headGuardrailExplanation),
+    guardrailExplanationSummary(baseGuardrailExplanation),
+  ],
+  nextCursor: null,
+};
+
+const guardrailExplanationComparison = {
+  subjectKey: guardrailExplanationSubjectKey,
+  changed: true,
+  base: baseGuardrailExplanation,
+  head: headGuardrailExplanation,
+  differences: {
+    provenance: {
+      snapshotId: "changed",
+      commitSha: "changed",
+      parserVersion: "same",
+      algorithmVersion: "same",
+      profileFingerprint: "same",
+      provider: "same",
+      model: "same",
+      promptVersion: "same",
+    },
+    finding: {
+      id: "changed",
+      fingerprint: "changed",
+      severity: "same",
+      title: "same",
+      message: "changed",
+      path: "same",
+      range: "changed",
+      metric: "changed",
+      evidence: "changed",
+    },
+    answer: {
+      status: "same",
+      summary: "changed",
+      steps: "same",
+      limitations: "same",
+      citations: "changed",
+    },
+  },
 };
 
 const files = [
@@ -773,6 +908,7 @@ async function installMockApi(
           reused: false,
           explanation: {
             id: "01900000-0000-7000-8000-000000000099",
+            subjectKey: guardrailExplanationSubjectKey,
             snapshot: {
               ...currentGuardrailReport.snapshot,
               algorithmVersion: currentGuardrailReport.algorithmVersion,
@@ -806,6 +942,25 @@ async function installMockApi(
         },
         201,
       );
+      return;
+    }
+
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/v1/snapshots/${snapshotId}/guardrails/explanations`
+    ) {
+      expect(url.searchParams.get("findingId")).toBe(currentGuardrailReport.findings[0]?.id);
+      await json(route, guardrailExplanationHistory);
+      return;
+    }
+
+    if (
+      request.method() === "GET" &&
+      url.pathname === `/v1/repositories/${repositoryId}/guardrails/explanations/compare`
+    ) {
+      expect(url.searchParams.get("baseExplanationId")).toBe(baseGuardrailExplanationId);
+      expect(url.searchParams.get("headExplanationId")).toBe(headGuardrailExplanationId);
+      await json(route, guardrailExplanationComparison);
       return;
     }
 
@@ -1469,6 +1624,41 @@ test("generates a verified AI explanation without changing the deterministic Fin
     .last()
     .click();
   await expect(page.getByText(/Evidence lines/)).toBeVisible();
+});
+
+test("browses and compares verified explanation history on fixed Snapshots", async ({
+  context,
+  page,
+}) => {
+  await installMockApi(context);
+  await page.goto(`/repositories/${repositoryId}?snapshotId=${snapshotId}&tab=guardrails`);
+
+  await page.getByRole("button", { name: "Explanation history" }).click();
+  await expect(page.getByText(headGuardrailExplanation.answer.summary)).toBeVisible();
+  await expect(
+    page.getByRole("combobox", { name: "Base explanation for Large source file" }),
+  ).toHaveValue(baseGuardrailExplanationId);
+  await expect(
+    page.getByRole("combobox", { name: "Head explanation for Large source file" }),
+  ).toHaveValue(headGuardrailExplanationId);
+
+  await page.getByRole("button", { name: "Compare saved explanations" }).click();
+  const comparisonRegion = page.getByRole("region", {
+    name: "Verified explanation structural comparison",
+  });
+  await expect(comparisonRegion).toContainText("Structural comparison · changed");
+  await expect(comparisonRegion).toContainText("does not decide which model answer is better");
+
+  await comparisonRegion.getByRole("button", { name: /Base · src\/server\.ts:1-800/ }).click();
+  await expect(page.locator(".source-panel small")).toContainText(baselineCommitSha.slice(0, 7));
+  await expect(page.getByText("Evidence lines 1-800")).toBeVisible();
+  await page.getByRole("button", { name: "Close source" }).click();
+
+  await comparisonRegion.getByRole("button", { name: /Head · src\/server\.ts:1-801/ }).click();
+  await expect(page.locator(".source-panel small")).toContainText(
+    repository.latestCommitSha.slice(0, 7),
+  );
+  await expect(page.getByText("Evidence lines 1-801")).toBeVisible();
 });
 
 test("lists existing repositories and opens an immutable snapshot", async ({ context, page }) => {

@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RepoVista API",
-    "version": "0.9.0",
-    "description": "Evidence-first repository indexing with private GitHub App access, Workspace authorization, immutable Guardrail policy profiles, deterministic Architecture Guardrails and SARIF, auditable sessions, API tokens, versioned semantic indexes, transparent hybrid retrieval, architecture stories, pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, and grounded answers."
+    "version": "1.0.0",
+    "description": "Evidence-first repository indexing with private GitHub App access, Workspace authorization, immutable Guardrail policy profiles, deterministic Architecture Guardrails and SARIF, verified explanation history and structural comparison, auditable sessions, API tokens, versioned semantic indexes, transparent hybrid retrieval, architecture stories, pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, and grounded answers."
   },
   "servers": [
     {
@@ -561,6 +561,62 @@
         }
       }
     },
+    "/v1/repositories/{repositoryId}/guardrails/explanations/compare": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/RepositoryId"
+        }
+      ],
+      "get": {
+        "operationId": "compareGuardrailExplanations",
+        "summary": "Compare two immutable verified explanations for the same logical Finding",
+        "tags": ["Repositories", "Guardrails", "Answers"],
+        "parameters": [
+          {
+            "name": "baseExplanationId",
+            "in": "query",
+            "required": true,
+            "schema": { "$ref": "#/components/schemas/Uuid" }
+          },
+          {
+            "name": "headExplanationId",
+            "in": "query",
+            "required": true,
+            "schema": { "$ref": "#/components/schemas/Uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deterministic field comparison without a model call",
+            "headers": {
+              "Cache-Control": {
+                "description": "Public revalidation or private no-store policy",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/GuardrailExplanationComparison"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
     "/v1/repositories/{repositoryId}/guardrail-profile": {
       "parameters": [
         {
@@ -1065,6 +1121,59 @@
           "$ref": "#/components/parameters/SnapshotId"
         }
       ],
+      "get": {
+        "operationId": "listGuardrailExplanationHistory",
+        "summary": "List immutable verified explanation history for a server-selected Finding",
+        "tags": ["Guardrails", "Answers"],
+        "parameters": [
+          {
+            "name": "findingId",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 300 }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 1000 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cursor-paginated explanation summaries without citation quotes",
+            "headers": {
+              "Cache-Control": {
+                "description": "Public revalidation or private no-store policy",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/GuardrailExplanationHistory" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      },
       "post": {
         "operationId": "createGuardrailExplanation",
         "summary": "Generate an evidence-verified explanation for one deterministic Guardrail Finding",
@@ -4150,6 +4259,7 @@
         "type": "object",
         "required": [
           "id",
+          "subjectKey",
           "snapshot",
           "profile",
           "profileFingerprint",
@@ -4160,6 +4270,7 @@
         ],
         "properties": {
           "id": { "$ref": "#/components/schemas/Uuid" },
+          "subjectKey": { "$ref": "#/components/schemas/GuardrailExplanationSubjectKey" },
           "snapshot": {
             "type": "object",
             "required": ["id", "commitSha", "parserVersion", "algorithmVersion"],
@@ -4186,6 +4297,184 @@
         "properties": {
           "explanation": { "$ref": "#/components/schemas/GuardrailExplanation" },
           "reused": { "type": "boolean" }
+        }
+      },
+      "GuardrailExplanationSubjectKey": {
+        "type": "string",
+        "pattern": "^sha256:[a-f0-9]{64}$"
+      },
+      "GuardrailExplanationSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "subjectKey",
+          "snapshot",
+          "profileFingerprint",
+          "finding",
+          "answer",
+          "promptVersion",
+          "createdAt"
+        ],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "subjectKey": { "$ref": "#/components/schemas/GuardrailExplanationSubjectKey" },
+          "snapshot": {
+            "type": "object",
+            "required": ["id", "commitSha", "parserVersion", "algorithmVersion"],
+            "properties": {
+              "id": { "$ref": "#/components/schemas/Uuid" },
+              "commitSha": { "type": "string", "pattern": "^[a-fA-F0-9]{7,64}$" },
+              "parserVersion": { "type": "string", "minLength": 1 },
+              "algorithmVersion": { "type": "string", "minLength": 1 }
+            }
+          },
+          "profileFingerprint": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+          "finding": {
+            "type": "object",
+            "required": [
+              "id",
+              "fingerprint",
+              "ruleId",
+              "severity",
+              "title",
+              "message",
+              "path",
+              "startLine",
+              "endLine"
+            ],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "fingerprint": { "type": "string", "minLength": 1 },
+              "ruleId": { "$ref": "#/components/schemas/GuardrailRuleId" },
+              "severity": { "$ref": "#/components/schemas/GuardrailSeverity" },
+              "title": { "type": "string", "minLength": 1 },
+              "message": { "type": "string", "minLength": 1 },
+              "path": { "type": "string", "minLength": 1 },
+              "startLine": { "type": "integer", "minimum": 1 },
+              "endLine": { "type": "integer", "minimum": 1 }
+            }
+          },
+          "answer": {
+            "type": "object",
+            "required": [
+              "status",
+              "summary",
+              "provider",
+              "model",
+              "stepCount",
+              "citationCount",
+              "limitationCount"
+            ],
+            "properties": {
+              "status": { "type": "string", "enum": ["grounded", "partial", "refused"] },
+              "summary": { "type": "string" },
+              "provider": { "type": "string" },
+              "model": { "type": "string" },
+              "stepCount": { "type": "integer", "minimum": 0 },
+              "citationCount": { "type": "integer", "minimum": 0 },
+              "limitationCount": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "promptVersion": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "createdAt": { "$ref": "#/components/schemas/DateTime" }
+        }
+      },
+      "GuardrailExplanationHistory": {
+        "type": "object",
+        "required": ["subjectKey", "finding", "explanations", "nextCursor"],
+        "properties": {
+          "subjectKey": { "$ref": "#/components/schemas/GuardrailExplanationSubjectKey" },
+          "finding": { "$ref": "#/components/schemas/GuardrailFinding" },
+          "explanations": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/GuardrailExplanationSummary" }
+          },
+          "nextCursor": { "type": ["string", "null"] }
+        }
+      },
+      "GuardrailExplanationDifference": {
+        "type": "string",
+        "enum": ["same", "changed"]
+      },
+      "GuardrailExplanationComparison": {
+        "type": "object",
+        "required": ["subjectKey", "changed", "base", "head", "differences"],
+        "properties": {
+          "subjectKey": { "$ref": "#/components/schemas/GuardrailExplanationSubjectKey" },
+          "changed": { "type": "boolean" },
+          "base": { "$ref": "#/components/schemas/GuardrailExplanation" },
+          "head": { "$ref": "#/components/schemas/GuardrailExplanation" },
+          "differences": {
+            "type": "object",
+            "required": ["provenance", "finding", "answer"],
+            "properties": {
+              "provenance": {
+                "type": "object",
+                "required": [
+                  "snapshotId",
+                  "commitSha",
+                  "parserVersion",
+                  "algorithmVersion",
+                  "profileFingerprint",
+                  "provider",
+                  "model",
+                  "promptVersion"
+                ],
+                "properties": {
+                  "snapshotId": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "commitSha": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "parserVersion": {
+                    "$ref": "#/components/schemas/GuardrailExplanationDifference"
+                  },
+                  "algorithmVersion": {
+                    "$ref": "#/components/schemas/GuardrailExplanationDifference"
+                  },
+                  "profileFingerprint": {
+                    "$ref": "#/components/schemas/GuardrailExplanationDifference"
+                  },
+                  "provider": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "model": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "promptVersion": { "$ref": "#/components/schemas/GuardrailExplanationDifference" }
+                }
+              },
+              "finding": {
+                "type": "object",
+                "required": [
+                  "id",
+                  "fingerprint",
+                  "severity",
+                  "title",
+                  "message",
+                  "path",
+                  "range",
+                  "metric",
+                  "evidence"
+                ],
+                "properties": {
+                  "id": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "fingerprint": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "severity": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "title": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "message": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "path": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "range": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "metric": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "evidence": { "$ref": "#/components/schemas/GuardrailExplanationDifference" }
+                }
+              },
+              "answer": {
+                "type": "object",
+                "required": ["status", "summary", "steps", "limitations", "citations"],
+                "properties": {
+                  "status": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "summary": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "steps": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "limitations": { "$ref": "#/components/schemas/GuardrailExplanationDifference" },
+                  "citations": { "$ref": "#/components/schemas/GuardrailExplanationDifference" }
+                }
+              }
+            }
+          }
         }
       },
       "SnapshotFileSummary": {

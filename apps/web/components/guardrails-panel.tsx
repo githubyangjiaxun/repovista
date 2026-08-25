@@ -3,6 +3,9 @@
 import type {
   GuardrailComparison,
   GuardrailExplanation,
+  GuardrailExplanationComparison,
+  GuardrailExplanationHistory,
+  GuardrailExplanationSummary,
   GuardrailProfile,
   GuardrailReport,
   Snapshot,
@@ -13,6 +16,8 @@ import {
   CircleAlert,
   Download,
   FileCode2,
+  GitCompareArrows,
+  History,
   Info,
   LoaderCircle,
   Save,
@@ -31,6 +36,174 @@ function metricText(metric: Record<string, string | number>): string {
   return Object.entries(metric)
     .map(([key, value]) => `${key.replaceAll(/([A-Z])/g, " $1").toLowerCase()}: ${value}`)
     .join(" · ");
+}
+
+const EXPLANATION_HISTORY_PAGE_SIZE = 10;
+
+interface ExplanationSelection {
+  baseId: string;
+  headId: string;
+}
+
+function explanationHistoryLabel(item: GuardrailExplanationSummary): string {
+  return `${item.snapshot.commitSha.slice(0, 12)} · ${item.answer.status} · ${item.answer.provider}/${item.answer.model}`;
+}
+
+function ExplanationVersionDetails({
+  explanation,
+  label,
+  onOpenCitation,
+}: {
+  explanation: GuardrailExplanation;
+  label: "Base" | "Head";
+  onOpenCitation: (
+    explanation: GuardrailExplanation,
+    citation: GuardrailExplanation["answer"]["citations"][number],
+  ) => void;
+}) {
+  return (
+    <article className="guardrail-explanation-version">
+      <div className="guardrail-explanation-version-heading">
+        <strong>{label}</strong>
+        <code>{explanation.id}</code>
+      </div>
+      <dl>
+        <div>
+          <dt>Snapshot</dt>
+          <dd>{explanation.snapshot.id}</dd>
+        </div>
+        <div>
+          <dt>Commit</dt>
+          <dd>{explanation.snapshot.commitSha}</dd>
+        </div>
+        <div>
+          <dt>Parser / algorithm</dt>
+          <dd>
+            {explanation.snapshot.parserVersion} · {explanation.snapshot.algorithmVersion}
+          </dd>
+        </div>
+        <div>
+          <dt>Profile</dt>
+          <dd>{explanation.profileFingerprint}</dd>
+        </div>
+        <div>
+          <dt>Provider / model</dt>
+          <dd>
+            {explanation.answer.provider} / {explanation.answer.model}
+          </dd>
+        </div>
+        <div>
+          <dt>Prompt</dt>
+          <dd>{explanation.promptVersion}</dd>
+        </div>
+        <div>
+          <dt>Finding</dt>
+          <dd>
+            [{explanation.finding.severity}] {explanation.finding.message}
+          </dd>
+        </div>
+        <div>
+          <dt>Location</dt>
+          <dd>
+            {explanation.finding.path}:{explanation.finding.startLine}-{explanation.finding.endLine}
+          </dd>
+        </div>
+        <div>
+          <dt>Metric</dt>
+          <dd>{metricText(explanation.finding.metric)}</dd>
+        </div>
+        <div>
+          <dt>Answer</dt>
+          <dd>
+            [{explanation.answer.status}] {explanation.answer.summary}
+          </dd>
+        </div>
+      </dl>
+      {explanation.answer.steps.length > 0 ? (
+        <ol>
+          {explanation.answer.steps.map((step, index) => (
+            <li key={`${explanation.id}-comparison-step-${index}`}>{step.text}</li>
+          ))}
+        </ol>
+      ) : null}
+      {explanation.answer.limitations.length > 0 ? (
+        <ul>
+          {explanation.answer.limitations.map((limitation, index) => (
+            <li key={`${explanation.id}-comparison-limitation-${index}`}>{limitation}</li>
+          ))}
+        </ul>
+      ) : null}
+      <div className="guardrail-explanation-version-citations">
+        {explanation.answer.citations.map((citation) => (
+          <button
+            key={`${explanation.id}-${citation.evidenceId}`}
+            onClick={() => onOpenCitation(explanation, citation)}
+            type="button"
+          >
+            <FileCode2 size={13} /> {label} · {citation.path}:{citation.startLine}-
+            {citation.endLine}
+          </button>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function ExplanationComparisonView({
+  comparison,
+  onOpenCitation,
+}: {
+  comparison?: GuardrailExplanationComparison;
+  onOpenCitation: (
+    explanation: GuardrailExplanation,
+    citation: GuardrailExplanation["answer"]["citations"][number],
+  ) => void;
+}) {
+  if (!comparison) return null;
+  return (
+    <section
+      className="guardrail-explanation-comparison"
+      aria-label="Verified explanation structural comparison"
+    >
+      <div className="guardrail-explanation-comparison-heading">
+        <div>
+          <GitCompareArrows size={17} />
+          <strong>Structural comparison · {comparison.changed ? "changed" : "same"}</strong>
+        </div>
+        <code title={comparison.subjectKey}>{comparison.subjectKey.slice(0, 19)}…</code>
+      </div>
+      <p>
+        This compares saved fields exactly. It does not decide which model answer is better or rank
+        explanation quality.
+      </p>
+      <div className="guardrail-explanation-difference-groups">
+        {Object.entries(comparison.differences).map(([group, fields]) => (
+          <section key={group} aria-label={`${group} differences`}>
+            <strong>{group}</strong>
+            <div>
+              {Object.entries(fields).map(([field, status]) => (
+                <span className={`difference-${status}`} key={`${group}-${field}`}>
+                  {field}: {status}
+                </span>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
+      <div className="guardrail-explanation-versions">
+        <ExplanationVersionDetails
+          explanation={comparison.base}
+          label="Base"
+          onOpenCitation={onOpenCitation}
+        />
+        <ExplanationVersionDetails
+          explanation={comparison.head}
+          label="Head"
+          onOpenCitation={onOpenCitation}
+        />
+      </div>
+    </section>
+  );
 }
 
 export function GuardrailsPanel({
@@ -74,12 +247,34 @@ export function GuardrailsPanel({
   const [explanations, setExplanations] = useState<Record<string, GuardrailExplanation>>({});
   const [explanationErrors, setExplanationErrors] = useState<Record<string, string>>({});
   const [explainingFindingId, setExplainingFindingId] = useState<string | null>(null);
+  const [openHistories, setOpenHistories] = useState<Record<string, boolean>>({});
+  const [histories, setHistories] = useState<Record<string, GuardrailExplanationHistory>>({});
+  const [historyErrors, setHistoryErrors] = useState<Record<string, string>>({});
+  const [historyLoading, setHistoryLoading] = useState<Record<string, boolean>>({});
+  const [historyLoadingMore, setHistoryLoadingMore] = useState<Record<string, boolean>>({});
+  const [historySelections, setHistorySelections] = useState<Record<string, ExplanationSelection>>(
+    {},
+  );
+  const [explanationComparisons, setExplanationComparisons] = useState<
+    Record<string, GuardrailExplanationComparison>
+  >({});
+  const [explanationComparisonErrors, setExplanationComparisonErrors] = useState<
+    Record<string, string>
+  >({});
+  const [explanationComparisonLoading, setExplanationComparisonLoading] = useState<
+    Record<string, boolean>
+  >({});
   const profileRequest = useRef(0);
   const explanationRequest = useRef(0);
+  const explanationHistoryEpoch = useRef(0);
+  const explanationHistoryContext = useRef("");
+  const explanationHistoryRequests = useRef<Record<string, number>>({});
+  const explanationComparisonRequests = useRef<Record<string, number>>({});
 
   const baselineSnapshots = availableSnapshots.filter(
     (item) => item.id !== snapshotId && item.status === "ready" && Boolean(item.commitSha),
   );
+  const currentHistoryContext = `${repositoryId}:${snapshotId}`;
 
   useEffect(() => {
     let active = true;
@@ -90,7 +285,20 @@ export function GuardrailsPanel({
     setExplanations({});
     setExplanationErrors({});
     setExplainingFindingId(null);
+    setOpenHistories({});
+    setHistories({});
+    setHistoryErrors({});
+    setHistoryLoading({});
+    setHistoryLoadingMore({});
+    setHistorySelections({});
+    setExplanationComparisons({});
+    setExplanationComparisonErrors({});
+    setExplanationComparisonLoading({});
     explanationRequest.current += 1;
+    explanationHistoryEpoch.current += 1;
+    explanationHistoryContext.current = currentHistoryContext;
+    explanationHistoryRequests.current = {};
+    explanationComparisonRequests.current = {};
     apiFetch<GuardrailReport>(`/v1/snapshots/${snapshotId}/guardrails`)
       .then((result) => {
         if (active) setReport(result);
@@ -104,7 +312,7 @@ export function GuardrailsPanel({
     return () => {
       active = false;
     };
-  }, [snapshotId]);
+  }, [currentHistoryContext, snapshotId]);
 
   useEffect(() => {
     const request = ++profileRequest.current;
@@ -227,6 +435,175 @@ export function GuardrailsPanel({
     }
   }
 
+  async function loadExplanationHistory(
+    findingId: string,
+    options: { append?: boolean; cursor?: string } = {},
+  ) {
+    const append = options.append === true;
+    const epoch = explanationHistoryEpoch.current;
+    const context = currentHistoryContext;
+    const request = (explanationHistoryRequests.current[findingId] ?? 0) + 1;
+    explanationHistoryRequests.current[findingId] = request;
+    setHistoryErrors((current) => ({ ...current, [findingId]: "" }));
+    if (append) {
+      setHistoryLoadingMore((current) => ({ ...current, [findingId]: true }));
+    } else {
+      setHistoryLoading((current) => ({ ...current, [findingId]: true }));
+      setExplanationComparisons((current) => {
+        const next = { ...current };
+        delete next[findingId];
+        return next;
+      });
+      setExplanationComparisonErrors((current) => ({ ...current, [findingId]: "" }));
+    }
+    const query = new URLSearchParams({
+      findingId,
+      limit: String(EXPLANATION_HISTORY_PAGE_SIZE),
+    });
+    if (options.cursor) query.set("cursor", options.cursor);
+    try {
+      const result = await apiFetch<GuardrailExplanationHistory>(
+        `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/explanations?${query.toString()}`,
+      );
+      if (
+        context !== explanationHistoryContext.current ||
+        epoch !== explanationHistoryEpoch.current ||
+        explanationHistoryRequests.current[findingId] !== request
+      ) {
+        return;
+      }
+      const previous = append ? (histories[findingId]?.explanations ?? []) : [];
+      const seen = new Set(previous.map((item) => item.id));
+      const explanations = [
+        ...previous,
+        ...result.explanations.filter((item) => !seen.has(item.id)),
+      ];
+      setHistories((current) => ({
+        ...current,
+        [findingId]: { ...result, explanations },
+      }));
+      setHistorySelections((selections) => {
+        const currentSelection = selections[findingId];
+        const ids = new Set(explanations.map((item) => item.id));
+        const headId =
+          currentSelection?.headId && ids.has(currentSelection.headId)
+            ? currentSelection.headId
+            : (explanations[0]?.id ?? "");
+        let baseId =
+          currentSelection?.baseId && ids.has(currentSelection.baseId)
+            ? currentSelection.baseId
+            : (explanations.at(-1)?.id ?? "");
+        if (baseId === headId && explanations.length > 1) {
+          baseId = explanations.findLast((item) => item.id !== headId)?.id ?? baseId;
+        }
+        return { ...selections, [findingId]: { baseId, headId } };
+      });
+    } catch (cause) {
+      if (
+        context === explanationHistoryContext.current &&
+        epoch === explanationHistoryEpoch.current &&
+        explanationHistoryRequests.current[findingId] === request
+      ) {
+        setHistoryErrors((current) => ({
+          ...current,
+          [findingId]: apiErrorMessage(cause, "Unable to load verified explanation history."),
+        }));
+      }
+    } finally {
+      if (
+        context === explanationHistoryContext.current &&
+        epoch === explanationHistoryEpoch.current &&
+        explanationHistoryRequests.current[findingId] === request
+      ) {
+        if (append) {
+          setHistoryLoadingMore((current) => ({ ...current, [findingId]: false }));
+        } else {
+          setHistoryLoading((current) => ({ ...current, [findingId]: false }));
+        }
+      }
+    }
+  }
+
+  function toggleExplanationHistory(findingId: string) {
+    const open = openHistories[findingId] === true;
+    setOpenHistories((current) => ({ ...current, [findingId]: !open }));
+    if (!open && !histories[findingId] && !historyLoading[findingId]) {
+      void loadExplanationHistory(findingId);
+    }
+  }
+
+  function updateExplanationSelection(
+    findingId: string,
+    side: keyof ExplanationSelection,
+    value: string,
+  ) {
+    setHistorySelections((current) => ({
+      ...current,
+      [findingId]: {
+        baseId: current[findingId]?.baseId ?? "",
+        headId: current[findingId]?.headId ?? "",
+        [side]: value,
+      },
+    }));
+    setExplanationComparisons((current) => {
+      const next = { ...current };
+      delete next[findingId];
+      return next;
+    });
+    setExplanationComparisonErrors((current) => ({ ...current, [findingId]: "" }));
+  }
+
+  async function compareExplanationHistory(findingId: string) {
+    const selection = historySelections[findingId];
+    if (!selection?.baseId || !selection.headId || selection.baseId === selection.headId) return;
+    const epoch = explanationHistoryEpoch.current;
+    const context = currentHistoryContext;
+    const request = (explanationComparisonRequests.current[findingId] ?? 0) + 1;
+    explanationComparisonRequests.current[findingId] = request;
+    setExplanationComparisonLoading((current) => ({ ...current, [findingId]: true }));
+    setExplanationComparisonErrors((current) => ({ ...current, [findingId]: "" }));
+    setExplanationComparisons((current) => {
+      const next = { ...current };
+      delete next[findingId];
+      return next;
+    });
+    const query = new URLSearchParams({
+      baseExplanationId: selection.baseId,
+      headExplanationId: selection.headId,
+    });
+    try {
+      const result = await apiFetch<GuardrailExplanationComparison>(
+        `/v1/repositories/${encodeURIComponent(repositoryId)}/guardrails/explanations/compare?${query.toString()}`,
+      );
+      if (
+        context === explanationHistoryContext.current &&
+        epoch === explanationHistoryEpoch.current &&
+        explanationComparisonRequests.current[findingId] === request
+      ) {
+        setExplanationComparisons((current) => ({ ...current, [findingId]: result }));
+      }
+    } catch (cause) {
+      if (
+        context === explanationHistoryContext.current &&
+        epoch === explanationHistoryEpoch.current &&
+        explanationComparisonRequests.current[findingId] === request
+      ) {
+        setExplanationComparisonErrors((current) => ({
+          ...current,
+          [findingId]: apiErrorMessage(cause, "Unable to compare verified explanations."),
+        }));
+      }
+    } finally {
+      if (
+        context === explanationHistoryContext.current &&
+        epoch === explanationHistoryEpoch.current &&
+        explanationComparisonRequests.current[findingId] === request
+      ) {
+        setExplanationComparisonLoading((current) => ({ ...current, [findingId]: false }));
+      }
+    }
+  }
+
   async function explainFinding(findingId: string) {
     const request = ++explanationRequest.current;
     setExplainingFindingId(findingId);
@@ -241,6 +618,7 @@ export function GuardrailsPanel({
       );
       if (request !== explanationRequest.current) return;
       setExplanations((current) => ({ ...current, [findingId]: result.explanation }));
+      void loadExplanationHistory(findingId);
     } catch (cause) {
       if (request !== explanationRequest.current) return;
       setExplanationErrors((current) => ({
@@ -586,8 +964,8 @@ export function GuardrailsPanel({
                 <h2>{finding.title}</h2>
                 <p>{finding.message}</p>
                 <small>{metricText(finding.metric)}</small>
-                {canRequestExplanations ? (
-                  <div className="guardrail-explanation-actions">
+                <div className="guardrail-explanation-actions">
+                  {canRequestExplanations ? (
                     <button
                       aria-label={`Explain ${finding.title} with AI`}
                       aria-busy={explainingFindingId === finding.id}
@@ -602,8 +980,16 @@ export function GuardrailsPanel({
                         ? "Verifying explanation…"
                         : "Explain with AI"}
                     </button>
-                  </div>
-                ) : null}
+                  ) : null}
+                  <button
+                    aria-controls={`guardrail-history-${finding.id}`}
+                    aria-expanded={openHistories[finding.id] === true}
+                    onClick={() => toggleExplanationHistory(finding.id)}
+                    type="button"
+                  >
+                    <History size={14} /> Explanation history
+                  </button>
+                </div>
                 {explanationErrors[finding.id] ? (
                   <div className="guardrail-explanation-error" role="alert">
                     {explanationErrors[finding.id]}
@@ -671,6 +1057,171 @@ export function GuardrailsPanel({
                         {citation.endLine}
                       </button>
                     ))}
+                  </section>
+                ) : null}
+                {openHistories[finding.id] ? (
+                  <section
+                    className="guardrail-explanation-history"
+                    id={`guardrail-history-${finding.id}`}
+                    aria-busy={
+                      historyLoading[finding.id] === true || historyLoadingMore[finding.id] === true
+                    }
+                    aria-label={`Explanation history for ${finding.title}`}
+                  >
+                    <div className="guardrail-explanation-history-heading">
+                      <div>
+                        <History size={16} />
+                        <strong>Saved verified explanations</strong>
+                      </div>
+                      {histories[finding.id] ? (
+                        <code title={histories[finding.id]?.subjectKey}>
+                          {histories[finding.id]?.subjectKey.slice(0, 19)}…
+                        </code>
+                      ) : null}
+                    </div>
+                    {historyLoading[finding.id] ? (
+                      <output>
+                        <LoaderCircle className="spin" size={15} /> Loading explanation history…
+                      </output>
+                    ) : null}
+                    {historyErrors[finding.id] ? (
+                      <div className="guardrail-explanation-history-error" role="alert">
+                        <span>{historyErrors[finding.id]}</span>
+                        <button
+                          onClick={() => void loadExplanationHistory(finding.id)}
+                          type="button"
+                        >
+                          Retry
+                        </button>
+                      </div>
+                    ) : null}
+                    {!historyLoading[finding.id] &&
+                    histories[finding.id]?.explanations.length === 0 ? (
+                      <p className="guardrail-explanation-history-empty">
+                        No saved explanations exist for this logical Finding yet.
+                      </p>
+                    ) : null}
+                    {histories[finding.id]?.explanations.length ? (
+                      <>
+                        <div className="guardrail-explanation-history-list">
+                          {histories[finding.id]?.explanations.map((item) => (
+                            <article key={item.id}>
+                              <div>
+                                <strong>
+                                  {item.answer.status} · {item.answer.provider}/{item.answer.model}
+                                </strong>
+                                <code>{item.snapshot.commitSha.slice(0, 12)}</code>
+                              </div>
+                              <p>{item.answer.summary}</p>
+                              <div>
+                                <span>Snapshot {item.snapshot.id}</span>
+                                <span>{item.promptVersion}</span>
+                                <span>{item.answer.citationCount} citations</span>
+                                <span>{item.createdAt}</span>
+                              </div>
+                              <code title={item.profileFingerprint}>
+                                profile {item.profileFingerprint.slice(0, 19)}…
+                              </code>
+                            </article>
+                          ))}
+                        </div>
+                        {histories[finding.id]?.nextCursor ? (
+                          <button
+                            className="guardrail-explanation-load-more"
+                            disabled={historyLoadingMore[finding.id] === true}
+                            onClick={() =>
+                              void loadExplanationHistory(finding.id, {
+                                append: true,
+                                cursor: histories[finding.id]?.nextCursor ?? undefined,
+                              })
+                            }
+                            type="button"
+                          >
+                            {historyLoadingMore[finding.id] ? (
+                              <LoaderCircle className="spin" size={14} />
+                            ) : null}
+                            {historyLoadingMore[finding.id] ? "Loading more…" : "Load more"}
+                          </button>
+                        ) : null}
+                      </>
+                    ) : null}
+                    {(histories[finding.id]?.explanations.length ?? 0) >= 2 ? (
+                      <section
+                        className="guardrail-explanation-compare-controls"
+                        aria-label="Choose verified explanations to compare"
+                      >
+                        <div>
+                          <label>
+                            <span>Base (older)</span>
+                            <select
+                              aria-label={`Base explanation for ${finding.title}`}
+                              onChange={(event) =>
+                                updateExplanationSelection(finding.id, "baseId", event.target.value)
+                              }
+                              value={historySelections[finding.id]?.baseId ?? ""}
+                            >
+                              {histories[finding.id]?.explanations.map((item) => (
+                                <option key={`base-${item.id}`} value={item.id}>
+                                  {explanationHistoryLabel(item)}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label>
+                            <span>Head (newer)</span>
+                            <select
+                              aria-label={`Head explanation for ${finding.title}`}
+                              onChange={(event) =>
+                                updateExplanationSelection(finding.id, "headId", event.target.value)
+                              }
+                              value={historySelections[finding.id]?.headId ?? ""}
+                            >
+                              {histories[finding.id]?.explanations.map((item) => (
+                                <option key={`head-${item.id}`} value={item.id}>
+                                  {explanationHistoryLabel(item)}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                        <button
+                          disabled={
+                            explanationComparisonLoading[finding.id] === true ||
+                            !historySelections[finding.id]?.baseId ||
+                            !historySelections[finding.id]?.headId ||
+                            historySelections[finding.id]?.baseId ===
+                              historySelections[finding.id]?.headId
+                          }
+                          onClick={() => void compareExplanationHistory(finding.id)}
+                          type="button"
+                        >
+                          {explanationComparisonLoading[finding.id] ? (
+                            <LoaderCircle className="spin" size={14} />
+                          ) : (
+                            <GitCompareArrows size={14} />
+                          )}
+                          Compare saved explanations
+                        </button>
+                      </section>
+                    ) : null}
+                    {explanationComparisonErrors[finding.id] ? (
+                      <div className="guardrail-explanation-history-error" role="alert">
+                        {explanationComparisonErrors[finding.id]}
+                      </div>
+                    ) : null}
+                    <ExplanationComparisonView
+                      comparison={explanationComparisons[finding.id]}
+                      onOpenCitation={(explanation, citation) =>
+                        void (onOpenSnapshotSource
+                          ? onOpenSnapshotSource(
+                              explanation.snapshot.id,
+                              citation.path,
+                              citation.startLine,
+                              citation.endLine,
+                            )
+                          : onOpenSource(citation.path, citation.startLine, citation.endLine))
+                      }
+                    />
                   </section>
                 ) : null}
               </div>

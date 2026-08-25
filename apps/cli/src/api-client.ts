@@ -14,11 +14,15 @@ import {
   type GitHubInstallation,
   type GitHubInstallationRepositoryPage,
   type GuardrailComparison,
+  type GuardrailExplanationComparison,
+  type GuardrailExplanationHistory,
   type GuardrailProfile,
   type GuardrailReport,
   githubInstallationRepositoryPageSchema,
   githubInstallationSchema,
   guardrailComparisonSchema,
+  guardrailExplanationComparisonSchema,
+  guardrailExplanationHistorySchema,
   guardrailProfileSchema,
   guardrailReportSchema,
   type Job,
@@ -314,6 +318,34 @@ export class RepoVistaClient {
       `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/explanations/${encodeURIComponent(explanationId)}`,
       {},
       (value) => createGuardrailExplanationResponseSchema.shape.explanation.parse(value),
+    );
+  }
+
+  listGuardrailExplanationHistory(
+    snapshotId: string,
+    findingId: string,
+    options: { cursor?: string; limit?: number } = {},
+  ): Promise<GuardrailExplanationHistory> {
+    const query = new URLSearchParams({ findingId });
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    return this.requestEnvelope(
+      `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/explanations?${query.toString()}`,
+      {},
+      (value) => guardrailExplanationHistorySchema.parse(value),
+    );
+  }
+
+  compareGuardrailExplanations(
+    repositoryId: string,
+    baseExplanationId: string,
+    headExplanationId: string,
+  ): Promise<GuardrailExplanationComparison> {
+    const query = new URLSearchParams({ baseExplanationId, headExplanationId });
+    return this.requestEnvelope(
+      `/v1/repositories/${encodeURIComponent(repositoryId)}/guardrails/explanations/compare?${query.toString()}`,
+      {},
+      (value) => guardrailExplanationComparisonSchema.parse(value),
     );
   }
 
