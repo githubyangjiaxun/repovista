@@ -18,11 +18,24 @@ corepack enable
 pnpm install --frozen-lockfile
 docker compose up -d postgres
 pnpm db:migrate
+pnpm db:seed
 pnpm dev
 ```
 
 The Web runs at <http://localhost:3000> and the API at <http://localhost:4000>. Copy
 `.env.example` to `.env` only when overriding the defaults; `pnpm dev` loads the root file.
+`pnpm db:seed` creates or reuses the bundled two-revision demo through the real indexing pipeline.
+
+To evaluate the production-shaped stack instead of running source watchers:
+
+```bash
+docker compose up --build --detach --wait
+pnpm demo:smoke
+```
+
+The smoke path is offline after dependencies/images are available. It does not call GitHub or an
+external model. Stop it with `docker compose down`; add `--volumes` only for an intentionally
+disposable local database.
 
 ## Quality gates
 
@@ -59,6 +72,8 @@ removes its own RepoVista records, but it also applies the repository migrations
 - Security-sensitive Git/path changes need adversarial tests.
 - UI changes affecting a critical journey need unit or Playwright coverage.
 - Performance claims need the dataset, machine, Node version, and measured result.
+- Bundled Demo changes must preserve Base/Head idempotency and must not turn synthetic revisions or
+  the Fake Provider into claims about GitHub history or model quality.
 
 ## Commit style
 

@@ -7,6 +7,38 @@ Keep a Changelog structure.
 
 No unreleased changes.
 
+## [1.1.0] - 2026-08-27
+
+### Added
+
+- A reviewable two-revision TypeScript/Python/Go fixture in `@repovista/demo`, indexed through the
+  production Scanner, Tree-sitter Parser, Graph, incremental planner, Worker lease, Store, and
+  Guardrails paths.
+- An idempotent offline `demo-seed` pipeline and `pnpm demo:smoke` API journey. The Base is a Full
+  Snapshot and the Head is a real Incremental Snapshot with changed/reused/parsed/deleted stats.
+- Deterministic Fake Provider explanations with verified citations on both revisions, making the
+  existing Explanation History and structural Comparison workflow available without model keys.
+- Homepage and Repository UI entry points with explicit synthetic-revision labels and safe capability
+  boundaries for the bundled fixture.
+- Hardened Compose overlay, contributor instructions, CI Demo job, and release documentation.
+
+### Security and trust boundary
+
+- The fixture identity uses an RFC 6761 `.invalid` hostname and never represents a GitHub-hosted
+  repository or commit. The Fake Provider demonstrates evidence/citation plumbing only; it makes no
+  claim about external model quality.
+- Production-shaped Compose requires HTTPS origins, Secure Cookies, an explicit database password,
+  disables Demo Seed, removes the PostgreSQL host port, and applies read-only/no-new-privileges
+  container settings.
+
+### Verification
+
+- OpenAPI 61/61, Biome 184 files, TypeScript 23/23, all workspace test tasks, Chromium 10/10, Store
+  PostgreSQL integration 12/12, deterministic benchmark, three image builds, Compose Demo Smoke,
+  hardened configuration, `git diff --check`, credential scan, and `git fsck --full` passed.
+- Real private GitHub App and external model quality remain environment-dependent and are not claimed
+  by this release.
+
 ## [1.0.0] - 2026-08-25
 
 ### Added

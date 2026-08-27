@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Until v1.0, only the latest released RepoVista version receives security fixes.
+Only the latest released RepoVista version receives security fixes.
 
 ## Reporting a vulnerability
 
@@ -15,7 +15,7 @@ code or live credentials unless the owner explicitly provides a secure transfer 
 
 Include the affected version or commit, reproduction steps, impact, and any suggested mitigation.
 
-## Current security boundary (v0.5)
+## Current security boundary (v1.1)
 
 RepoVista keeps an anonymous public demo and also supports authenticated team Workspaces. Private
 repositories are available only through a connected GitHub App installation and an authenticated
@@ -52,4 +52,7 @@ For production deployments, use HTTPS for both Web/API origins and set `AUTH_COO
 configuration loader rejects insecure production authentication settings. Local Compose uses a
 development environment by default for localhost testing and must not be exposed directly to the
 internet. Run internet-facing deployments with container, network, database, and operating-system
-isolation.
+isolation. The bundled deterministic demo is enabled only by the local Compose configuration;
+production deployments must disable `DEMO_SEED_ENABLED` and should apply the documented hardened
+Compose overlay. Fixture revisions are synthetic content hashes and the Fake Provider is not an
+external AI quality claim.

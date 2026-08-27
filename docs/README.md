@@ -1,6 +1,6 @@
 # RepoVista 工程文档
 
-状态：v1.0 已实现并完成 Explanation History、纯结构比较、CLI/Web 链路、数据库回填与 OpenAPI 同步（2026-08-25）
+状态：v1.1 可复现 Demo、贡献者体验与部署加固已完成验收（2026-08-27）
 
 本目录描述当前代码，而不是早期愿景。发生冲突时，事实来源优先级如下：
 
@@ -123,6 +123,18 @@
 | [v1.0 测试与发布计划](./operations/v1.0测试与发布计划.md) | 单元、API、数据库、E2E、Compose 和 Git 门禁 |
 | [v1.0 验收记录](./releases/v1.0-验收记录.md) | 实际命令、测试结果、边界、提交和远端审计 |
 
+## v1.1 实施完成
+
+| 文档 | 内容 |
+|---|---|
+| [版本开发计划](./releases/v1.1-开发计划.md) | 两版多语言 Fixture、幂等 Seed、一键 Demo、贡献与部署完成定义 |
+| [v1.1 后端开发文档](./backend/v1.1后端开发文档.md) | 离线 Worker Seed、精确 Job Claim、Fake Explanation 和 Compose 生命周期 |
+| [v1.1 数据库设计](./database/v1.1数据库设计.md) | 无新 Migration 的正式模型复用、幂等、恢复与保留规则 |
+| [v1.1 前端开发文档](./frontend/v1.1前端开发文档.md) | 首页入口、Fixture 标识、能力边界和可访问性 |
+| [v1.1 Demo AI 可信边界](./ai/v1.1演示可信边界.md) | Fake Provider 能证明和不能证明的范围 |
+| [v1.1 测试与发布计划](./operations/v1.1测试与发布计划.md) | Fixture、PostgreSQL、Compose Smoke、Hardened Overlay 与 Git 门禁 |
+| [v1.1 验收记录](./releases/v1.1-验收记录.md) | 实际门禁结果、Compose/数据库证据、边界与 Git 审计 |
+
 ## 前端
 
 | 文档 | 内容 |
@@ -135,7 +147,7 @@
 | 文档 | 内容 |
 |---|---|
 | [后端开发文档](./backend/后端开发文档.md) | Fastify 请求边界、配置、错误和模块职责 |
-| [API 接口契约](./backend/API接口契约.md) | 61 个 v1.0 Operation、Cookie/Bearer、Workspace、策略 Profile、Guardrails/解释历史/结构比较/SARIF、SSE、Retrieval、Story 与 PR Impact |
+| [API 接口契约](./backend/API接口契约.md) | 61 个当前 Operation、Cookie/Bearer、Workspace、策略 Profile、Guardrails/解释历史/结构比较/SARIF、SSE、Retrieval、Story 与 PR Impact |
 | [任务与索引流水线](./backend/任务与索引流水线.md) | 租约任务、安全克隆、扫描、解析和持久化 |
 
 ## 数据与可信 AI

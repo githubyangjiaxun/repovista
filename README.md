@@ -27,6 +27,20 @@ The map, source browser, search, reading path, and share reports remain useful w
 key. The default `fake` provider is a transparent deterministic evidence summarizer, so the full
 workflow can be evaluated locally before connecting Ollama or an OpenAI-compatible endpoint.
 
+## What v1.1 adds
+
+- A bundled, reviewable two-revision TypeScript/Python/Go fixture that is indexed through the same
+  Scanner, Tree-sitter, Graph, Worker lease, Store, Guardrails, and citation paths as normal data.
+- One-command Compose startup with an idempotent offline seed: no GitHub account, model key, Ollama,
+  or external repository is needed to open a Ready architecture workspace.
+- A Full Base and real Incremental Head with visible changed/reused/parsed/deleted counters, plus
+  deterministic Fake Provider explanations and cross-Snapshot history for one stable Finding.
+- A homepage shortcut, API smoke command, contributor workflow, and an opt-in hardened Compose
+  overlay that disables demo data for production deployments.
+
+The fixture revisions are synthetic content-manifest hashes, not GitHub-hosted commits. The Fake
+Provider proves evidence and citation plumbing; it is not a claim about external model quality.
+
 ## What v1.0 includes
 
 - Cursor-paginated history for verified Guardrail explanations across immutable Snapshots of the
@@ -196,6 +210,14 @@ Then open:
 - Web: <http://localhost:3000>
 - API readiness: <http://localhost:4000/v1/health/ready>
 
+The first start seeds a bundled offline Demo and then starts the normal Worker. Open the homepage and
+choose **Open the bundled demo**, or verify the whole public API path with:
+
+```bash
+pnpm install --frozen-lockfile
+pnpm demo:smoke
+```
+
 Paste a public GitHub URL, wait for the Worker to finish, and explore the resulting immutable
 snapshot. Follow progress or stop the stack with:
 
@@ -206,6 +228,10 @@ docker compose down
 
 `docker compose down` preserves the PostgreSQL volume. Use `docker compose down -v` only when you
 explicitly want to delete RepoVista's local database.
+
+Set `DEMO_SEED_ENABLED=false` to skip bundled data. For an internet-facing deployment, use the
+[hardened deployment profile](docs/operations/生产部署加固.md); the default Compose file is a local
+evaluation configuration and must not be exposed directly to the internet.
 
 ## CLI
 
@@ -355,12 +381,12 @@ docker compose config --quiet
 DATABASE_TEST_URL=postgresql://repovista:repovista@localhost:5432/repovista pnpm test
 ```
 
-`pnpm check` validates the 51-operation OpenAPI contract, formatting/lint rules, TypeScript,
+`pnpm check` validates the 61-operation OpenAPI contract, formatting/lint rules, TypeScript,
 unit/integration tests that have their required environment, and production builds. Playwright
 covers import, incremental progress, Python source navigation, map/source exploration, grounded
 answers, sharing, repository listing, deterministic Markdown/SVG downloads, pull-request impact
-progress/filters/fixed evidence, Retrieval Lab modes/degradation, Architecture Story v2, and
-structured failures with deterministic network mocks. The independent VS Code project has its own
+progress/filters/fixed evidence, Retrieval Lab modes/degradation, Architecture Story v2, the
+bundled Demo entry, and structured failures with deterministic network mocks. The independent VS Code project has its own
 `pnpm check` and reproducible `vsce package` gate.
 
 ## Security model
