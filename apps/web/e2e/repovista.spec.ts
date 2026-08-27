@@ -23,6 +23,22 @@ const baselineCommitSha = "1111111111111111111111111111111111111111";
 const guardrailExplanationSubjectKey = `sha256:${"c".repeat(64)}`;
 const baseGuardrailExplanationId = "01900000-0000-7000-8000-000000000040";
 const headGuardrailExplanationId = "01900000-0000-7000-8000-000000000041";
+const bundledDemoRepositoryId = "01900000-0000-7000-8000-000000000050";
+const bundledDemoSnapshotId = "01900000-0000-7000-8000-000000000051";
+const bundledDemoRepository = {
+  id: bundledDemoRepositoryId,
+  owner: "repovista-fixtures",
+  name: "polyglot-demo",
+  canonicalUrl: "https://repovista-demo.invalid/polyglot-demo",
+  defaultBranch: "fixture-main",
+  latestSnapshotId: bundledDemoSnapshotId,
+  latestSnapshotStatus: "ready",
+  latestCommitSha: "abcdef0123456789abcdef0123456789abcdef01",
+  autoUpdateEnabled: false,
+  lastWebhookAt: null,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+};
 
 const defaultGuardrailProfile = {
   id: "00000000-0000-7000-8000-000000000003",
@@ -1676,6 +1692,87 @@ test("lists existing repositories and opens an immutable snapshot", async ({ con
     { timeout: 30_000 },
   );
   await expect(page.getByText("main · 0123456")).toBeVisible({ timeout: 30_000 });
+});
+
+test("opens the bundled deterministic demo from the homepage", async ({ context, page }) => {
+  await installMockApi(context);
+  await context.unroute(`${apiOrigin}/v1/**`);
+  await context.route(`${apiOrigin}/v1/**`, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "OPTIONS") {
+      await route.fulfill({ headers: corsHeaders(), status: 204 });
+      return;
+    }
+    if (url.pathname === "/v1/auth/session") {
+      await json(route, {
+        authenticated: false,
+        user: null,
+        workspace: null,
+        workspaces: [],
+        csrfToken: null,
+        capabilities: { githubLogin: false, githubApp: false, privateRepositories: false },
+      });
+      return;
+    }
+    if (url.pathname === "/v1/repositories") {
+      await json(route, [bundledDemoRepository]);
+      return;
+    }
+    if (url.pathname === `/v1/repositories/${bundledDemoRepositoryId}`) {
+      await json(route, bundledDemoRepository);
+      return;
+    }
+    if (url.pathname === `/v1/snapshots/${bundledDemoSnapshotId}`) {
+      await json(route, {
+        ...snapshot,
+        id: bundledDemoSnapshotId,
+        repositoryId: bundledDemoRepositoryId,
+        commitSha: bundledDemoRepository.latestCommitSha,
+        refName: "fixture-main",
+      });
+      return;
+    }
+    if (url.pathname === `/v1/snapshots/${bundledDemoSnapshotId}/files`) {
+      await json(route, { files, nextCursor: null });
+      return;
+    }
+    if (url.pathname === `/v1/repositories/${bundledDemoRepositoryId}/snapshots`) {
+      await json(route, [
+        {
+          ...snapshot,
+          id: bundledDemoSnapshotId,
+          repositoryId: bundledDemoRepositoryId,
+          commitSha: bundledDemoRepository.latestCommitSha,
+          refName: "fixture-main",
+        },
+      ]);
+      return;
+    }
+    if (url.pathname === `/v1/snapshots/${bundledDemoSnapshotId}/map`) {
+      await json(route, graph(url.searchParams.get("level") ?? "package"));
+      return;
+    }
+    if (url.pathname === "/v1/integrations/github") {
+      await json(route, {
+        enabled: false,
+        appSlug: null,
+        events: [],
+        scope: "public-repositories",
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page.goto("/");
+  await page.getByRole("link", { name: /Open the bundled demo/ }).click();
+  await expect(page).toHaveURL(
+    `${webOrigin}/repositories/${bundledDemoRepositoryId}?snapshotId=${bundledDemoSnapshotId}`,
+  );
+  await expect(page.getByText("Bundled deterministic fixture")).toBeVisible();
+  await expect(page.getByText("Synthetic revision · offline")).toBeVisible();
+  await expect(page.getByText(/Pull request impact is available/)).toBeVisible();
 });
 
 test("shows structured API failures with a request ID", async ({ context, page }) => {

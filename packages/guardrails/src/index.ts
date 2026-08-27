@@ -534,7 +534,7 @@ export interface SarifLog {
   runs: Array<Record<string, unknown>>;
 }
 
-export function buildSarifReport(report: GuardrailReport, toolVersion = "1.0.0"): SarifLog {
+export function buildSarifReport(report: GuardrailReport, toolVersion = "1.1.0"): SarifLog {
   const ruleIds = [...new Set(report.findings.map((finding) => finding.ruleId))].sort();
   const rules = ruleIds.map((id) => ({ id, name: id.replaceAll("_", " ") }));
   return {

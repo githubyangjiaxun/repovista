@@ -1,5 +1,6 @@
 "use client";
 
+import { isBundledDemoRepository } from "@repovista/contracts";
 import { ArrowRight, GitBranch, Github, LoaderCircle, LockKeyhole, Plus } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -61,6 +62,9 @@ export function RepositoryList() {
                   <LockKeyhole aria-label="Private repository" size={14} />
                 ) : null}
               </h2>
+              {isBundledDemoRepository(repository.canonicalUrl) ? (
+                <span className="fixture-badge">Bundled demo</span>
+              ) : null}
               <p>
                 <GitBranch size={13} /> {repository.defaultBranch ?? "default branch"} ·{" "}
                 {repository.latestCommitSha?.slice(0, 7) ?? "waiting"}

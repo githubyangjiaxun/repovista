@@ -166,7 +166,7 @@ describe("RepoVistaClient", () => {
       expect.objectContaining({ method: "POST" }),
     );
     const request = fetchImplementation.mock.calls[0]?.[1] as RequestInit;
-    expect((request.headers as Headers).get("User-Agent")).toBe("RepoVista-CLI/1.0.0");
+    expect((request.headers as Headers).get("User-Agent")).toBe("RepoVista-CLI/1.1.0");
     expect(JSON.parse(String(request.body))).toEqual({
       url: "https://github.com/acme/demo",
       ref: "main",
@@ -448,7 +448,7 @@ describe("RepoVistaClient", () => {
       expect(String(input)).toBe(
         `http://localhost:4000/v1/snapshots/${repositoryId}/guardrails/compare?baseSnapshotId=${snapshotId}`,
       );
-      expect(new Headers(init?.headers).get("User-Agent")).toBe("RepoVista-CLI/1.0.0");
+      expect(new Headers(init?.headers).get("User-Agent")).toBe("RepoVista-CLI/1.1.0");
       return jsonResponse({ data: comparison, meta: { requestId: "request-compare" } });
     });
     const client = new RepoVistaClient({

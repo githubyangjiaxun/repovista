@@ -4820,7 +4820,11 @@ export class RepoVistaStore {
     }));
   }
 
-  async claimIndexJob(workerId: string, leaseSeconds: number): Promise<ClaimedIndexJob | null> {
+  async claimIndexJob(
+    workerId: string,
+    leaseSeconds: number,
+    jobId?: string,
+  ): Promise<ClaimedIndexJob | null> {
     return withTransaction(this.pool, async (client) => {
       const claimed = await client.query<{
         id: string;
@@ -4833,6 +4837,7 @@ export class RepoVistaStore {
         "WITH candidate AS (" +
           "SELECT id FROM analysis_jobs " +
           "WHERE job_type = 'index_snapshot' " +
+          "AND ($3::uuid IS NULL OR id = $3) " +
           "AND ((status = 'queued' AND available_at <= now()) " +
           "OR (status = 'running' AND lease_expires_at < now())) " +
           "AND attempt_count < max_attempts " +
@@ -4848,7 +4853,7 @@ export class RepoVistaStore {
           "FROM candidate WHERE jobs.id = candidate.id " +
           "RETURNING jobs.id, jobs.repository_id, jobs.snapshot_id, jobs.workspace_id, " +
           "jobs.attempt_count, jobs.max_attempts",
-        [workerId, leaseSeconds],
+        [workerId, leaseSeconds, jobId ?? null],
       );
 
       const job = claimed.rows[0];

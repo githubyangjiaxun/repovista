@@ -1,6 +1,6 @@
 {
   "name": "@repovista/worker",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "files": [
@@ -8,20 +8,25 @@
   ],
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsup src/server.ts --format esm --platform node --sourcemap --no-splitting",
+    "build": "tsup src/server.ts src/demo-seed.ts --format esm --platform node --sourcemap --no-splitting",
     "build:runtime": "pnpm run build",
     "start": "node dist/server.js",
+    "seed": "tsx src/demo-seed.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@repovista/ai": "workspace:*",
     "@repovista/config": "workspace:*",
+    "@repovista/contracts": "workspace:*",
     "@repovista/database": "workspace:*",
+    "@repovista/demo": "workspace:*",
     "@repovista/domain": "workspace:*",
     "@repovista/embeddings": "workspace:*",
     "@repovista/git": "workspace:*",
     "@repovista/github": "workspace:*",
     "@repovista/graph": "workspace:*",
+    "@repovista/guardrails": "workspace:*",
     "@repovista/impact": "workspace:*",
     "@repovista/parser": "workspace:*"
   }

@@ -671,6 +671,42 @@ integration("RepoVistaStore with PostgreSQL", () => {
     expect(updatedRepository?.latestSnapshotId).toBe(incrementalJob.snapshotId);
   });
 
+  it("claims an explicitly selected index job without consuming an earlier queued job", async () => {
+    const suffix = randomUUID();
+    const first = await store.createRepositoryImport({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      identity: {
+        owner: "repovista-claim-test",
+        name: `${suffix}-first`,
+        canonicalUrl: `https://github.com/repovista-claim-test/${suffix}-first`,
+        cloneUrl: `https://github.com/repovista-claim-test/${suffix}-first.git`,
+      },
+      ignore: [],
+      parserVersion: "integration-claim-v1",
+    });
+    const second = await store.createRepositoryImport({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      identity: {
+        owner: "repovista-claim-test",
+        name: `${suffix}-second`,
+        canonicalUrl: `https://github.com/repovista-claim-test/${suffix}-second`,
+        cloneUrl: `https://github.com/repovista-claim-test/${suffix}-second.git`,
+      },
+      ignore: [],
+      parserVersion: "integration-claim-v1",
+    });
+    repositoryIds.add(first.repositoryId);
+    repositoryIds.add(second.repositoryId);
+
+    const selected = await store.claimIndexJob(`selected-${suffix}`, 30, second.jobId);
+    expect(selected?.id).toBe(second.jobId);
+    const remaining = await store.claimIndexJob(`remaining-${suffix}`, 30);
+    expect(remaining?.id).toBe(first.jobId);
+    if (!selected || !remaining) throw new Error("Expected both queued jobs to be claimable.");
+    await store.cancelJob(selected.id, selected.snapshotId, `selected-${suffix}`);
+    await store.cancelJob(remaining.id, remaining.snapshotId, `remaining-${suffix}`);
+  });
+
   it("reports the canonical edge count after unresolved calls resolve to one target", async () => {
     const suffix = randomUUID();
     const imported = await store.createRepositoryImport({

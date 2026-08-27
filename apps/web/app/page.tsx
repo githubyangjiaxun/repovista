@@ -6,6 +6,7 @@ import {
   RefreshCw,
   ShieldCheck,
 } from "lucide-react";
+import { BundledDemoLink } from "@/components/bundled-demo-link";
 import { SiteHeader } from "@/components/site-header";
 
 const features = [
@@ -71,6 +72,10 @@ export default function HomePage() {
           Imported code is never run. Private access uses short-lived installation credentials, and
           signed default-branch pushes can create incremental snapshots automatically.
         </p>
+        <div className="demo-entry">
+          <BundledDemoLink />
+          <small>No GitHub account, model key, or external model is required.</small>
+        </div>
       </section>
 
       <section className="feature-grid">

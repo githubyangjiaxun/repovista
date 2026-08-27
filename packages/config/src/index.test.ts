@@ -12,15 +12,26 @@ describe("loadConfig", () => {
     ).toBe("signed-update-secret");
   });
 
+  it("treats an empty optional GitHub App ID as disabled", () => {
+    expect(loadConfig({ GITHUB_APP_ID: "" }).GITHUB_APP_ID).toBeUndefined();
+    expect(loadConfig({ GITHUB_APP_ID: "42" }).GITHUB_APP_ID).toBe(42);
+  });
+
   it("keeps semantic retrieval disabled unless an embedding provider is explicit", () => {
     const config = loadConfig({});
     expect(config).toMatchObject({
+      DEMO_SEED_ENABLED: false,
       EMBEDDING_PROVIDER: "none",
       EMBEDDING_BATCH_SIZE: 16,
       EMBEDDING_INPUT_MAX_CHARS: 12_000,
       EMBEDDING_REQUEST_TIMEOUT_MS: 60_000,
     });
     expect(config.EMBEDDING_MODEL).toBeUndefined();
+  });
+
+  it("requires an explicit opt-in for bundled demo seeding", () => {
+    expect(loadConfig({ DEMO_SEED_ENABLED: "true" }).DEMO_SEED_ENABLED).toBe(true);
+    expect(() => loadConfig({ DEMO_SEED_ENABLED: "yes" })).toThrow();
   });
 
   it("normalizes empty optional model and endpoint values", () => {

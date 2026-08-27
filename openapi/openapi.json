@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RepoVista API",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Evidence-first repository indexing with private GitHub App access, Workspace authorization, immutable Guardrail policy profiles, deterministic Architecture Guardrails and SARIF, verified explanation history and structural comparison, auditable sessions, API tokens, versioned semantic indexes, transparent hybrid retrieval, architecture stories, pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, and grounded answers."
   },
   "servers": [

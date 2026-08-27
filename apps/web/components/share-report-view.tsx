@@ -1,6 +1,10 @@
 "use client";
 
-import type { ArchitectureStoryV2, GraphResponse } from "@repovista/contracts";
+import {
+  type ArchitectureStoryV2,
+  type GraphResponse,
+  isBundledDemoRepository,
+} from "@repovista/contracts";
 import {
   BookOpen,
   Calendar,
@@ -60,6 +64,7 @@ export function ShareReportView({ slug }: { slug: string }) {
     : null;
 
   const story = isStoryV2(report.content) ? report.content : null;
+  const bundledDemo = isBundledDemoRepository(report.repository.canonicalUrl);
 
   return (
     <main className="share-report">
@@ -79,9 +84,15 @@ export function ShareReportView({ slug }: { slug: string }) {
         <h1>{story?.headline ?? report.title}</h1>
         <p>{report.content.overview}</p>
         <div className="share-meta">
-          <a href={report.repository.canonicalUrl} rel="noreferrer" target="_blank">
-            <Github size={15} /> {report.repository.owner}/{report.repository.name}
-          </a>
+          {bundledDemo ? (
+            <span title="Bundled synthetic fixture; no external GitHub repository">
+              <Github size={15} /> {report.repository.owner}/{report.repository.name} · bundled
+            </span>
+          ) : (
+            <a href={report.repository.canonicalUrl} rel="noreferrer" target="_blank">
+              <Github size={15} /> {report.repository.owner}/{report.repository.name}
+            </a>
+          )}
           <span>
             <GitCommitHorizontal size={15} /> {report.snapshot.commitSha?.slice(0, 7)}
           </span>

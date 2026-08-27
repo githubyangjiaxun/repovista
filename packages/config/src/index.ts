@@ -15,6 +15,11 @@ const optionalText = z.preprocess(
   z.string().trim().min(1).optional(),
 );
 
+const optionalPositiveInteger = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+  z.coerce.number().int().positive().optional(),
+);
+
 const envSchema = z.object({
   APP_ENV: z.enum(["development", "test", "production"]).default("development"),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace"]).default("info"),
@@ -52,7 +57,7 @@ const envSchema = z.object({
   GITHUB_API_TOKEN: optionalSecret,
   GITHUB_API_ORIGIN: z.url().default("https://api.github.com"),
   GITHUB_APP_SLUG: z.string().trim().min(1).max(100).default("repovista-local"),
-  GITHUB_APP_ID: z.coerce.number().int().positive().optional(),
+  GITHUB_APP_ID: optionalPositiveInteger,
   GITHUB_APP_CLIENT_ID: optionalText,
   GITHUB_APP_CLIENT_SECRET: optionalSecret,
   GITHUB_APP_PRIVATE_KEY: optionalSecret,
@@ -70,6 +75,7 @@ const envSchema = z.object({
     .max(10_485_760)
     .default(1_048_576),
   RUN_MIGRATIONS_ON_START: booleanFromString,
+  DEMO_SEED_ENABLED: booleanFromString,
 });
 
 export type AppConfig = z.infer<typeof envSchema> & {

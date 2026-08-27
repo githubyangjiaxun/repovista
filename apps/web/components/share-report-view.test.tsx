@@ -196,6 +196,30 @@ describe("ShareReportView", () => {
     expect(screen.queryByText("Provenance")).not.toBeInTheDocument();
   });
 
+  it("does not link a bundled fixture to an external repository", async () => {
+    const report: ShareReport = {
+      ...baseReport,
+      repository: {
+        ...baseReport.repository,
+        owner: "repovista-fixtures",
+        name: "polyglot-demo",
+        canonicalUrl: "https://repovista-demo.invalid/polyglot-demo",
+      },
+      content: {
+        version: 1,
+        overview: "A bundled deterministic fixture.",
+        map: { nodes: [], edges: [], truncated: false },
+        readingPath: [],
+      },
+    };
+    vi.mocked(fetch).mockResolvedValue(success(report));
+
+    render(<ShareReportView slug={report.slug} />);
+
+    expect(await screen.findByText(/repovista-fixtures\/polyglot-demo · bundled/)).toBeVisible();
+    expect(screen.queryByRole("link", { name: /repovista-fixtures\/polyglot-demo/ })).toBeNull();
+  });
+
   it("labels private reports as workspace-only content", async () => {
     const report: ShareReport = {
       ...baseReport,

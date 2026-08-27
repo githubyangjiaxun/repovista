@@ -159,12 +159,21 @@ importers:
 
   apps/worker:
     dependencies:
+      '@repovista/ai':
+        specifier: workspace:*
+        version: link:../../packages/ai
       '@repovista/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@repovista/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@repovista/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@repovista/demo':
+        specifier: workspace:*
+        version: link:../../packages/demo
       '@repovista/domain':
         specifier: workspace:*
         version: link:../../packages/domain
@@ -180,6 +189,9 @@ importers:
       '@repovista/graph':
         specifier: workspace:*
         version: link:../../packages/graph
+      '@repovista/guardrails':
+        specifier: workspace:*
+        version: link:../../packages/guardrails
       '@repovista/impact':
         specifier: workspace:*
         version: link:../../packages/impact
@@ -253,6 +265,27 @@ importers:
       '@types/pg':
         specifier: ^8.0.0
         version: 8.23.1
+
+  packages/demo:
+    dependencies:
+      '@repovista/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@repovista/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@repovista/git':
+        specifier: workspace:*
+        version: link:../git
+      '@repovista/graph':
+        specifier: workspace:*
+        version: link:../graph
+      '@repovista/guardrails':
+        specifier: workspace:*
+        version: link:../guardrails
+      '@repovista/parser':
+        specifier: workspace:*
+        version: link:../parser
 
   packages/domain:
     dependencies:

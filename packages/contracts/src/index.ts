@@ -2,6 +2,21 @@ import { z } from "zod";
 
 export const PARSER_VERSION = "tree-sitter-ts-js-py-go-v1";
 
+export const BUNDLED_DEMO_REPOSITORY = {
+  owner: "repovista-fixtures",
+  name: "polyglot-demo",
+  // RFC 6761 reserves `.invalid` for examples that must never resolve to a
+  // real network resource. The bundled fixture is generated locally, so its
+  // identity must not look like an actual GitHub repository.
+  canonicalUrl: "https://repovista-demo.invalid/polyglot-demo",
+  cloneUrl: "https://repovista-demo.invalid/polyglot-demo.git",
+  defaultBranch: "fixture-main",
+} as const;
+
+export function isBundledDemoRepository(canonicalUrl: string): boolean {
+  return canonicalUrl === BUNDLED_DEMO_REPOSITORY.canonicalUrl;
+}
+
 export const idSchema = z.string().uuid();
 export const commitShaSchema = z.string().regex(/^[a-f0-9]{7,64}$/i);
 

@@ -57,6 +57,7 @@ services:
       AUTH_TOKEN_TTL_DAYS: ${AUTH_TOKEN_TTL_DAYS:-90}
       AUTH_ALLOW_SIGNUP: ${AUTH_ALLOW_SIGNUP:-true}
       RUN_MIGRATIONS_ON_START: "true"
+      DEMO_SEED_ENABLED: ${DEMO_SEED_ENABLED:-true}
       WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
     depends_on:
       postgres:
@@ -99,6 +100,7 @@ services:
       OPENAI_COMPATIBLE_API_KEY: ${OPENAI_COMPATIBLE_API_KEY:-}
       OPENAI_COMPATIBLE_BASE_URL: ${OPENAI_COMPATIBLE_BASE_URL:-}
       RUN_MIGRATIONS_ON_START: "false"
+      DEMO_SEED_ENABLED: "false"
       WORKER_ID: ${WORKER_ID:-compose-worker}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_PRIVATE_KEY: ${GITHUB_APP_PRIVATE_KEY:-}
@@ -106,9 +108,38 @@ services:
     depends_on:
       api:
         condition: service_healthy
+      demo-seed:
+        condition: service_completed_successfully
     tmpfs:
       - /tmp:size=768m,mode=1777
     restart: unless-stopped
+
+  demo-seed:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+      args:
+        NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmjs.org}
+    command: ["node", "dist/demo-seed.js"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: postgresql://repovista:repovista@postgres:5432/repovista
+      DATABASE_MAX_CONNECTIONS: ${DATABASE_MAX_CONNECTIONS:-10}
+      JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-900}
+      JOB_POLL_INTERVAL_MS: ${JOB_POLL_INTERVAL_MS:-1000}
+      JOB_LEASE_SECONDS: ${JOB_LEASE_SECONDS:-30}
+      WORKER_ID: demo-seed
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      MODEL_PROVIDER: fake
+      EMBEDDING_PROVIDER: none
+      RUN_MIGRATIONS_ON_START: "false"
+      DEMO_SEED_ENABLED: ${DEMO_SEED_ENABLED:-true}
+    depends_on:
+      api:
+        condition: service_healthy
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    restart: "no"
 
   web:
     build:

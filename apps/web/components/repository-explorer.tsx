@@ -1,6 +1,6 @@
 "use client";
 
-import type { GraphLevel, RetrievalMode } from "@repovista/contracts";
+import { type GraphLevel, isBundledDemoRepository, type RetrievalMode } from "@repovista/contracts";
 import {
   ArrowRight,
   BookOpen,
@@ -391,17 +391,29 @@ export function RepositoryExplorer({
     );
   }
 
+  const bundledDemo = isBundledDemoRepository(repository.canonicalUrl);
+
   return (
     <div className="repository-workspace">
       <header className="repository-topbar">
         <div className="repository-identity">
-          <a href={repository.canonicalUrl} rel="noreferrer" target="_blank">
+          <a
+            href={bundledDemo ? undefined : repository.canonicalUrl}
+            rel={bundledDemo ? undefined : "noreferrer"}
+            target={bundledDemo ? undefined : "_blank"}
+            title={
+              bundledDemo ? "Bundled synthetic fixture; no external GitHub repository" : undefined
+            }
+          >
             <Github size={18} />
             <span>{repository.owner}</span>
             <ChevronRight size={14} />
             <strong>{repository.name}</strong>
-            <ExternalLink size={13} />
+            {bundledDemo ? null : <ExternalLink size={13} />}
           </a>
+          {bundledDemo ? (
+            <span className="fixture-badge">Bundled deterministic fixture</span>
+          ) : null}
           <span className="commit-chip">
             <GitBranch size={13} /> {snapshot.refName ?? repository.defaultBranch ?? "detached"} ·{" "}
             {shortSha(snapshot.commitSha)}
@@ -416,15 +428,19 @@ export function RepositoryExplorer({
           </span>
         </div>
         <div className="repository-actions">
-          <button
-            className="secondary-button"
-            disabled={reindexing}
-            onClick={() => void reindex()}
-            type="button"
-          >
-            {reindexing ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}
-            Reindex
-          </button>
+          {bundledDemo ? (
+            <span className="demo-boundary-note">Synthetic revision · offline</span>
+          ) : (
+            <button
+              className="secondary-button"
+              disabled={reindexing}
+              onClick={() => void reindex()}
+              type="button"
+            >
+              {reindexing ? <LoaderCircle className="spin" size={15} /> : <RefreshCw size={15} />}
+              Reindex
+            </button>
+          )}
           <button
             className="primary-button"
             disabled={sharing}
@@ -477,32 +493,38 @@ export function RepositoryExplorer({
           >
             <Search size={17} /> Search evidence
           </button>
-          <form className="sidebar-impact-form" onSubmit={analyzePullRequest}>
-            <label htmlFor="sidebar-pr-number">Pull request impact</label>
-            <div>
-              <GitPullRequest size={15} />
-              <input
-                id="sidebar-pr-number"
-                inputMode="numeric"
-                min={1}
-                onChange={(event) => setPrNumber(event.target.value)}
-                placeholder="PR number"
-                type="number"
-                value={prNumber}
-              />
-              <button
-                aria-label="Analyze pull request"
-                disabled={creatingImpact || !prNumber}
-                type="submit"
-              >
-                {creatingImpact ? (
-                  <LoaderCircle className="spin" size={14} />
-                ) : (
-                  <ArrowRight size={14} />
-                )}
-              </button>
-            </div>
-          </form>
+          {bundledDemo ? (
+            <p className="sidebar-boundary-note">
+              Pull request impact is available for real GitHub repositories.
+            </p>
+          ) : (
+            <form className="sidebar-impact-form" onSubmit={analyzePullRequest}>
+              <label htmlFor="sidebar-pr-number">Pull request impact</label>
+              <div>
+                <GitPullRequest size={15} />
+                <input
+                  id="sidebar-pr-number"
+                  inputMode="numeric"
+                  min={1}
+                  onChange={(event) => setPrNumber(event.target.value)}
+                  placeholder="PR number"
+                  type="number"
+                  value={prNumber}
+                />
+                <button
+                  aria-label="Analyze pull request"
+                  disabled={creatingImpact || !prNumber}
+                  type="submit"
+                >
+                  {creatingImpact ? (
+                    <LoaderCircle className="spin" size={14} />
+                  ) : (
+                    <ArrowRight size={14} />
+                  )}
+                </button>
+              </div>
+            </form>
+          )}
         </nav>
         <div className="sidebar-files-heading">
           <span>
