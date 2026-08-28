@@ -3764,6 +3764,14 @@ a {
   gap: 10px;
 }
 
+.guardrails-export-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
 .guardrail-thresholds article {
   min-height: 112px;
   padding: 16px;
@@ -3858,6 +3866,102 @@ a {
 
 .guardrail-finding small {
   color: var(--muted);
+}
+
+.guardrail-review {
+  margin-top: 14px;
+  padding: 12px;
+  display: grid;
+  gap: 9px;
+  border: 1px solid rgba(126, 232, 190, 0.2);
+  border-radius: 10px;
+  background: rgba(126, 232, 190, 0.035);
+}
+
+.guardrail-review-heading,
+.guardrail-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.guardrail-review-heading {
+  justify-content: space-between;
+}
+
+.guardrail-review-status {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-strong);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.review-acknowledged {
+  color: var(--accent);
+}
+
+.review-accepted_risk {
+  color: var(--warning);
+}
+
+.review-false_positive {
+  color: #91cfff;
+}
+
+.guardrail-review-disclaimer {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.guardrail-review label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.guardrail-review select,
+.guardrail-review textarea {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.18);
+  font: inherit;
+}
+
+.guardrail-review textarea {
+  min-height: 58px;
+  resize: vertical;
+}
+
+.guardrail-review-actions button {
+  min-height: 30px;
+  padding: 6px 9px;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  border: 1px solid rgba(126, 232, 190, 0.35);
+  border-radius: 7px;
+  color: var(--accent);
+  background: rgba(126, 232, 190, 0.06);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.guardrail-review-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.guardrail-review-error {
+  color: var(--danger);
+  font-size: 11px;
 }
 
 .guardrail-finding > button {

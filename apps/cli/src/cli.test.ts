@@ -207,7 +207,7 @@ describe("RepoVista CLI", () => {
     const exitCode = await runCli(["--version"], dependencies);
 
     expect(exitCode).toBe(0);
-    expect(stdout).toEqual(["1.1.0"]);
+    expect(stdout).toEqual(["1.2.0"]);
     expect(stderr).toEqual([]);
     expect(fetchImplementation).not.toHaveBeenCalled();
   });
@@ -529,6 +529,130 @@ describe("RepoVista CLI", () => {
     const exitCode = await runCli(["guardrails", snapshotId, "--json"], dependencies);
     expect(exitCode).toBe(0);
     expect(JSON.parse(stdout.join("\n"))).toMatchObject({ status: "pass" });
+  });
+
+  it("lists and mutates human Guardrail reviews without changing CI semantics", async () => {
+    const review = {
+      findingId: guardrailFinding.id,
+      subjectKey,
+      status: "accepted_risk" as const,
+      note: "Known boundary",
+      reviewer: { userId, login: "reviewer", displayName: "Reviewer" },
+      reviewedAt: "2026-08-25T00:00:00.000Z",
+      updatedAt: "2026-08-25T00:00:00.000Z",
+    };
+    const reviews = {
+      snapshot: { id: snapshotId, commitSha: snapshot.commitSha },
+      reviews: [review],
+    };
+    const fetchImplementation = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(envelope(reviews))
+      .mockResolvedValueOnce(envelope(review))
+      .mockResolvedValueOnce(
+        envelope({
+          ...review,
+          status: "unreviewed",
+          note: "",
+          reviewer: null,
+          reviewedAt: null,
+          updatedAt: null,
+        }),
+      );
+    const { dependencies, stdout } = harness(fetchImplementation as typeof fetch);
+
+    expect(await runCli(["guardrails", "reviews", "list", snapshotId], dependencies)).toBe(0);
+    expect(stdout.join("\n")).toContain("Reviewed: 1/1");
+    expect(stdout.join("\n")).toContain(
+      "Deterministic Guardrail status and CI decisions are unchanged by reviews.",
+    );
+    stdout.length = 0;
+    expect(
+      await runCli(
+        [
+          "guardrails",
+          "reviews",
+          "set",
+          snapshotId,
+          guardrailFinding.id,
+          "accepted_risk",
+          "--note",
+          "Known boundary",
+        ],
+        dependencies,
+      ),
+    ).toBe(0);
+    expect(stdout.join("\n")).toContain("accepted_risk");
+    stdout.length = 0;
+    expect(
+      await runCli(
+        ["guardrails", "reviews", "clear", snapshotId, guardrailFinding.id],
+        dependencies,
+      ),
+    ).toBe(0);
+    expect(stdout.join("\n")).toContain("cleared (unreviewed)");
+    expect(String(fetchImplementation.mock.calls[1]?.[0])).toContain("/guardrails/reviews/");
+    expect(
+      JSON.parse(String((fetchImplementation.mock.calls[1]?.[1] as RequestInit).body)),
+    ).toEqual({ status: "accepted_risk", note: "Known boundary" });
+  });
+
+  it("writes a separate review JSON export with restrictive file permissions", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "repovista-guardrails-json-"));
+    const jsonPath = path.join(directory, "report.json");
+    const clean = {
+      algorithmVersion: "architecture-guardrails-v1",
+      snapshot: {
+        id: snapshotId,
+        commitSha: snapshot.commitSha,
+        parserVersion: snapshot.parserVersion,
+      },
+      generatedAt: snapshot.readyAt,
+      status: "pass" as const,
+      summary: { total: 0, errors: 0, warnings: 0, infos: 0 },
+      thresholds: {
+        cycleMaxLength: 12,
+        largeFileLines: 800,
+        largeFileBytes: 102400,
+        largeSymbolLines: 150,
+        highFanIn: 20,
+      },
+      findings: [],
+    };
+    const exported = {
+      schemaVersion: "repovista.guardrails.v1",
+      deterministic: clean,
+      reviews: [],
+    };
+    const fetchImplementation = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(envelope(clean))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(exported), {
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Disposition": 'attachment; filename="guardrails.json"',
+          },
+        }),
+      );
+    const { dependencies, stdout } = harness(fetchImplementation as typeof fetch);
+    try {
+      expect(
+        await runCli(["guardrails", snapshotId, "--json-export", jsonPath], dependencies),
+      ).toBe(0);
+      expect(JSON.parse(await readFile(jsonPath, "utf8"))).toMatchObject({
+        schemaVersion: "repovista.guardrails.v1",
+        deterministic: { status: "pass" },
+        reviews: [],
+      });
+      const mode = (await import("node:fs/promises"))
+        .stat(jsonPath)
+        .then((item) => item.mode & 0o777);
+      await expect(mode).resolves.toBe(0o600);
+      expect(stdout.join("\n")).toContain(`JSON export: ${jsonPath}`);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("prints a verified Guardrail explanation with fixed provenance", async () => {

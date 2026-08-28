@@ -639,6 +639,142 @@ describe("GuardrailsPanel", () => {
     expect(screen.queryByRole("button", { name: /Explain .* with AI/ })).not.toBeInTheDocument();
   });
 
+  it("lets Editors save and clear review metadata while preserving deterministic status", async () => {
+    auth.current.session = authenticatedSession("editor");
+    setApiCsrfToken(auth.current.session.csrfToken);
+    const review = {
+      findingId: reportFinding.id,
+      subjectKey: `sha256:${"d".repeat(64)}`,
+      status: "accepted_risk" as const,
+      note: "Known boundary",
+      reviewer: {
+        userId: auth.current.session.user?.id ?? "01900000-0000-7000-8000-000000000011",
+        login: "architect",
+        displayName: "Architect",
+      },
+      reviewedAt: "2026-08-25T00:00:00.000Z",
+      updatedAt: "2026-08-25T00:00:00.000Z",
+    };
+    const cleared = {
+      ...review,
+      status: "unreviewed" as const,
+      note: "",
+      reviewer: null,
+      reviewedAt: null,
+      updatedAt: null,
+    };
+    const fetchImplementation = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      const policy = policyResponse(url);
+      if (policy) return policy;
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails`)) return envelope(report);
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails/reviews`)) {
+        return envelope({
+          snapshot: { id: snapshotId, commitSha: report.snapshot.commitSha },
+          reviews: [review],
+        });
+      }
+      if (url.includes(`/v1/snapshots/${snapshotId}/guardrails/reviews/`)) {
+        expect(init?.method).toBe("PUT");
+        expect(JSON.parse(String(init?.body))).toEqual({
+          status: "acknowledged",
+          note: "Reviewed by the Editor",
+        });
+        return envelope({ ...review, status: "acknowledged", note: "Reviewed by the Editor" });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchImplementation);
+    render(
+      <GuardrailsPanel
+        onOpenSource={vi.fn()}
+        repositoryId={repositoryId}
+        snapshotId={snapshotId}
+      />,
+    );
+
+    expect(await screen.findByText("Package dependency cycle")).toBeInTheDocument();
+    expect(screen.getByText("accepted_risk")).toBeInTheDocument();
+    const status = screen.getByRole("combobox", {
+      name: "Review status for Package dependency cycle",
+    });
+    fireEvent.change(status, { target: { value: "acknowledged" } });
+    fireEvent.change(
+      screen.getByRole("textbox", { name: "Review note for Package dependency cycle" }),
+      {
+        target: { value: "Reviewed by the Editor" },
+      },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save review" }));
+    expect(await screen.findByText("acknowledged")).toBeInTheDocument();
+    expect(screen.getByText("Reviewed by the Editor")).toBeInTheDocument();
+
+    const deleteResponse = vi.fn(async () => envelope(cleared));
+    fetchImplementation.mockImplementationOnce(async (input, init) => {
+      const url = String(input);
+      if (url.includes(`/v1/snapshots/${snapshotId}/guardrails/reviews/`)) {
+        expect(init?.method).toBe("DELETE");
+        return deleteResponse();
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
+    await waitFor(() => expect(screen.getByText("unreviewed")).toBeInTheDocument());
+    expect(deleteResponse).toHaveBeenCalled();
+    expect(
+      screen.getByText(/Review metadata never changes deterministic status/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 findings")).toBeInTheDocument();
+    expect(document.querySelector(".guardrails-status.guardrails-fail")).toBeInTheDocument();
+  });
+
+  it("keeps review controls disabled for Viewers while still showing metadata", async () => {
+    auth.current.session = authenticatedSession("viewer");
+    const review = {
+      findingId: reportFinding.id,
+      subjectKey: `sha256:${"d".repeat(64)}`,
+      status: "false_positive" as const,
+      note: "Needs follow-up",
+      reviewer: null,
+      reviewedAt: null,
+      updatedAt: null,
+    };
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      const policy = policyResponse(url);
+      if (policy) return policy;
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails`)) return envelope(report);
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails/reviews`)) {
+        return envelope({
+          snapshot: { id: snapshotId, commitSha: report.snapshot.commitSha },
+          reviews: [review],
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchImplementation);
+    render(
+      <GuardrailsPanel
+        onOpenSource={vi.fn()}
+        repositoryId={repositoryId}
+        snapshotId={snapshotId}
+      />,
+    );
+    expect(await screen.findByText("false_positive")).toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "Review status for Package dependency cycle" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("textbox", { name: "Review note for Package dependency cycle" }),
+    ).toBeDisabled();
+    expect(screen.getByText("Viewer mode: review editing is unavailable.")).toBeInTheDocument();
+    expect(
+      fetchImplementation.mock.calls.some(
+        ([input, init]) => String(input).includes("/guardrails/reviews/") && init?.method,
+      ),
+    ).toBe(false);
+  });
+
   it("loads explanation history on demand and appends only the server cursor page", async () => {
     const olderExplanation = explanationFixture({
       id: olderExplanationId,

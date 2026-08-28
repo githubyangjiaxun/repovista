@@ -8,6 +8,7 @@ import type {
   GuardrailFinding,
   GuardrailProfile,
   GuardrailReport,
+  GuardrailReview,
   GuardrailRuleId,
   GuardrailSeverity,
   GuardrailThresholds,
@@ -534,9 +535,61 @@ export interface SarifLog {
   runs: Array<Record<string, unknown>>;
 }
 
-export function buildSarifReport(report: GuardrailReport, toolVersion = "1.1.0"): SarifLog {
+export interface GuardrailJsonExport {
+  schemaVersion: "repovista.guardrails.v1";
+  deterministic: GuardrailReport;
+  reviews: GuardrailReview[];
+}
+
+function reviewsForReport(
+  report: GuardrailReport,
+  reviews: readonly GuardrailReview[],
+): GuardrailReview[] {
+  const subjectKeys = new Map(
+    report.findings.map((finding) => [finding.id, guardrailFindingSubjectKey(finding)]),
+  );
+  const byFinding = new Map<string, GuardrailReview>();
+  for (const review of reviews) {
+    if (subjectKeys.get(review.findingId) === review.subjectKey) {
+      byFinding.set(review.findingId, review);
+    }
+  }
+  return [...byFinding.values()];
+}
+
+/**
+ * Build a deterministic JSON artifact that keeps analysis and human review
+ * metadata in separate top-level fields. Reviews are sorted independently so
+ * callers cannot accidentally make output depend on database row order.
+ */
+export function buildGuardrailJsonExport(
+  report: GuardrailReport,
+  reviews: readonly GuardrailReview[] = [],
+): GuardrailJsonExport {
+  const reportReviews = reviewsForReport(report, reviews);
+  return {
+    schemaVersion: "repovista.guardrails.v1",
+    deterministic: report,
+    reviews: reportReviews.sort((left, right) => {
+      const findingOrder = left.findingId.localeCompare(right.findingId);
+      if (findingOrder !== 0) return findingOrder;
+      const statusOrder = left.status.localeCompare(right.status);
+      if (statusOrder !== 0) return statusOrder;
+      return (left.updatedAt ?? "").localeCompare(right.updatedAt ?? "");
+    }),
+  };
+}
+
+export function buildSarifReport(
+  report: GuardrailReport,
+  toolVersion = "1.2.0",
+  reviews: readonly GuardrailReview[] = [],
+): SarifLog {
   const ruleIds = [...new Set(report.findings.map((finding) => finding.ruleId))].sort();
   const rules = ruleIds.map((id) => ({ id, name: id.replaceAll("_", " ") }));
+  const reportReviews = reviewsForReport(report, reviews);
+  const reviewByFinding = new Map(reportReviews.map((review) => [review.findingId, review]));
+  const reviewedCount = reportReviews.filter((review) => review.status !== "unreviewed").length;
   return {
     version: "2.1.0",
     $schema: "https://json.schemastore.org/sarif-2.1.0.json",
@@ -552,31 +605,41 @@ export function buildSarifReport(report: GuardrailReport, toolVersion = "1.1.0")
           guardrailProfileId: report.profile?.id ?? BUILT_IN_GUARDRAIL_PROFILE.id,
           guardrailProfileFingerprint:
             report.profile?.fingerprint ?? BUILT_IN_GUARDRAIL_PROFILE.fingerprint,
+          deterministicStatus: report.status,
+          reviewMetadataVersion: "guardrail-review-v1",
+          reviewCount: reviewedCount,
         },
-        results: report.findings.map((finding) => ({
-          ruleId: finding.ruleId,
-          level:
-            finding.severity === "error"
-              ? "error"
-              : finding.severity === "warning"
-                ? "warning"
-                : "note",
-          message: { text: finding.message },
-          locations: [
-            {
-              physicalLocation: {
-                artifactLocation: { uri: finding.path },
-                region: { startLine: finding.startLine, endLine: finding.endLine },
+        results: report.findings.map((finding) => {
+          const review = reviewByFinding.get(finding.id);
+          return {
+            ruleId: finding.ruleId,
+            level:
+              finding.severity === "error"
+                ? "error"
+                : finding.severity === "warning"
+                  ? "warning"
+                  : "note",
+            message: { text: finding.message },
+            locations: [
+              {
+                physicalLocation: {
+                  artifactLocation: { uri: finding.path },
+                  region: { startLine: finding.startLine, endLine: finding.endLine },
+                },
               },
+            ],
+            fingerprints: { primaryLocationLineHash: finding.fingerprint },
+            properties: {
+              title: finding.title,
+              metric: finding.metric,
+              evidenceCount: finding.evidence.length,
+              reviewStatus: review?.status ?? "unreviewed",
+              reviewNote: review?.note ?? "",
+              reviewedAt: review?.reviewedAt ?? null,
+              reviewedBy: review?.reviewer?.userId ?? null,
             },
-          ],
-          fingerprints: { primaryLocationLineHash: finding.fingerprint },
-          properties: {
-            title: finding.title,
-            metric: finding.metric,
-            evidenceCount: finding.evidence.length,
-          },
-        })),
+          };
+        }),
       },
     ],
   };

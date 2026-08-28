@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BUILT_IN_GUARDRAIL_PROFILE,
+  buildGuardrailJsonExport,
   buildGuardrailReport,
   buildSarifReport,
   compareGuardrailExplanations,
@@ -215,6 +216,69 @@ describe("architecture guardrails", () => {
     expect(sarif.version).toBe("2.1.0");
     expect(sarif.runs[0]?.results).toHaveLength(1);
     expect(JSON.stringify(sarif)).not.toContain("export function");
+  });
+
+  it("keeps human review metadata separate from deterministic SARIF decisions", () => {
+    const report = buildGuardrailReport({
+      snapshot,
+      files: [file("f1", "src/main.ts", 801)],
+      symbols: [],
+      edges: [],
+    });
+    const finding = report.findings[0];
+    expect(finding).toBeDefined();
+    if (!finding) return;
+    const review = {
+      findingId: finding.id,
+      subjectKey: guardrailFindingSubjectKey(finding),
+      status: "accepted_risk" as const,
+      note: "Legacy boundary",
+      reviewer: {
+        userId: "01900000-0000-7000-8000-000000000099",
+        login: "reviewer",
+        displayName: "Reviewer",
+      },
+      reviewedAt: "2026-08-25T00:00:00.000Z",
+      updatedAt: "2026-08-25T00:00:00.000Z",
+    };
+    const sarif = buildSarifReport(report, "1.2.0", [review]);
+    const result = sarif.runs[0]?.results as Array<Record<string, unknown>>;
+    expect(result[0]?.level).toBe("warning");
+    expect((result[0]?.properties as Record<string, unknown>)?.reviewStatus).toBe("accepted_risk");
+    expect((sarif.runs[0]?.properties as Record<string, unknown>)?.deterministicStatus).toBe(
+      report.status,
+    );
+    const json = buildGuardrailJsonExport(report, [review]);
+    expect(json.deterministic.status).toBe(report.status);
+    expect(json.reviews[0]?.note).toBe("Legacy boundary");
+    expect(json.schemaVersion).toBe("repovista.guardrails.v1");
+  });
+
+  it("drops reviews whose subject key does not match the server report", () => {
+    const report = buildGuardrailReport({
+      snapshot,
+      files: [file("f1", "src/main.ts", 801)],
+      symbols: [],
+      edges: [],
+    });
+    const finding = report.findings[0];
+    expect(finding).toBeDefined();
+    if (!finding) return;
+    const foreign = {
+      findingId: finding.id,
+      subjectKey: `sha256:${"f".repeat(64)}`,
+      status: "false_positive" as const,
+      note: "Forged subject",
+      reviewer: null,
+      reviewedAt: null,
+      updatedAt: null,
+    };
+    const json = buildGuardrailJsonExport(report, [foreign]);
+    expect(json.reviews).toEqual([]);
+    const sarif = buildSarifReport(report, "1.2.0", [foreign]);
+    const result = sarif.runs[0]?.results as Array<Record<string, unknown>>;
+    expect((result[0]?.properties as Record<string, unknown>)?.reviewStatus).toBe("unreviewed");
+    expect((sarif.runs[0]?.properties as Record<string, unknown>)?.reviewCount).toBe(0);
   });
 
   it("compares immutable reports with stable added, resolved, changed, and unchanged states", () => {

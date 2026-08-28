@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RepoVista API",
-    "version": "1.1.0",
-    "description": "Evidence-first repository indexing with private GitHub App access, Workspace authorization, immutable Guardrail policy profiles, deterministic Architecture Guardrails and SARIF, verified explanation history and structural comparison, auditable sessions, API tokens, versioned semantic indexes, transparent hybrid retrieval, architecture stories, pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, and grounded answers."
+    "version": "1.2.0",
+    "description": "Evidence-first repository indexing with private GitHub App access, Workspace authorization, immutable Guardrail policy profiles, deterministic Architecture Guardrails and SARIF, Workspace-scoped human review metadata, separate deterministic JSON exports, verified explanation history and structural comparison, auditable sessions, API tokens, versioned semantic indexes, transparent hybrid retrieval, architecture stories, pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, and grounded answers."
   },
   "servers": [
     {
@@ -1319,6 +1319,138 @@
           "409": {
             "$ref": "#/components/responses/Conflict"
           }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/guardrails/json": {
+      "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
+      "get": {
+        "operationId": "exportSnapshotGuardrailsJson",
+        "summary": "Download deterministic Guardrails and separate human review metadata as JSON",
+        "tags": ["Snapshots", "Guardrails"],
+        "responses": {
+          "200": {
+            "description": "Commit-pinned JSON export with deterministic and review sections",
+            "headers": {
+              "Content-Disposition": {
+                "description": "Safe attachment filename",
+                "schema": { "type": "string" }
+              },
+              "ETag": {
+                "description": "Digest of the complete response body",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/GuardrailJsonExport" }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/guardrails/reviews": {
+      "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
+      "get": {
+        "operationId": "listGuardrailReviews",
+        "summary": "List human review metadata for the current deterministic Findings",
+        "tags": ["Snapshots", "Guardrails"],
+        "responses": {
+          "200": {
+            "description": "Current review status for every Finding",
+            "headers": {
+              "Cache-Control": {
+                "description": "Public revalidation or private no-store policy",
+                "schema": { "type": "string" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/GuardrailReviewsResponse" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/guardrails/reviews/{findingId}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/SnapshotId" },
+        { "$ref": "#/components/parameters/GuardrailFindingId" }
+      ],
+      "put": {
+        "operationId": "updateGuardrailReview",
+        "summary": "Set or clear human review metadata for one server-selected Finding",
+        "tags": ["Snapshots", "Guardrails"],
+        "security": [{ "CookieSession": [] }, { "BearerToken": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UpdateGuardrailReviewRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Review metadata saved",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    { "properties": { "data": { "$ref": "#/components/schemas/GuardrailReview" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      },
+      "delete": {
+        "operationId": "clearGuardrailReview",
+        "summary": "Clear human review metadata for one Finding",
+        "tags": ["Snapshots", "Guardrails"],
+        "security": [{ "CookieSession": [] }, { "BearerToken": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfHeader" }],
+        "responses": {
+          "200": {
+            "description": "Review cleared to unreviewed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    { "properties": { "data": { "$ref": "#/components/schemas/GuardrailReview" } } }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
         }
       }
     },
@@ -2986,6 +3118,16 @@
           "$ref": "#/components/schemas/Uuid"
         }
       },
+      "GuardrailFindingId": {
+        "name": "findingId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300
+        }
+      },
       "JobId": {
         "name": "jobId",
         "in": "path",
@@ -4231,6 +4373,87 @@
             "items": {
               "$ref": "#/components/schemas/GuardrailFinding"
             }
+          }
+        }
+      },
+      "GuardrailReviewStatus": {
+        "type": "string",
+        "enum": ["unreviewed", "acknowledged", "accepted_risk", "false_positive"]
+      },
+      "GuardrailReview": {
+        "type": "object",
+        "required": [
+          "findingId",
+          "subjectKey",
+          "status",
+          "note",
+          "reviewer",
+          "reviewedAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "findingId": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "subjectKey": { "$ref": "#/components/schemas/GuardrailExplanationSubjectKey" },
+          "status": { "$ref": "#/components/schemas/GuardrailReviewStatus" },
+          "note": { "type": "string", "maxLength": 2000 },
+          "reviewer": {
+            "oneOf": [
+              {
+                "type": "object",
+                "required": ["userId", "login", "displayName"],
+                "properties": {
+                  "userId": { "$ref": "#/components/schemas/Uuid" },
+                  "login": { "oneOf": [{ "type": "string" }, { "type": "null" }] },
+                  "displayName": { "type": "string" }
+                }
+              },
+              { "type": "null" }
+            ]
+          },
+          "reviewedAt": {
+            "oneOf": [{ "$ref": "#/components/schemas/DateTime" }, { "type": "null" }]
+          },
+          "updatedAt": {
+            "oneOf": [{ "$ref": "#/components/schemas/DateTime" }, { "type": "null" }]
+          }
+        }
+      },
+      "GuardrailReviewsResponse": {
+        "type": "object",
+        "required": ["snapshot", "reviews"],
+        "properties": {
+          "snapshot": {
+            "type": "object",
+            "required": ["id", "commitSha"],
+            "properties": {
+              "id": { "$ref": "#/components/schemas/Uuid" },
+              "commitSha": { "type": "string", "pattern": "^[a-fA-F0-9]{7,64}$" }
+            }
+          },
+          "reviews": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/GuardrailReview" }
+          }
+        }
+      },
+      "UpdateGuardrailReviewRequest": {
+        "type": "object",
+        "required": ["status"],
+        "additionalProperties": false,
+        "properties": {
+          "status": { "$ref": "#/components/schemas/GuardrailReviewStatus" },
+          "note": { "type": "string", "maxLength": 2000, "default": "" }
+        }
+      },
+      "GuardrailJsonExport": {
+        "type": "object",
+        "required": ["schemaVersion", "deterministic", "reviews"],
+        "properties": {
+          "schemaVersion": { "const": "repovista.guardrails.v1" },
+          "deterministic": { "$ref": "#/components/schemas/GuardrailReport" },
+          "reviews": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/GuardrailReview" }
           }
         }
       },

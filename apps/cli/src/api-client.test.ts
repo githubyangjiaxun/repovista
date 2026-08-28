@@ -166,7 +166,7 @@ describe("RepoVistaClient", () => {
       expect.objectContaining({ method: "POST" }),
     );
     const request = fetchImplementation.mock.calls[0]?.[1] as RequestInit;
-    expect((request.headers as Headers).get("User-Agent")).toBe("RepoVista-CLI/1.1.0");
+    expect((request.headers as Headers).get("User-Agent")).toBe("RepoVista-CLI/1.2.0");
     expect(JSON.parse(String(request.body))).toEqual({
       url: "https://github.com/acme/demo",
       ref: "main",
@@ -315,6 +315,89 @@ describe("RepoVistaClient", () => {
     expect(new Headers(sarifRequest.headers).get("Authorization")).toMatch(/^Bearer rv_/);
   });
 
+  it("lists, updates, clears reviews, and downloads the separate JSON export", async () => {
+    const review = {
+      findingId: guardrailReport.findings[0].id,
+      subjectKey: `sha256:${"c".repeat(64)}`,
+      status: "accepted_risk" as const,
+      note: "Known boundary",
+      reviewer: {
+        userId: "01900000-0000-7000-8000-000000000008",
+        login: "reviewer",
+        displayName: "Reviewer",
+      },
+      reviewedAt: "2026-08-25T00:00:00.000Z",
+      updatedAt: "2026-08-25T00:00:00.000Z",
+    };
+    const reviews = {
+      snapshot: { id: snapshotId, commitSha: guardrailReport.snapshot.commitSha },
+      reviews: [review],
+    };
+    const jsonExport = {
+      schemaVersion: "repovista.guardrails.v1",
+      deterministic: guardrailReport,
+      reviews: [review],
+    };
+    const fetchImplementation = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ data: reviews, meta: { requestId: "request-list" } }))
+      .mockResolvedValueOnce(jsonResponse({ data: review, meta: { requestId: "request-update" } }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            ...review,
+            status: "unreviewed",
+            note: "",
+            reviewer: null,
+            reviewedAt: null,
+            updatedAt: null,
+          },
+          meta: { requestId: "request-clear" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(jsonExport), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            "Content-Disposition": 'attachment; filename="guardrails.json"',
+          },
+        }),
+      );
+    const client = new RepoVistaClient({
+      apiUrl: "http://localhost:4000",
+      apiToken: "rv_testtoken_abcdefghijklmnopqrstuvwxyz0123456789",
+      fetch: fetchImplementation,
+    });
+
+    await expect(client.listGuardrailReviews(snapshotId)).resolves.toEqual(reviews);
+    await expect(
+      client.updateGuardrailReview(snapshotId, review.findingId, {
+        status: review.status,
+        note: review.note,
+      }),
+    ).resolves.toEqual(review);
+    await expect(client.clearGuardrailReview(snapshotId, review.findingId)).resolves.toMatchObject({
+      status: "unreviewed",
+    });
+    await expect(client.downloadGuardrailsJson(snapshotId)).resolves.toEqual({
+      body: JSON.stringify(jsonExport),
+      filename: "guardrails.json",
+    });
+
+    expect(fetchImplementation.mock.calls.map((call) => String(call[0]))).toEqual([
+      `http://localhost:4000/v1/snapshots/${snapshotId}/guardrails/reviews`,
+      `http://localhost:4000/v1/snapshots/${snapshotId}/guardrails/reviews/${encodeURIComponent(review.findingId)}`,
+      `http://localhost:4000/v1/snapshots/${snapshotId}/guardrails/reviews/${encodeURIComponent(review.findingId)}`,
+      `http://localhost:4000/v1/snapshots/${snapshotId}/guardrails/json`,
+    ]);
+    expect((fetchImplementation.mock.calls[1]?.[1] as RequestInit).method).toBe("PUT");
+    expect(
+      JSON.parse(String((fetchImplementation.mock.calls[1]?.[1] as RequestInit).body)),
+    ).toEqual({ status: "accepted_risk", note: "Known boundary" });
+    expect((fetchImplementation.mock.calls[2]?.[1] as RequestInit).method).toBe("DELETE");
+  });
+
   it("creates an immutable verified Guardrail explanation", async () => {
     const fetchImplementation = vi.fn<typeof fetch>(async () =>
       jsonResponse(
@@ -448,7 +531,7 @@ describe("RepoVistaClient", () => {
       expect(String(input)).toBe(
         `http://localhost:4000/v1/snapshots/${repositoryId}/guardrails/compare?baseSnapshotId=${snapshotId}`,
       );
-      expect(new Headers(init?.headers).get("User-Agent")).toBe("RepoVista-CLI/1.1.0");
+      expect(new Headers(init?.headers).get("User-Agent")).toBe("RepoVista-CLI/1.2.0");
       return jsonResponse({ data: comparison, meta: { requestId: "request-compare" } });
     });
     const client = new RepoVistaClient({

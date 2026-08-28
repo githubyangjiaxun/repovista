@@ -7,7 +7,7 @@ import {
   verifyModelAnswer,
 } from "@repovista/ai";
 import type { AppConfig } from "@repovista/config";
-import type { GraphLevel, RelationType } from "@repovista/contracts";
+import type { GraphLevel, GuardrailReview, RelationType } from "@repovista/contracts";
 import {
   askRequestSchema,
   assignGuardrailProfileRequestSchema,
@@ -18,9 +18,11 @@ import {
   createShareRequestSchema,
   graphLevelSchema,
   idSchema,
+  isBundledDemoRepository,
   PARSER_VERSION,
   relationTypeSchema,
   retrievalModeSchema,
+  updateGuardrailReviewRequestSchema,
 } from "@repovista/contracts";
 import type { RepoVistaStore, SearchEvidenceRecord } from "@repovista/database";
 import { DomainError, type Principal } from "@repovista/domain";
@@ -37,6 +39,7 @@ import { buildGraphView, type GraphView } from "@repovista/graph";
 import {
   BUILT_IN_GUARDRAIL_PROFILE,
   BUILT_IN_GUARDRAIL_PROFILE_ID,
+  buildGuardrailJsonExport,
   buildGuardrailReport,
   buildSarifReport,
   compareGuardrailExplanations,
@@ -58,6 +61,10 @@ const snapshotParamsSchema = z.object({ snapshotId: idSchema });
 const guardrailExplanationParamsSchema = z.object({
   snapshotId: idSchema,
   explanationId: idSchema,
+});
+const guardrailReviewParamsSchema = z.object({
+  snapshotId: idSchema,
+  findingId: z.string().trim().min(1).max(300),
 });
 const guardrailExplanationHistoryQuerySchema = z
   .object({
@@ -578,6 +585,75 @@ async function loadGuardrailReport(store: RepoVistaStore, snapshotId: string) {
     edges: graphData.edges,
     profile,
   });
+}
+
+async function loadGuardrailReviews(
+  store: RepoVistaStore,
+  snapshotId: string,
+  workspaceId: string,
+  report?: ReturnType<typeof buildGuardrailReport>,
+) {
+  const currentReport = report ?? (await loadGuardrailReport(store, snapshotId));
+  const expectedSubjectKeys = new Map(
+    currentReport.findings.map((finding) => [finding.id, guardrailFindingSubjectKey(finding)]),
+  );
+  const persisted =
+    typeof store.listGuardrailReviews === "function"
+      ? await store.listGuardrailReviews(workspaceId, snapshotId)
+      : [];
+  const byFinding = new Map(
+    persisted
+      .filter((review) => expectedSubjectKeys.get(review.findingId) === review.subjectKey)
+      .map((review) => [review.findingId, review]),
+  );
+  return {
+    snapshot: {
+      id: currentReport.snapshot.id,
+      commitSha: currentReport.snapshot.commitSha,
+    },
+    reviews: currentReport.findings.map(
+      (finding) =>
+        byFinding.get(finding.id) ?? {
+          findingId: finding.id,
+          subjectKey: guardrailFindingSubjectKey(finding),
+          status: "unreviewed" as const,
+          note: "",
+          reviewer: null,
+          reviewedAt: null,
+          updatedAt: null,
+        },
+    ),
+  };
+}
+
+function requireGuardrailReviewWritePrincipal(
+  principal: Principal,
+): Principal & { userId: string } {
+  if (principal.kind === "anonymous" || !principal.userId) {
+    throw new DomainError("AUTH_REQUIRED", "Authentication is required to edit Guardrail reviews.");
+  }
+  requireWritePrincipal(principal);
+  return principal as Principal & { userId: string };
+}
+
+async function assertReviewWriteScope(
+  store: RepoVistaStore,
+  access: Awaited<ReturnType<RepoVistaStore["getSnapshotAccess"]>>,
+  principal: Principal,
+): Promise<void> {
+  const repository = access ? await store.getRepository(access.repositoryId) : null;
+  if (repository && isBundledDemoRepository(repository.canonicalUrl)) {
+    throw new DomainError(
+      "GUARDRAIL_REVIEW_DEMO_READ_ONLY",
+      "The bundled Demo is read-only; review metadata is available only for owned Snapshots.",
+    );
+  }
+  if (!access || access.workspaceId !== principal.workspaceId) {
+    throw new DomainError(
+      "WORKSPACE_FORBIDDEN",
+      "Guardrail reviews can only be edited in the owning Workspace.",
+    );
+  }
 }
 
 async function loadGuardrailComparison(
@@ -1313,6 +1389,141 @@ export function registerRoutes(
       .send(response(request, await loadGuardrailReport(store, snapshotId)));
   });
 
+  app.get("/v1/snapshots/:snapshotId/guardrails/reviews", async (request, reply) => {
+    const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    const access = await requireSnapshotAccess(request, store, snapshotId);
+    const report = await loadGuardrailReport(store, snapshotId);
+    const reviews = await loadGuardrailReviews(store, snapshotId, access.workspaceId, report);
+    return reply
+      .header(
+        "Cache-Control",
+        access.visibility === "private"
+          ? "private, no-store"
+          : "public, max-age=0, must-revalidate",
+      )
+      .send(response(request, reviews));
+  });
+
+  app.put("/v1/snapshots/:snapshotId/guardrails/reviews/:findingId", async (request, reply) => {
+    const { snapshotId, findingId } = parseInput(guardrailReviewParamsSchema, request.params);
+    const body = parseInput(updateGuardrailReviewRequestSchema, request.body);
+    const auth = await resolveRequestAuth(request, store);
+    verifySessionCsrf(request, config, auth);
+    const principal = requireGuardrailReviewWritePrincipal(auth.principal);
+    const access = await requireSnapshotAccess(request, store, snapshotId);
+    await assertReviewWriteScope(store, access, principal);
+    const report = await loadGuardrailReport(store, snapshotId);
+    const finding = report.findings.find((item) => item.id === findingId);
+    if (!finding) {
+      throw new DomainError(
+        "GUARDRAIL_FINDING_NOT_FOUND",
+        "The requested Finding does not belong to this Snapshot.",
+      );
+    }
+    const subjectKey = guardrailFindingSubjectKey(finding);
+    let review: GuardrailReview;
+    if (body.status === "unreviewed") {
+      if (typeof store.deleteGuardrailReview !== "function") {
+        throw new DomainError(
+          "GUARDRAIL_REVIEW_UNAVAILABLE",
+          "Guardrail review storage is unavailable on this server.",
+          { retryable: true },
+        );
+      }
+      await store.deleteGuardrailReview({
+        workspaceId: access.workspaceId,
+        snapshotId,
+        findingId,
+        actorUserId: principal.userId,
+        actorKind: principal.kind,
+      });
+      review = {
+        findingId,
+        subjectKey,
+        status: "unreviewed" as const,
+        note: "",
+        reviewer: null,
+        reviewedAt: null,
+        updatedAt: null,
+      };
+    } else {
+      if (typeof store.upsertGuardrailReview !== "function") {
+        throw new DomainError(
+          "GUARDRAIL_REVIEW_UNAVAILABLE",
+          "Guardrail review storage is unavailable on this server.",
+          { retryable: true },
+        );
+      }
+      review = await store.upsertGuardrailReview({
+        workspaceId: access.workspaceId,
+        snapshotId,
+        findingId,
+        subjectKey,
+        status: body.status,
+        note: body.note,
+        reviewedBy: principal.userId,
+        actorKind: principal.kind,
+      });
+    }
+    return reply
+      .header(
+        "Cache-Control",
+        access.visibility === "private"
+          ? "private, no-store"
+          : "public, max-age=0, must-revalidate",
+      )
+      .send(response(request, review));
+  });
+
+  app.delete("/v1/snapshots/:snapshotId/guardrails/reviews/:findingId", async (request, reply) => {
+    const { snapshotId, findingId } = parseInput(guardrailReviewParamsSchema, request.params);
+    const auth = await resolveRequestAuth(request, store);
+    verifySessionCsrf(request, config, auth);
+    const principal = requireGuardrailReviewWritePrincipal(auth.principal);
+    const access = await requireSnapshotAccess(request, store, snapshotId);
+    await assertReviewWriteScope(store, access, principal);
+    const report = await loadGuardrailReport(store, snapshotId);
+    const finding = report.findings.find((item) => item.id === findingId);
+    if (!finding) {
+      throw new DomainError(
+        "GUARDRAIL_FINDING_NOT_FOUND",
+        "The requested Finding does not belong to this Snapshot.",
+      );
+    }
+    if (typeof store.deleteGuardrailReview !== "function") {
+      throw new DomainError(
+        "GUARDRAIL_REVIEW_UNAVAILABLE",
+        "Guardrail review storage is unavailable on this server.",
+        { retryable: true },
+      );
+    }
+    await store.deleteGuardrailReview({
+      workspaceId: access.workspaceId,
+      snapshotId,
+      findingId,
+      actorUserId: principal.userId,
+      actorKind: principal.kind,
+    });
+    return reply
+      .header(
+        "Cache-Control",
+        access.visibility === "private"
+          ? "private, no-store"
+          : "public, max-age=0, must-revalidate",
+      )
+      .send(
+        response(request, {
+          findingId,
+          subjectKey: guardrailFindingSubjectKey(finding),
+          status: "unreviewed" as const,
+          note: "",
+          reviewer: null,
+          reviewedAt: null,
+          updatedAt: null,
+        }),
+      );
+  });
+
   app.get("/v1/snapshots/:snapshotId/guardrails/explanations", async (request, reply) => {
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
     const query = parseInput(guardrailExplanationHistoryQuerySchema, request.query);
@@ -1486,7 +1697,8 @@ export function registerRoutes(
     const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
     const access = await requireSnapshotAccess(request, store, snapshotId);
     const report = await loadGuardrailReport(store, snapshotId);
-    const body = JSON.stringify(buildSarifReport(report), null, 2);
+    const reviewData = await loadGuardrailReviews(store, snapshotId, access.workspaceId, report);
+    const body = JSON.stringify(buildSarifReport(report, "1.2.0", reviewData.reviews), null, 2);
     const etag = `"sha256-${createHash("sha256").update(body).digest("base64url")}"`;
     return reply
       .header(
@@ -1500,6 +1712,30 @@ export function registerRoutes(
         `attachment; filename="repovista-${snapshotId}-guardrails.sarif"`,
       )
       .header("Content-Type", "application/sarif+json; charset=utf-8")
+      .header("ETag", etag)
+      .header("X-Content-Type-Options", "nosniff")
+      .send(body);
+  });
+
+  app.get("/v1/snapshots/:snapshotId/guardrails/json", async (request, reply) => {
+    const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    const access = await requireSnapshotAccess(request, store, snapshotId);
+    const report = await loadGuardrailReport(store, snapshotId);
+    const reviewData = await loadGuardrailReviews(store, snapshotId, access.workspaceId, report);
+    const body = JSON.stringify(buildGuardrailJsonExport(report, reviewData.reviews), null, 2);
+    const etag = `"sha256-${createHash("sha256").update(body).digest("base64url")}"`;
+    return reply
+      .header(
+        "Cache-Control",
+        access.visibility === "private"
+          ? "private, no-store"
+          : "public, max-age=0, must-revalidate",
+      )
+      .header(
+        "Content-Disposition",
+        `attachment; filename="repovista-${snapshotId}-guardrails.json"`,
+      )
+      .header("Content-Type", "application/json; charset=utf-8")
       .header("ETag", etag)
       .header("X-Content-Type-Options", "nosniff")
       .send(body);

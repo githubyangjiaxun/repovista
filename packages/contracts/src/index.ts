@@ -975,6 +975,62 @@ export const guardrailReportSchema = z.object({
 });
 export type GuardrailReport = z.infer<typeof guardrailReportSchema>;
 
+// Human review is intentionally separate from deterministic Guardrail
+// findings. It is workspace metadata only and can never alter report status,
+// severity, thresholds, or CI decisions.
+export const guardrailReviewStatusSchema = z.enum([
+  "unreviewed",
+  "acknowledged",
+  "accepted_risk",
+  "false_positive",
+]);
+export type GuardrailReviewStatus = z.infer<typeof guardrailReviewStatusSchema>;
+
+export const guardrailReviewReviewerSchema = z.object({
+  userId: idSchema,
+  login: z.string().nullable(),
+  displayName: z.string(),
+});
+export type GuardrailReviewReviewer = z.infer<typeof guardrailReviewReviewerSchema>;
+
+const guardrailReviewNoteSchema = z
+  .string()
+  // PostgreSQL length(text) counts Unicode code points while JavaScript's
+  // String#length counts UTF-16 code units. Keep a small code-unit guard and
+  // enforce the documented 2,000-character limit by code point.
+  .max(4_000)
+  .refine((value) => Array.from(value).length <= 2_000, {
+    message: "Review note must contain at most 2,000 Unicode characters.",
+  });
+
+export const guardrailReviewSchema = z.object({
+  findingId: z.string().trim().min(1).max(300),
+  subjectKey: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  status: guardrailReviewStatusSchema,
+  note: guardrailReviewNoteSchema,
+  reviewer: guardrailReviewReviewerSchema.nullable(),
+  reviewedAt: z.iso.datetime().nullable(),
+  updatedAt: z.iso.datetime().nullable(),
+});
+export type GuardrailReview = z.infer<typeof guardrailReviewSchema>;
+
+export const guardrailReviewsResponseSchema = z.object({
+  snapshot: z.object({
+    id: idSchema,
+    commitSha: commitShaSchema,
+  }),
+  reviews: z.array(guardrailReviewSchema),
+});
+export type GuardrailReviewsResponse = z.infer<typeof guardrailReviewsResponseSchema>;
+
+export const updateGuardrailReviewRequestSchema = z
+  .object({
+    status: guardrailReviewStatusSchema,
+    note: guardrailReviewNoteSchema.trim().default(""),
+  })
+  .strict();
+export type UpdateGuardrailReviewRequest = z.infer<typeof updateGuardrailReviewRequestSchema>;
+
 export const createGuardrailExplanationRequestSchema = z
   .object({
     findingId: z.string().trim().min(1).max(300),

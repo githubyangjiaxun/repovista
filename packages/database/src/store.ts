@@ -22,6 +22,8 @@ import {
   guardrailExplanationSchema,
   guardrailExplanationSummarySchema,
   guardrailProfileSchema,
+  guardrailReviewSchema,
+  guardrailReviewStatusSchema,
   idSchema,
   pullRequestAnalysisSchema,
   pullRequestImpactSchema,
@@ -59,6 +61,7 @@ import type {
   CreatePullRequestAnalysisInput,
   CreatePullRequestAnalysisResult,
   CreateSessionInput,
+  DeleteGuardrailReviewInput,
   EmbeddingChunkRecord,
   EmbeddingIndexInput,
   EmbeddingIndexResult,
@@ -71,6 +74,7 @@ import type {
   GuardrailExplanationPair,
   GuardrailExplanationRecord,
   GuardrailProfileRecord,
+  GuardrailReviewRecord,
   IncrementalIndexBase,
   InstallationState,
   JobEventRecord,
@@ -94,6 +98,7 @@ import type {
   SnapshotGraphData,
   SymbolEdgeRecord,
   SymbolRecord,
+  UpsertGuardrailReviewInput,
   WorkspaceMemberRecord,
 } from "./types.js";
 
@@ -175,6 +180,21 @@ interface GuardrailExplanationRow {
   model_name: string;
   prompt_version: string;
   created_at: Date | string;
+}
+
+interface GuardrailReviewRow {
+  id: string;
+  workspace_id: string;
+  snapshot_id: string;
+  finding_id: string;
+  subject_key: string;
+  status: "acknowledged" | "accepted_risk" | "false_positive";
+  note: string;
+  reviewed_by: string | null;
+  reviewer_login: string | null;
+  reviewer_display_name: string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
 }
 
 interface JobRow {
@@ -428,6 +448,24 @@ function mapGuardrailExplanationSummary(row: GuardrailExplanationRow) {
     },
     promptVersion: explanation.promptVersion,
     createdAt: explanation.createdAt,
+  });
+}
+
+function mapGuardrailReview(row: GuardrailReviewRow): GuardrailReviewRecord {
+  return guardrailReviewSchema.parse({
+    findingId: row.finding_id,
+    subjectKey: row.subject_key,
+    status: row.status,
+    note: row.note,
+    reviewer: row.reviewed_by
+      ? {
+          userId: row.reviewed_by,
+          login: row.reviewer_login,
+          displayName: row.reviewer_display_name ?? "",
+        }
+      : null,
+    reviewedAt: iso(row.updated_at),
+    updatedAt: iso(row.updated_at),
   });
 }
 
@@ -1792,6 +1830,162 @@ export class RepoVistaStore {
       [snapshotId],
     );
     return result.rows[0] ? mapGuardrailProfile(result.rows[0]) : null;
+  }
+
+  async listGuardrailReviews(
+    workspaceId: string,
+    snapshotId: string,
+  ): Promise<GuardrailReviewRecord[]> {
+    const result = await this.pool.query<GuardrailReviewRow>(
+      "SELECT review.id, review.workspace_id, review.snapshot_id, review.finding_id, " +
+        "review.subject_key, review.status, review.note, review.reviewed_by, " +
+        "identity.login::text AS reviewer_login, reviewer.display_name AS reviewer_display_name, " +
+        "review.created_at, review.updated_at " +
+        "FROM guardrail_reviews review " +
+        "LEFT JOIN users reviewer ON reviewer.id = review.reviewed_by " +
+        "LEFT JOIN LATERAL (SELECT identity.login::text AS login FROM user_identities identity " +
+        "WHERE identity.user_id = review.reviewed_by AND identity.provider = 'github' " +
+        "ORDER BY identity.updated_at DESC, identity.id DESC LIMIT 1) identity ON true " +
+        "WHERE review.workspace_id = $1 AND review.snapshot_id = $2 " +
+        "ORDER BY review.finding_id, review.updated_at DESC",
+      [workspaceId, snapshotId],
+    );
+    return result.rows.map(mapGuardrailReview);
+  }
+
+  async upsertGuardrailReview(input: UpsertGuardrailReviewInput): Promise<GuardrailReviewRecord> {
+    const status = guardrailReviewStatusSchema.parse(input.status);
+    if (status === "unreviewed") {
+      throw new DomainError(
+        "GUARDRAIL_REVIEW_STATUS_INVALID",
+        "The unreviewed state is represented by clearing the review.",
+      );
+    }
+    const note = input.note.trim();
+    if (Array.from(note).length > 2_000) {
+      throw new DomainError(
+        "GUARDRAIL_REVIEW_NOTE_TOO_LONG",
+        "A Guardrail review note may contain at most 2,000 characters.",
+      );
+    }
+    return withTransaction(this.pool, async (client) => {
+      const snapshot = await client.query<{ id: string }>(
+        "SELECT id FROM repository_snapshots WHERE id = $1 AND workspace_id = $2 " +
+          "AND status = 'ready' FOR UPDATE",
+        [input.snapshotId, input.workspaceId],
+      );
+      if (!snapshot.rows[0]) {
+        throw new DomainError(
+          "SNAPSHOT_NOT_FOUND",
+          "The requested snapshot does not exist in this Workspace.",
+        );
+      }
+      const previous = await client.query<{ status: string; note_length: number }>(
+        "SELECT status, length(note) AS note_length FROM guardrail_reviews " +
+          "WHERE workspace_id = $1 AND snapshot_id = $2 AND finding_id = $3 FOR UPDATE",
+        [input.workspaceId, input.snapshotId, input.findingId],
+      );
+      const row = await client.query<GuardrailReviewRow>(
+        "INSERT INTO guardrail_reviews (id, workspace_id, snapshot_id, finding_id, subject_key, " +
+          "status, note, reviewed_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) " +
+          "ON CONFLICT (workspace_id, snapshot_id, finding_id) DO UPDATE SET " +
+          "subject_key = EXCLUDED.subject_key, status = EXCLUDED.status, note = EXCLUDED.note, " +
+          "reviewed_by = EXCLUDED.reviewed_by, updated_at = now() " +
+          "RETURNING id, workspace_id, snapshot_id, finding_id, subject_key, status, note, " +
+          "reviewed_by, created_at, updated_at",
+        [
+          createId(),
+          input.workspaceId,
+          input.snapshotId,
+          input.findingId,
+          input.subjectKey,
+          status,
+          note,
+          input.reviewedBy,
+        ],
+      );
+      const inserted = row.rows[0];
+      if (!inserted) {
+        throw new DomainError(
+          "GUARDRAIL_REVIEW_UPSERT_FAILED",
+          "The Guardrail review was not saved.",
+        );
+      }
+      const hydrated = await client.query<GuardrailReviewRow>(
+        "SELECT review.id, review.workspace_id, review.snapshot_id, review.finding_id, " +
+          "review.subject_key, review.status, review.note, review.reviewed_by, " +
+          "identity.login::text AS reviewer_login, reviewer.display_name AS reviewer_display_name, " +
+          "review.created_at, review.updated_at FROM guardrail_reviews review " +
+          "LEFT JOIN users reviewer ON reviewer.id = review.reviewed_by " +
+          "LEFT JOIN LATERAL (SELECT identity.login::text AS login FROM user_identities identity " +
+          "WHERE identity.user_id = review.reviewed_by AND identity.provider = 'github' " +
+          "ORDER BY identity.updated_at DESC, identity.id DESC LIMIT 1) identity ON true " +
+          "WHERE review.id = $1",
+        [inserted.id],
+      );
+      const review = hydrated.rows[0];
+      if (!review) {
+        throw new DomainError(
+          "GUARDRAIL_REVIEW_UPSERT_FAILED",
+          "The Guardrail review was not readable after saving.",
+        );
+      }
+      await this.appendAuditEvent(client, {
+        workspaceId: input.workspaceId,
+        actorUserId: input.reviewedBy,
+        actorKind: input.actorKind,
+        action: "guardrail_review.upsert",
+        resourceType: "guardrail_review",
+        resourceId: input.findingId,
+        metadata: {
+          snapshotId: input.snapshotId,
+          subjectKey: input.subjectKey,
+          fromStatus: previous.rows[0]?.status ?? "unreviewed",
+          toStatus: status,
+          previousNoteLength: Number(previous.rows[0]?.note_length ?? 0),
+          noteLength: Array.from(note).length,
+        },
+      });
+      return mapGuardrailReview(review);
+    });
+  }
+
+  async deleteGuardrailReview(input: DeleteGuardrailReviewInput): Promise<boolean> {
+    return withTransaction(this.pool, async (client) => {
+      const snapshot = await client.query<{ id: string }>(
+        "SELECT id FROM repository_snapshots WHERE id = $1 AND workspace_id = $2 " +
+          "AND status = 'ready' FOR UPDATE",
+        [input.snapshotId, input.workspaceId],
+      );
+      if (!snapshot.rows[0]) {
+        throw new DomainError(
+          "SNAPSHOT_NOT_FOUND",
+          "The requested snapshot does not exist in this Workspace.",
+        );
+      }
+      const deleted = await client.query<{ status: string; note_length: number }>(
+        "DELETE FROM guardrail_reviews WHERE workspace_id = $1 AND snapshot_id = $2 " +
+          "AND finding_id = $3 RETURNING status, length(note) AS note_length",
+        [input.workspaceId, input.snapshotId, input.findingId],
+      );
+      const previous = deleted.rows[0];
+      if (!previous) return false;
+      await this.appendAuditEvent(client, {
+        workspaceId: input.workspaceId,
+        actorUserId: input.actorUserId,
+        actorKind: input.actorKind,
+        action: "guardrail_review.clear",
+        resourceType: "guardrail_review",
+        resourceId: input.findingId,
+        metadata: {
+          snapshotId: input.snapshotId,
+          fromStatus: previous.status,
+          toStatus: "unreviewed",
+          previousNoteLength: Number(previous.note_length ?? 0),
+        },
+      });
+      return true;
+    });
   }
 
   async getGuardrailExplanation(

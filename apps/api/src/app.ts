@@ -114,7 +114,8 @@ export function buildApp(dependencies: AppDependencies = {}): {
           ? 401
           : error.code === "CSRF_INVALID" ||
               error.code === "WORKSPACE_FORBIDDEN" ||
-              error.code === "GITHUB_REPOSITORY_NOT_GRANTED"
+              error.code === "GITHUB_REPOSITORY_NOT_GRANTED" ||
+              error.code === "GUARDRAIL_REVIEW_DEMO_READ_ONLY"
             ? 403
             : error.code === "GITHUB_RATE_LIMITED"
               ? 429
@@ -140,11 +141,13 @@ export function buildApp(dependencies: AppDependencies = {}): {
                           error.code === "GUARDRAIL_EXPLANATION_COMPARISON_INCOMPATIBLE" ||
                           error.code === "GUARDRAIL_EXPLANATION_EVIDENCE_UNAVAILABLE"
                         ? 409
-                        : error.code === "AI_CONFIG_INVALID"
+                        : error.code === "GUARDRAIL_REVIEW_UNAVAILABLE"
                           ? 503
-                          : error.code === "GITHUB_API_FAILED" || error.code.startsWith("AI_")
-                            ? 502
-                            : 400;
+                          : error.code === "AI_CONFIG_INVALID"
+                            ? 503
+                            : error.code === "GITHUB_API_FAILED" || error.code.startsWith("AI_")
+                              ? 502
+                              : 400;
       reply.status(status).send({
         error: {
           code: error.code,

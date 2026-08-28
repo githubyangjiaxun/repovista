@@ -1,10 +1,12 @@
 import { createHmac } from "node:crypto";
 import { CSRF_COOKIE, hashSecret, SESSION_COOKIE } from "@repovista/auth";
 import { loadConfig } from "@repovista/config";
+import { BUNDLED_DEMO_REPOSITORY } from "@repovista/contracts";
 import type { DatabasePool, RepoVistaStore } from "@repovista/database";
 import { DomainError, PUBLIC_WORKSPACE_ID } from "@repovista/domain";
 import {
   BUILT_IN_GUARDRAIL_PROFILE,
+  buildGuardrailReport,
   guardrailFindingSubjectKey,
   guardrailProfileFingerprint,
 } from "@repovista/guardrails";
@@ -1588,6 +1590,241 @@ describe("RepoVista API", () => {
     });
     expect(report.body).not.toContain("export function hello");
     expect(sarif.body).not.toContain("export function hello");
+  });
+
+  it("keeps human reviews separate, enforces write authorization, and exports review metadata", async () => {
+    const store = createStore();
+    const graphData = await store.getSnapshotGraphData(snapshotId);
+    if (!graphData) throw new Error("Expected graph data fixture.");
+    vi.mocked(store.getSnapshotGraphData).mockResolvedValue({
+      ...graphData,
+      files: graphData.files.map((file) => ({ ...file, lineCount: 801, byteSize: 120_000 })),
+    });
+    const report = buildGuardrailReport({
+      snapshot: {
+        id: graphData.snapshot.id,
+        commitSha: graphData.snapshot.commitSha as string,
+        parserVersion: graphData.snapshot.parserVersion,
+        requestedAt: graphData.snapshot.requestedAt,
+        readyAt: graphData.snapshot.readyAt,
+      },
+      files: graphData.files.map((file) => ({ ...file, lineCount: 801, byteSize: 120_000 })),
+      symbols: graphData.symbols,
+      edges: graphData.edges,
+      profile: BUILT_IN_GUARDRAIL_PROFILE,
+    });
+    const finding = report.findings[0];
+    if (!finding) throw new Error("Expected a Guardrail finding.");
+    const review = {
+      findingId: finding.id,
+      subjectKey: guardrailFindingSubjectKey(finding),
+      status: "accepted_risk" as const,
+      note: "Legacy boundary",
+      reviewer: { userId: ownerUserId, login: "owner", displayName: "Workspace Owner" },
+      reviewedAt: "2026-08-28T00:00:00.000Z",
+      updatedAt: "2026-08-28T00:00:00.000Z",
+    };
+    const staleReview = {
+      ...review,
+      subjectKey: `sha256:${"f".repeat(64)}`,
+      status: "false_positive" as const,
+      note: "Must not be applied to a changed subject.",
+    };
+    const reviewStore = store as unknown as {
+      listGuardrailReviews: ReturnType<typeof vi.fn>;
+      upsertGuardrailReview: ReturnType<typeof vi.fn>;
+      deleteGuardrailReview: ReturnType<typeof vi.fn>;
+    };
+    reviewStore.listGuardrailReviews = vi.fn(async () => [staleReview, review]);
+    reviewStore.upsertGuardrailReview = vi.fn(async () => review);
+    reviewStore.deleteGuardrailReview = vi.fn(async () => true);
+    const { app } = createTestApp(store);
+    openApps.push(app);
+
+    const listed = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews`,
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json().data.reviews[0]).toMatchObject({
+      findingId: finding.id,
+      status: "accepted_risk",
+      note: "Legacy boundary",
+    });
+
+    const malformed = await app.inject({
+      method: "PUT",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/${finding.id}`,
+      payload: { status: "not-a-review-status" },
+    });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json().error.code).toBe("VALIDATION_FAILED");
+
+    const denied = await app.inject({
+      method: "PUT",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/${finding.id}`,
+      payload: { status: "acknowledged", note: "No session" },
+    });
+    expect(denied.statusCode).toBe(401);
+    expect(denied.json().error.code).toBe("AUTH_REQUIRED");
+
+    const auth = authenticateOwner(store);
+    const csrfDenied = await app.inject({
+      method: "PUT",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/${finding.id}`,
+      headers: { cookie: auth.cookie, origin: "http://localhost:3000" },
+      payload: { status: "acknowledged" },
+    });
+    expect(csrfDenied.statusCode).toBe(403);
+    expect(csrfDenied.json().error.code).toBe("CSRF_INVALID");
+
+    const viewerToken = authenticateToken(store, { role: "viewer" });
+    const viewerDenied = await app.inject({
+      method: "PUT",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/${finding.id}`,
+      headers: viewerToken,
+      payload: { status: "acknowledged" },
+    });
+    expect(viewerDenied.statusCode).toBe(403);
+    expect(viewerDenied.json().error.code).toBe("WORKSPACE_FORBIDDEN");
+
+    const readOnlyToken = authenticateToken(store, {
+      role: "editor",
+      scopes: ["repo:read"],
+    });
+    const scopeDenied = await app.inject({
+      method: "PUT",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/${finding.id}`,
+      headers: readOnlyToken,
+      payload: { status: "acknowledged" },
+    });
+    expect(scopeDenied.statusCode).toBe(403);
+    expect(scopeDenied.json().error.code).toBe("WORKSPACE_FORBIDDEN");
+
+    const writeToken = authenticateToken(store, {
+      role: "editor",
+      scopes: ["repo:read", "repo:write"],
+    });
+    const tokenSaved = await app.inject({
+      method: "PUT",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/${finding.id}`,
+      headers: writeToken,
+      payload: { status: "acknowledged", note: "Saved with a scoped token." },
+    });
+    expect(tokenSaved.statusCode).toBe(200);
+
+    const foreignFinding = await app.inject({
+      method: "PUT",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/foreign-finding`,
+      headers: {
+        cookie: auth.cookie,
+        origin: "http://localhost:3000",
+        "x-repovista-csrf": auth.csrfToken,
+      },
+      payload: { status: "acknowledged" },
+    });
+    expect(foreignFinding.statusCode).toBe(404);
+    expect(foreignFinding.json().error.code).toBe("GUARDRAIL_FINDING_NOT_FOUND");
+
+    const saved = await app.inject({
+      method: "PUT",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/${finding.id}`,
+      headers: {
+        cookie: auth.cookie,
+        origin: "http://localhost:3000",
+        "x-repovista-csrf": auth.csrfToken,
+      },
+      payload: { status: "acknowledged", note: "Reviewed by owner" },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(reviewStore.upsertGuardrailReview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        findingId: finding.id,
+        status: "acknowledged",
+        subjectKey: guardrailFindingSubjectKey(finding),
+      }),
+    );
+
+    const exported = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/guardrails/json`,
+      headers: { cookie: auth.cookie },
+    });
+    expect(exported.statusCode).toBe(200);
+    expect(exported.headers["content-disposition"]).toContain("guardrails.json");
+    expect(exported.json().deterministic.status).toBe(report.status);
+    expect(exported.json().reviews[0].status).toBe("accepted_risk");
+    expect(exported.body).not.toContain("export function hello");
+
+    const cleared = await app.inject({
+      method: "DELETE",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/${finding.id}`,
+      headers: {
+        cookie: auth.cookie,
+        origin: "http://localhost:3000",
+        "x-repovista-csrf": auth.csrfToken,
+      },
+    });
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json().data.status).toBe("unreviewed");
+  });
+
+  it("keeps the bundled Demo review metadata read-only", async () => {
+    const store = createStore();
+    const demoRepository = {
+      ...repository,
+      canonicalUrl: BUNDLED_DEMO_REPOSITORY.canonicalUrl,
+      cloneUrl: BUNDLED_DEMO_REPOSITORY.cloneUrl,
+    };
+    vi.mocked(store.getRepository).mockResolvedValue(demoRepository);
+    const accessStore = store as unknown as {
+      getSnapshotAccess: ReturnType<typeof vi.fn>;
+    };
+    accessStore.getSnapshotAccess = vi.fn(async () => ({
+      repositoryId,
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      visibility: "public" as const,
+      githubInstallationId: null,
+      role: "owner" as const,
+    }));
+    const auth = authenticateOwner(store);
+    const { app } = createTestApp(store);
+    openApps.push(app);
+    const report = buildGuardrailReport({
+      snapshot: {
+        id: snapshot.id,
+        commitSha: snapshot.commitSha as string,
+        parserVersion: snapshot.parserVersion,
+        requestedAt: snapshot.requestedAt,
+        readyAt: snapshot.readyAt,
+      },
+      files: [
+        {
+          id: fileId,
+          path: "src/index.ts",
+          language: "typescript",
+          byteSize: 120_000,
+          lineCount: 801,
+          parseStatus: "parsed",
+        },
+      ],
+      symbols: [],
+      edges: [],
+    });
+    const finding = report.findings[0];
+    if (!finding) throw new Error("Expected a Guardrail finding.");
+    const denied = await app.inject({
+      method: "PUT",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/${finding.id}`,
+      headers: {
+        cookie: auth.cookie,
+        origin: "http://localhost:3000",
+        "x-repovista-csrf": auth.csrfToken,
+      },
+      payload: { status: "accepted_risk", note: "Demo must stay immutable." },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json().error.code).toBe("GUARDRAIL_REVIEW_DEMO_READ_ONLY");
   });
 
   it("marks private Guardrails JSON and SARIF as non-cacheable", async () => {

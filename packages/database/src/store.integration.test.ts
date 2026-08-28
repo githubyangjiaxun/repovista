@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { IndexedRepository } from "@repovista/domain";
-import { PUBLIC_WORKSPACE_ID } from "@repovista/domain";
+import { PUBLIC_USER_ID, PUBLIC_WORKSPACE_ID } from "@repovista/domain";
 import { guardrailFindingSubjectKey } from "@repovista/guardrails";
 import { computePullRequestImpact } from "@repovista/impact";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -425,6 +425,66 @@ integration("RepoVistaStore with PostgreSQL", () => {
         PUBLIC_WORKSPACE_ID,
       ),
     ).resolves.toEqual(createdExplanation.explanation);
+
+    const reviewInput = {
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      snapshotId: job.snapshotId,
+      findingId: finding.id,
+      subjectKey: expectedSubjectKey,
+      status: "accepted_risk" as const,
+      note: "  Keep the boundary until the next refactor.  ",
+      reviewedBy: PUBLIC_USER_ID,
+      actorKind: "system" as const,
+    };
+    const savedReview = await store.upsertGuardrailReview(reviewInput);
+    expect(savedReview).toMatchObject({
+      findingId: finding.id,
+      subjectKey: expectedSubjectKey,
+      status: "accepted_risk",
+      note: "Keep the boundary until the next refactor.",
+      reviewer: { userId: PUBLIC_USER_ID, displayName: "Public Demo" },
+    });
+    const concurrentReviews = await Promise.all([
+      store.upsertGuardrailReview({ ...reviewInput, status: "acknowledged" }),
+      store.upsertGuardrailReview({ ...reviewInput, status: "acknowledged" }),
+    ]);
+    expect(new Set(concurrentReviews.map((item) => item.findingId))).toEqual(new Set([finding.id]));
+    expect(new Set(concurrentReviews.map((item) => item.status))).toEqual(
+      new Set(["acknowledged"]),
+    );
+    const listedReviews = await store.listGuardrailReviews(PUBLIC_WORKSPACE_ID, job.snapshotId);
+    expect(listedReviews).toHaveLength(1);
+    expect(listedReviews[0]).toMatchObject({ status: "acknowledged" });
+    const reviewAudit = (await store.listAuditEvents(PUBLIC_WORKSPACE_ID, 200)).filter((event) =>
+      event.action.startsWith("guardrail_review."),
+    );
+    expect(reviewAudit.length).toBeGreaterThanOrEqual(2);
+    expect(reviewAudit[0]?.metadata).not.toHaveProperty("note");
+    expect(reviewAudit[0]?.metadata).toMatchObject({
+      snapshotId: job.snapshotId,
+      subjectKey: expectedSubjectKey,
+    });
+    await expect(
+      store.deleteGuardrailReview({
+        workspaceId: PUBLIC_WORKSPACE_ID,
+        snapshotId: job.snapshotId,
+        findingId: finding.id,
+        actorUserId: PUBLIC_USER_ID,
+        actorKind: "system",
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      store.deleteGuardrailReview({
+        workspaceId: PUBLIC_WORKSPACE_ID,
+        snapshotId: job.snapshotId,
+        findingId: finding.id,
+        actorUserId: PUBLIC_USER_ID,
+        actorKind: "system",
+      }),
+    ).resolves.toBe(false);
+    await expect(store.listGuardrailReviews(PUBLIC_WORKSPACE_ID, job.snapshotId)).resolves.toEqual(
+      [],
+    );
 
     const alternateExplanation = await store.createGuardrailExplanation({
       workspaceId: PUBLIC_WORKSPACE_ID,

@@ -18,6 +18,8 @@ import {
   type GuardrailExplanationHistory,
   type GuardrailProfile,
   type GuardrailReport,
+  type GuardrailReview,
+  type GuardrailReviewsResponse,
   githubInstallationRepositoryPageSchema,
   githubInstallationSchema,
   guardrailComparisonSchema,
@@ -25,6 +27,7 @@ import {
   guardrailExplanationHistorySchema,
   guardrailProfileSchema,
   guardrailReportSchema,
+  guardrailReviewsResponseSchema,
   type Job,
   jobSchema,
   type RepositorySummary,
@@ -349,6 +352,37 @@ export class RepoVistaClient {
     );
   }
 
+  listGuardrailReviews(snapshotId: string): Promise<GuardrailReviewsResponse> {
+    return this.requestEnvelope(
+      `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/reviews`,
+      {},
+      (value) => guardrailReviewsResponseSchema.parse(value),
+    );
+  }
+
+  updateGuardrailReview(
+    snapshotId: string,
+    findingId: string,
+    input: { status: GuardrailReview["status"]; note?: string },
+  ): Promise<GuardrailReview> {
+    return this.requestEnvelope(
+      `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/reviews/${encodeURIComponent(findingId)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ status: input.status, note: input.note ?? "" }),
+      },
+      (value) => guardrailReviewsResponseSchema.shape.reviews.element.parse(value),
+    );
+  }
+
+  clearGuardrailReview(snapshotId: string, findingId: string): Promise<GuardrailReview> {
+    return this.requestEnvelope(
+      `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/reviews/${encodeURIComponent(findingId)}`,
+      { method: "DELETE" },
+      (value) => guardrailReviewsResponseSchema.shape.reviews.element.parse(value),
+    );
+  }
+
   async downloadGuardrailsSarif(snapshotId: string): Promise<{ body: string; filename: string }> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
@@ -404,6 +438,64 @@ export class RepoVistaClient {
       disposition.match(/filename\s*=\s*"([^"]+)"/i)?.[1] ??
       disposition.match(/filename\s*=\s*([^;]+)/i)?.[1]?.trim() ??
       `repovista-${snapshotId}-guardrails.sarif`;
+    return { body, filename };
+  }
+
+  async downloadGuardrailsJson(snapshotId: string): Promise<{ body: string; filename: string }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const headers = new Headers({
+      Accept: "application/json",
+      "User-Agent": CLI_USER_AGENT,
+    });
+    if (this.apiToken) headers.set("Authorization", `Bearer ${this.apiToken}`);
+    let response: Response;
+    try {
+      response = await this.fetchImplementation(
+        `${this.apiUrl}/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/json`,
+        { headers, signal: controller.signal },
+      );
+    } catch (cause) {
+      if (controller.signal.aborted) {
+        throw new ApiError(`The API request timed out after ${this.requestTimeoutMs}ms.`, {
+          cause,
+          code: "REQUEST_TIMEOUT",
+          retryable: true,
+        });
+      }
+      throw new ApiError(`Unable to reach the RepoVista API at ${this.apiUrl}.`, {
+        cause,
+        code: "API_UNREACHABLE",
+        retryable: true,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+    const body = await response.text();
+    if (!response.ok) {
+      let payload: unknown = null;
+      try {
+        payload = JSON.parse(body);
+      } catch {
+        // Keep the stable HTTP error below when a proxy returns non-JSON.
+      }
+      const failure = isApiFailure(payload) ? payload.error : undefined;
+      throw new ApiError(
+        failure?.message ?? `The API request failed with HTTP ${response.status}.`,
+        {
+          code: failure?.code ?? `HTTP_${response.status}`,
+          details: failure?.details,
+          requestId: failure?.requestId ?? response.headers.get("x-request-id") ?? undefined,
+          retryable: failure?.retryable ?? response.status >= 500,
+          status: response.status,
+        },
+      );
+    }
+    const disposition = response.headers.get("content-disposition") ?? "";
+    const filename =
+      disposition.match(/filename\s*=\s*"([^"]+)"/i)?.[1] ??
+      disposition.match(/filename\s*=\s*([^;]+)/i)?.[1]?.trim() ??
+      `repovista-${snapshotId}-guardrails.json`;
     return { body, filename };
   }
 

@@ -5,6 +5,8 @@ import type {
   GuardrailExplanationComparison,
   GuardrailExplanationHistory,
   GuardrailProfile,
+  GuardrailReview,
+  GuardrailReviewsResponse,
 } from "@repovista/contracts";
 import {
   createGuardrailProfileRequestSchema,
@@ -124,17 +126,22 @@ const commandHelp: Record<string, string> = {
     "       repovista guardrails explain <snapshot-id> <finding-id> [options]",
     "       repovista guardrails explanations history <snapshot-id> <finding-id> [options]",
     "       repovista guardrails explanations compare <repository-id> <base-id> <head-id> [options]",
+    "       repovista guardrails reviews list <snapshot-id> [options]",
+    "       repovista guardrails reviews set <snapshot-id> <finding-id> <status> [options]",
+    "       repovista guardrails reviews clear <snapshot-id> <finding-id> [options]",
     "       repovista guardrails profiles [--json]",
     "       repovista guardrails profile create <key> --name <name> [options]",
     "       repovista guardrails profile assign <repository-id> <profile-id|default>",
     "",
     "Report options:",
     "  --sarif <file>          Save a SARIF 2.1.0 report to a local file",
+    "  --json-export <file>    Save deterministic + review metadata JSON to a local file",
     "  --json                  Emit the complete Guardrails JSON report",
     "  --provider <name>       fake, ollama, or openai-compatible (for explain)",
     "  --model <name>          Override the configured explanation model",
     "  --limit <n>             Explanation history page size from 1 to 50 (default: 20)",
     "  --cursor <value>        Continue explanation history from a server cursor",
+    "  --note <text>           Human review note (maximum 2,000 characters)",
     "",
     "Profile create options (unspecified thresholds use the built-in default):",
     "  --name <name>                 Human-readable profile name (required)",
@@ -430,7 +437,11 @@ function formatSearch(result: SearchResult): string {
   return lines.join("\n");
 }
 
-function formatGuardrails(report: GuardrailReport, sarifPath?: string): string {
+function formatGuardrails(
+  report: GuardrailReport,
+  sarifPath?: string,
+  jsonExportPath?: string,
+): string {
   const lines = [
     `Guardrails: ${report.status}`,
     `Snapshot: ${report.snapshot.id}`,
@@ -451,6 +462,7 @@ function formatGuardrails(report: GuardrailReport, sarifPath?: string): string {
     lines.push("", "No guardrail findings.");
   }
   if (sarifPath) lines.push("", `SARIF: ${sarifPath}`);
+  if (jsonExportPath) lines.push(`JSON export: ${jsonExportPath}`);
   return lines.join("\n");
 }
 
@@ -548,6 +560,32 @@ function formatGuardrailExplanationHistory(history: GuardrailExplanationHistory)
     }
   }
   lines.push("", `Next cursor: ${history.nextCursor ?? "none"}`);
+  return lines.join("\n");
+}
+
+function formatGuardrailReviews(result: GuardrailReviewsResponse): string {
+  const reviewed = result.reviews.filter((review) => review.status !== "unreviewed");
+  const lines = [
+    "Guardrail review metadata",
+    `Snapshot: ${result.snapshot.id} · Commit: ${result.snapshot.commitSha.slice(0, 12)}`,
+    `Reviewed: ${reviewed.length}/${result.reviews.length}`,
+    "Deterministic Guardrail status and CI decisions are unchanged by reviews.",
+  ];
+  if (result.reviews.length === 0) {
+    lines.push("", "No findings were produced for this Snapshot.");
+    return lines.join("\n");
+  }
+  lines.push("", "Findings:");
+  for (const review of result.reviews) {
+    lines.push(
+      `- [${review.status}] ${review.findingId}`,
+      ...(review.note ? [`  Note: ${review.note}`] : []),
+      ...(review.reviewer
+        ? [`  Reviewer: ${review.reviewer.login ?? review.reviewer.displayName}`]
+        : []),
+      ...(review.updatedAt ? [`  Updated: ${review.updatedAt}`] : []),
+    );
+  }
   return lines.join("\n");
 }
 
@@ -807,8 +845,10 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
         limit: "string",
         name: "string",
         model: "string",
+        note: "string",
         provider: "string",
         sarif: "string",
+        json_export: "string",
       },
       doctor: {},
       auth: {},
@@ -1171,6 +1211,69 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     }
 
     if (command === "guardrails") {
+      if (parsed.positionals[0] === "reviews") {
+        const action = parsed.positionals[1];
+        if (action === "list") {
+          if (parsed.positionals.length !== 3) {
+            throw new UsageError("guardrails reviews list requires exactly a snapshot ID.");
+          }
+          const snapshotId = requireId(parsed.positionals[2], "Snapshot ID");
+          const result = await client.listGuardrailReviews(snapshotId);
+          if (json) writeJson(output, result);
+          else output.stdout(formatGuardrailReviews(result));
+          return 0;
+        }
+        if (action === "set") {
+          if (parsed.positionals.length !== 5) {
+            throw new UsageError(
+              "guardrails reviews set requires a snapshot ID, finding ID, and status.",
+            );
+          }
+          const snapshotId = requireId(parsed.positionals[2], "Snapshot ID");
+          const findingId = parsed.positionals[3];
+          const status = parsed.positionals[4] as GuardrailReview["status"];
+          if (!findingId) throw new UsageError("Finding ID is required.");
+          if (
+            !(["unreviewed", "acknowledged", "accepted_risk", "false_positive"] as const).includes(
+              status,
+            )
+          ) {
+            throw new UsageError(
+              "Review status must be unreviewed, acknowledged, accepted_risk, or false_positive.",
+            );
+          }
+          const review = await client.updateGuardrailReview(snapshotId, findingId, {
+            status,
+            ...(optionalString(parsed.options.note) !== undefined
+              ? { note: optionalString(parsed.options.note) }
+              : {}),
+          });
+          if (json) writeJson(output, review);
+          else {
+            output.stdout(
+              `Review for ${review.findingId}: ${review.status}${review.note ? `\nNote: ${review.note}` : ""}`,
+            );
+            output.stdout("Deterministic Guardrail status and CI decisions are unchanged.");
+          }
+          return 0;
+        }
+        if (action === "clear") {
+          if (parsed.positionals.length !== 4) {
+            throw new UsageError("guardrails reviews clear requires a snapshot ID and finding ID.");
+          }
+          const snapshotId = requireId(parsed.positionals[2], "Snapshot ID");
+          const findingId = parsed.positionals[3];
+          if (!findingId) throw new UsageError("Finding ID is required.");
+          const review = await client.clearGuardrailReview(snapshotId, findingId);
+          if (json) writeJson(output, review);
+          else {
+            output.stdout(`Review for ${review.findingId} cleared (unreviewed).`);
+            output.stdout("Deterministic Guardrail status and CI decisions are unchanged.");
+          }
+          return 0;
+        }
+        throw new UsageError("guardrails reviews requires list, set, or clear.");
+      }
       if (parsed.positionals[0] === "explanations") {
         const action = parsed.positionals[1];
         if (action === "history") {
@@ -1349,8 +1452,14 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
         await writeFile(sarifPath, artifact.body, { encoding: "utf8", mode: 0o600 });
         await chmod(sarifPath, 0o600);
       }
+      const jsonExportPath = optionalString(parsed.options.json_export);
+      if (jsonExportPath) {
+        const artifact = await client.downloadGuardrailsJson(snapshotId);
+        await writeFile(jsonExportPath, artifact.body, { encoding: "utf8", mode: 0o600 });
+        await chmod(jsonExportPath, 0o600);
+      }
       if (json) writeJson(output, report);
-      else output.stdout(formatGuardrails(report, sarifPath));
+      else output.stdout(formatGuardrails(report, sarifPath, jsonExportPath));
       return report.summary.errors > 0 ? 2 : 0;
     }
 

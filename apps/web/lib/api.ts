@@ -11,6 +11,8 @@ import type {
   GuardrailExplanationHistory,
   GuardrailExplanationSummary,
   GuardrailReport,
+  GuardrailReview,
+  GuardrailReviewsResponse,
   Job,
   PullRequestAnalysis,
   PullRequestFileChange,
@@ -99,6 +101,11 @@ export interface SnapshotExportDownload {
 }
 
 export interface GuardrailSarifDownload {
+  blob: Blob;
+  filename: string;
+}
+
+export interface GuardrailJsonDownload {
   blob: Blob;
   filename: string;
 }
@@ -195,6 +202,31 @@ export async function fetchGuardrailSarif(snapshotId: string): Promise<Guardrail
   };
 }
 
+export async function fetchGuardrailJson(snapshotId: string): Promise<GuardrailJsonDownload> {
+  const response = await fetch(
+    `${apiOrigin}/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/json`,
+    {
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    },
+  );
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as ApiFailure | null;
+    const failure = payload && "error" in payload ? payload.error : undefined;
+    throw new ApiError(failure?.message ?? `JSON export failed with status ${response.status}.`, {
+      code: failure?.code ?? "GUARDRAIL_EXPORT_FAILED",
+      requestId: failure?.requestId ?? response.headers.get("x-request-id") ?? undefined,
+      retryable: failure?.retryable,
+    });
+  }
+  return {
+    blob: await response.blob(),
+    filename:
+      contentDispositionFilename(response.headers.get("content-disposition")) ??
+      `repovista-${snapshotId}-guardrails.json`,
+  };
+}
+
 export function vscodeEvidenceUrl(input: {
   repositoryId: string;
   snapshotId: string;
@@ -281,6 +313,8 @@ export type {
   GuardrailExplanationComparison,
   GuardrailExplanationHistory,
   GuardrailExplanationSummary,
+  GuardrailReview,
+  GuardrailReviewsResponse,
 };
 
 export interface GuardrailExplanationResult {

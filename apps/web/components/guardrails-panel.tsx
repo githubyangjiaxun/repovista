@@ -8,6 +8,8 @@ import type {
   GuardrailExplanationSummary,
   GuardrailProfile,
   GuardrailReport,
+  GuardrailReview,
+  GuardrailReviewsResponse,
   Snapshot,
 } from "@repovista/contracts";
 import {
@@ -28,6 +30,7 @@ import { useOptionalAuth } from "@/components/auth-provider";
 import {
   apiErrorMessage,
   apiFetch,
+  fetchGuardrailJson,
   fetchGuardrailSarif,
   type GuardrailExplanationResult,
 } from "@/lib/api";
@@ -229,10 +232,20 @@ export function GuardrailsPanel({
     session?.authenticated && session.workspace && session.workspace.role !== "viewer",
   );
   const canRequestExplanations = !session?.authenticated || session.workspace?.role !== "viewer";
+  const canManageReviews = Boolean(
+    session?.authenticated && session.workspace && session.workspace.role !== "viewer",
+  );
   const [report, setReport] = useState<GuardrailReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
+  const [downloadingJson, setDownloadingJson] = useState(false);
+  const [reviews, setReviews] = useState<Record<string, GuardrailReview>>({});
+  const [reviewDrafts, setReviewDrafts] = useState<
+    Record<string, { status: GuardrailReview["status"]; note: string }>
+  >({});
+  const [reviewLoading, setReviewLoading] = useState<Record<string, boolean>>({});
+  const [reviewErrors, setReviewErrors] = useState<Record<string, string>>({});
   const [baselineSnapshotId, setBaselineSnapshotId] = useState("");
   const [comparison, setComparison] = useState<GuardrailComparison | null>(null);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
@@ -282,6 +295,10 @@ export function GuardrailsPanel({
     setReport(null);
     setLoading(true);
     setError(null);
+    setReviews({});
+    setReviewDrafts({});
+    setReviewLoading({});
+    setReviewErrors({});
     setExplanations({});
     setExplanationErrors({});
     setExplainingFindingId(null);
@@ -299,9 +316,29 @@ export function GuardrailsPanel({
     explanationHistoryContext.current = currentHistoryContext;
     explanationHistoryRequests.current = {};
     explanationComparisonRequests.current = {};
-    apiFetch<GuardrailReport>(`/v1/snapshots/${snapshotId}/guardrails`)
-      .then((result) => {
-        if (active) setReport(result);
+    const reviewRequest = session?.authenticated
+      ? apiFetch<GuardrailReviewsResponse>(`/v1/snapshots/${snapshotId}/guardrails/reviews`).catch(
+          () => ({
+            snapshot: { id: snapshotId, commitSha: "" },
+            reviews: [],
+          }),
+        )
+      : Promise.resolve({ snapshot: { id: snapshotId, commitSha: "" }, reviews: [] });
+    Promise.all([
+      apiFetch<GuardrailReport>(`/v1/snapshots/${snapshotId}/guardrails`),
+      reviewRequest,
+    ])
+      .then(([result, reviewData]) => {
+        if (!active) return;
+        setReport(result);
+        const byFinding: Record<string, GuardrailReview> = {};
+        const drafts: Record<string, { status: GuardrailReview["status"]; note: string }> = {};
+        for (const review of reviewData.reviews) {
+          byFinding[review.findingId] = review;
+          drafts[review.findingId] = { status: review.status, note: review.note };
+        }
+        setReviews(byFinding);
+        setReviewDrafts(drafts);
       })
       .catch((cause) => {
         if (active) setError(apiErrorMessage(cause, "Unable to evaluate architecture guardrails."));
@@ -312,7 +349,7 @@ export function GuardrailsPanel({
     return () => {
       active = false;
     };
-  }, [currentHistoryContext, snapshotId]);
+  }, [currentHistoryContext, session?.authenticated, snapshotId]);
 
   useEffect(() => {
     const request = ++profileRequest.current;
@@ -399,6 +436,97 @@ export function GuardrailsPanel({
       setError(apiErrorMessage(cause, "Unable to download the SARIF report."));
     } finally {
       setDownloading(false);
+    }
+  }
+
+  async function downloadJson() {
+    setDownloadingJson(true);
+    setError(null);
+    try {
+      const artifact = await fetchGuardrailJson(snapshotId);
+      const objectUrl = URL.createObjectURL(artifact.blob);
+      const anchor = document.createElement("a");
+      anchor.href = objectUrl;
+      anchor.download = artifact.filename;
+      anchor.rel = "noopener";
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+    } catch (cause) {
+      setError(apiErrorMessage(cause, "Unable to download the Guardrails JSON."));
+    } finally {
+      setDownloadingJson(false);
+    }
+  }
+
+  function updateReviewDraft(
+    findingId: string,
+    patch: Partial<{ status: GuardrailReview["status"]; note: string }>,
+  ) {
+    setReviewDrafts((current) => ({
+      ...current,
+      [findingId]: {
+        status: current[findingId]?.status ?? "unreviewed",
+        note: current[findingId]?.note ?? "",
+        ...patch,
+      },
+    }));
+  }
+
+  async function saveReview(findingId: string) {
+    if (!canManageReviews) return;
+    const draft = reviewDrafts[findingId] ?? { status: "unreviewed" as const, note: "" };
+    if (Array.from(draft.note).length > 2_000) {
+      setReviewErrors((current) => ({
+        ...current,
+        [findingId]: "Review note must be 2,000 characters or fewer.",
+      }));
+      return;
+    }
+    setReviewLoading((current) => ({ ...current, [findingId]: true }));
+    setReviewErrors((current) => ({ ...current, [findingId]: "" }));
+    try {
+      const next = await apiFetch<GuardrailReview>(
+        `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/reviews/${encodeURIComponent(findingId)}`,
+        { method: "PUT", body: JSON.stringify(draft) },
+      );
+      setReviews((current) => ({ ...current, [findingId]: next }));
+      setReviewDrafts((current) => ({
+        ...current,
+        [findingId]: { status: next.status, note: next.note },
+      }));
+    } catch (cause) {
+      setReviewErrors((current) => ({
+        ...current,
+        [findingId]: apiErrorMessage(cause, "Unable to save the review."),
+      }));
+    } finally {
+      setReviewLoading((current) => ({ ...current, [findingId]: false }));
+    }
+  }
+
+  async function clearReview(findingId: string) {
+    if (!canManageReviews) return;
+    setReviewLoading((current) => ({ ...current, [findingId]: true }));
+    setReviewErrors((current) => ({ ...current, [findingId]: "" }));
+    try {
+      const next = await apiFetch<GuardrailReview>(
+        `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/reviews/${encodeURIComponent(findingId)}`,
+        { method: "DELETE" },
+      );
+      setReviews((current) => ({ ...current, [findingId]: next }));
+      setReviewDrafts((current) => ({
+        ...current,
+        [findingId]: { status: "unreviewed", note: "" },
+      }));
+    } catch (cause) {
+      setReviewErrors((current) => ({
+        ...current,
+        [findingId]: apiErrorMessage(cause, "Unable to clear the review."),
+      }));
+    } finally {
+      setReviewLoading((current) => ({ ...current, [findingId]: false }));
     }
   }
 
@@ -663,15 +791,26 @@ export function GuardrailsPanel({
             passes or fails.
           </p>
         </div>
-        <button
-          className="secondary-button"
-          disabled={downloading}
-          onClick={() => void downloadSarif()}
-          type="button"
-        >
-          {downloading ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}
-          Download SARIF
-        </button>
+        <div className="guardrails-export-actions">
+          <button
+            className="secondary-button"
+            disabled={downloading}
+            onClick={() => void downloadSarif()}
+            type="button"
+          >
+            {downloading ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}
+            Download SARIF
+          </button>
+          <button
+            className="secondary-button"
+            disabled={downloadingJson}
+            onClick={() => void downloadJson()}
+            type="button"
+          >
+            {downloadingJson ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}
+            Download JSON
+          </button>
+        </div>
       </div>
 
       {error ? <div className="retrieval-alert">{error}</div> : null}
@@ -964,6 +1103,97 @@ export function GuardrailsPanel({
                 <h2>{finding.title}</h2>
                 <p>{finding.message}</p>
                 <small>{metricText(finding.metric)}</small>
+                <section
+                  className="guardrail-review"
+                  aria-label={`Human review for ${finding.title}`}
+                >
+                  <div className="guardrail-review-heading">
+                    <strong>Human review</strong>
+                    <span
+                      className={`guardrail-review-status review-${reviews[finding.id]?.status ?? "unreviewed"}`}
+                    >
+                      {reviews[finding.id]?.status ?? "unreviewed"}
+                    </span>
+                  </div>
+                  <p className="guardrail-review-disclaimer">
+                    Review metadata never changes deterministic status or CI decisions.
+                  </p>
+                  <label>
+                    <span>Status</span>
+                    <select
+                      aria-label={`Review status for ${finding.title}`}
+                      disabled={!canManageReviews || reviewLoading[finding.id] === true}
+                      onChange={(event) =>
+                        updateReviewDraft(finding.id, {
+                          status: event.target.value as GuardrailReview["status"],
+                        })
+                      }
+                      value={reviewDrafts[finding.id]?.status ?? "unreviewed"}
+                    >
+                      <option value="unreviewed">Unreviewed</option>
+                      <option value="acknowledged">Acknowledged</option>
+                      <option value="accepted_risk">Accepted risk</option>
+                      <option value="false_positive">False positive</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Note</span>
+                    <textarea
+                      aria-label={`Review note for ${finding.title}`}
+                      disabled={!canManageReviews || reviewLoading[finding.id] === true}
+                      // HTML maxLength counts UTF-16 code units; the API limit is
+                      // 2,000 Unicode code points, so allow up to 4,000 units
+                      // and let saveReview enforce the exact code-point bound.
+                      maxLength={4_000}
+                      onChange={(event) =>
+                        updateReviewDraft(finding.id, { note: event.target.value })
+                      }
+                      placeholder="Optional handoff note"
+                      value={reviewDrafts[finding.id]?.note ?? ""}
+                    />
+                  </label>
+                  {canManageReviews ? (
+                    <div className="guardrail-review-actions">
+                      <button
+                        disabled={reviewLoading[finding.id] === true}
+                        onClick={() => void saveReview(finding.id)}
+                        type="button"
+                      >
+                        {reviewLoading[finding.id] ? (
+                          <LoaderCircle className="spin" size={14} />
+                        ) : (
+                          <Save size={14} />
+                        )}
+                        Save review
+                      </button>
+                      <button
+                        disabled={
+                          reviewLoading[finding.id] === true ||
+                          (reviews[finding.id]?.status ?? "unreviewed") === "unreviewed"
+                        }
+                        onClick={() => void clearReview(finding.id)}
+                        type="button"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  ) : (
+                    <small>Viewer mode: review editing is unavailable.</small>
+                  )}
+                  {reviewErrors[finding.id] ? (
+                    <div className="guardrail-review-error" role="alert">
+                      {reviewErrors[finding.id]}
+                    </div>
+                  ) : null}
+                  {reviews[finding.id]?.reviewer ? (
+                    <small>
+                      Reviewed by{" "}
+                      {reviews[finding.id]?.reviewer?.login ??
+                        reviews[finding.id]?.reviewer?.displayName}{" "}
+                      · {reviews[finding.id]?.updatedAt}
+                    </small>
+                  ) : null}
+                </section>
                 <div className="guardrail-explanation-actions">
                   {canRequestExplanations ? (
                     <button

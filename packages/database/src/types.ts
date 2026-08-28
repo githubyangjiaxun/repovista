@@ -11,6 +11,8 @@ import type {
   GuardrailExplanationSummary,
   GuardrailFinding,
   GuardrailProfile,
+  GuardrailReview,
+  GuardrailReviewStatus,
   GuardrailThresholds,
   Job,
   RepositorySummary,
@@ -535,6 +537,27 @@ export interface GuardrailExplanationHistoryPage {
 export interface GuardrailExplanationPair {
   base: GuardrailExplanation;
   head: GuardrailExplanation;
+}
+
+export type GuardrailReviewRecord = GuardrailReview;
+
+export interface UpsertGuardrailReviewInput {
+  workspaceId: string;
+  snapshotId: string;
+  findingId: string;
+  subjectKey: string;
+  status: Exclude<GuardrailReviewStatus, "unreviewed">;
+  note: string;
+  reviewedBy: string;
+  actorKind: Principal["kind"];
+}
+
+export interface DeleteGuardrailReviewInput {
+  workspaceId: string;
+  snapshotId: string;
+  findingId: string;
+  actorUserId: string;
+  actorKind: Principal["kind"];
 }
 
 export interface ShareReportRecord {
