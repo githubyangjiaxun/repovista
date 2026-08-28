@@ -582,7 +582,7 @@ export function buildGuardrailJsonExport(
 
 export function buildSarifReport(
   report: GuardrailReport,
-  toolVersion = "1.3.0",
+  toolVersion = "1.4.0",
   reviews: readonly GuardrailReview[] = [],
 ): SarifLog {
   const ruleIds = [...new Set(report.findings.map((finding) => finding.ruleId))].sort();

@@ -28,6 +28,13 @@ integration("RepoVistaStore with PostgreSQL", () => {
 
   afterAll(async () => {
     if (repositoryIds.size > 0) {
+      // Pull-request analyses retain RESTRICT references to their immutable
+      // snapshots. Remove those analyses first so repository cleanup remains
+      // deterministic even when a database was created by an older migration
+      // with stricter child constraints.
+      await pool.query("DELETE FROM pull_request_analyses WHERE repository_id = ANY($1::uuid[])", [
+        [...repositoryIds],
+      ]);
       await pool.query("DELETE FROM repositories WHERE id = ANY($1::uuid[])", [[...repositoryIds]]);
       await pool.query(
         "DELETE FROM content_blobs b WHERE NOT EXISTS (" +
@@ -577,6 +584,147 @@ integration("RepoVistaStore with PostgreSQL", () => {
         cursor: "not-a-valid-cursor",
       }),
     ).rejects.toMatchObject({ code: "PAGINATION_CURSOR_INVALID" });
+
+    const batchFindingA = `batch-a:${suffix}`;
+    const batchFindingB = `batch-b:${suffix}`;
+    const batchSubjectA = `sha256:${"c".repeat(64)}`;
+    const batchSubjectB = `sha256:${"d".repeat(64)}`;
+    const rollbackFinding = `rollback:${suffix}`;
+    const rollbackInput = {
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      snapshotId: job.snapshotId,
+      batchId: randomUUID(),
+      idempotencyKey: `rollback-${suffix}`,
+      requestHash: `sha256:${"e".repeat(64)}`,
+      commitSha: indexed.commitSha,
+      items: [
+        {
+          findingId: rollbackFinding,
+          subjectKey: batchSubjectA,
+          status: "acknowledged" as const,
+          note: "will rollback",
+        },
+        {
+          findingId: "x".repeat(301),
+          subjectKey: batchSubjectB,
+          status: "false_positive" as const,
+          note: "invalid finding id",
+        },
+      ],
+      actorUserId: PUBLIC_USER_ID,
+      actorKind: "system" as const,
+      notificationMaxAttempts: 2,
+    };
+    await expect(store.applyGuardrailReviewBatch(rollbackInput)).rejects.toBeDefined();
+    const rolledBack = await pool.query(
+      "SELECT 1 FROM guardrail_reviews WHERE workspace_id = $1 AND snapshot_id = $2 AND finding_id = $3",
+      [PUBLIC_WORKSPACE_ID, job.snapshotId, rollbackFinding],
+    );
+    expect(rolledBack.rows).toHaveLength(0);
+
+    const slackEndpoint = await store.createNotificationEndpoint({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      name: `Slack batch relay ${suffix}`,
+      adapter: "slack",
+      url: "https://hooks.slack.com/services/T000/B000/integration",
+      eventTypes: ["guardrail_review.batch_updated"],
+      enabled: true,
+      createdBy: PUBLIC_USER_ID,
+      actorKind: "system",
+    });
+    notificationEndpointIds.add(slackEndpoint.id);
+    const batchInput = {
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      snapshotId: job.snapshotId,
+      batchId: randomUUID(),
+      idempotencyKey: `batch-${suffix}`,
+      requestHash: `sha256:${"f".repeat(64)}`,
+      commitSha: indexed.commitSha,
+      items: [
+        {
+          findingId: batchFindingA,
+          subjectKey: batchSubjectA,
+          status: "acknowledged" as const,
+          note: "  批量 review 🙂  ",
+        },
+        {
+          findingId: batchFindingB,
+          subjectKey: batchSubjectB,
+          status: "false_positive" as const,
+          note: "second batch item",
+        },
+      ],
+      actorUserId: PUBLIC_USER_ID,
+      actorKind: "system" as const,
+      notificationMaxAttempts: 2,
+    };
+    const batchResult = await store.applyGuardrailReviewBatch(batchInput);
+    expect(batchResult).toMatchObject({
+      batchId: batchInput.batchId,
+      snapshot: { id: job.snapshotId, commitSha: indexed.commitSha },
+      changed: 2,
+      unchanged: 0,
+      idempotentReplay: false,
+    });
+    expect(batchResult.applied[0]).toMatchObject({
+      findingId: batchFindingA,
+      status: "acknowledged",
+      noteLength: Array.from("批量 review 🙂").length,
+      changed: true,
+    });
+    const batchDeliveries = await store.listNotificationDeliveries(PUBLIC_WORKSPACE_ID, {
+      endpointId: slackEndpoint.id,
+      limit: 50,
+    });
+    expect(batchDeliveries.deliveries).toHaveLength(1);
+    expect(batchDeliveries.deliveries[0]).toMatchObject({
+      eventType: "guardrail_review.batch_updated",
+      adapter: "slack",
+      maxAttempts: 2,
+    });
+
+    const replay = await store.applyGuardrailReviewBatch(batchInput);
+    expect(replay).toMatchObject({ batchId: batchInput.batchId, idempotentReplay: true });
+    await expect(
+      store.applyGuardrailReviewBatch({
+        ...batchInput,
+        requestHash: `sha256:${"a".repeat(64)}`,
+      }),
+    ).rejects.toMatchObject({ code: "GUARDRAIL_REVIEW_BATCH_CONFLICT" });
+
+    const auditBeforeUnchanged = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM audit_events WHERE workspace_id = $1 AND action = 'guardrail_review.batch_update' AND resource_id = $2",
+      [PUBLIC_WORKSPACE_ID, batchInput.batchId],
+    );
+    const unchanged = await store.applyGuardrailReviewBatch({
+      ...batchInput,
+      batchId: randomUUID(),
+      idempotencyKey: `batch-unchanged-${suffix}`,
+    });
+    expect(unchanged).toMatchObject({ changed: 0, unchanged: 2, idempotentReplay: false });
+    const auditAfterUnchanged = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM audit_events WHERE workspace_id = $1 AND action = 'guardrail_review.batch_update' AND resource_id = $2",
+      [PUBLIC_WORKSPACE_ID, batchInput.batchId],
+    );
+    expect(auditAfterUnchanged.rows[0]?.count).toBe(auditBeforeUnchanged.rows[0]?.count);
+    const unchangedDeliveries = await store.listNotificationDeliveries(PUBLIC_WORKSPACE_ID, {
+      endpointId: slackEndpoint.id,
+      limit: 50,
+    });
+    expect(unchangedDeliveries.deliveries).toHaveLength(1);
+
+    await store.updateNotificationEndpoint({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      endpointId: slackEndpoint.id,
+      adapter: "generic",
+      actorUserId: PUBLIC_USER_ID,
+      actorKind: "system",
+    });
+    const snapshottedDelivery = await store.listNotificationDeliveries(PUBLIC_WORKSPACE_ID, {
+      endpointId: slackEndpoint.id,
+      limit: 50,
+    });
+    expect(snapshottedDelivery.deliveries[0]?.adapter).toBe("slack");
 
     const alternateExplanation = await store.createGuardrailExplanation({
       workspaceId: PUBLIC_WORKSPACE_ID,

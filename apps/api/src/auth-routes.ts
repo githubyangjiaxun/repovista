@@ -29,7 +29,10 @@ import {
 import type { RepoVistaStore } from "@repovista/database";
 import { DomainError, isDomainError } from "@repovista/domain";
 import { exchangeGitHubOAuthCode, type GitHubAppClient } from "@repovista/github";
-import { deriveNotificationSigningSecret, validateNotificationUrl } from "@repovista/notifications";
+import {
+  deriveNotificationSigningSecret,
+  validateNotificationAdapterUrl,
+} from "@repovista/notifications";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
@@ -402,7 +405,11 @@ export function registerAuthRoutes(
     requireWorkspaceMember(principal, workspaceId);
     const body = parseInput(createNotificationEndpointRequestSchema, request.body);
     const secret = notificationConfigSecret(config);
-    const url = validateNotificationUrl(body.url, config.APP_ENV === "production");
+    const url = validateNotificationAdapterUrl(
+      body.adapter,
+      body.url,
+      config.APP_ENV === "production",
+    );
     if (typeof store.createNotificationEndpoint !== "function") {
       throw new DomainError(
         "NOTIFICATION_DELIVERY_UNAVAILABLE",
@@ -414,6 +421,7 @@ export function registerAuthRoutes(
       workspaceId,
       name: body.name,
       url,
+      adapter: body.adapter,
       eventTypes: body.eventTypes,
       enabled: body.enabled,
       createdBy: principal.userId,
@@ -439,9 +447,22 @@ export function registerAuthRoutes(
       );
       requireWorkspaceMember(principal, workspaceId);
       const body = parseInput(updateNotificationEndpointRequestSchema, request.body);
-      const url = body.url
-        ? validateNotificationUrl(body.url, config.APP_ENV === "production")
-        : undefined;
+      let url: string | undefined;
+      const currentEndpoint =
+        typeof store.getNotificationEndpoint === "function"
+          ? await store.getNotificationEndpoint(workspaceId, endpointId)
+          : null;
+      if (body.url || body.adapter) {
+        const adapter = body.adapter ?? currentEndpoint?.adapter ?? "generic";
+        const targetUrl = body.url ?? currentEndpoint?.url;
+        if (!targetUrl) {
+          throw new DomainError(
+            "NOTIFICATION_ENDPOINT_NOT_FOUND",
+            "The notification endpoint does not exist.",
+          );
+        }
+        url = validateNotificationAdapterUrl(adapter, targetUrl, config.APP_ENV === "production");
+      }
       if (typeof store.updateNotificationEndpoint !== "function") {
         throw new DomainError(
           "NOTIFICATION_DELIVERY_UNAVAILABLE",
@@ -454,6 +475,7 @@ export function registerAuthRoutes(
         endpointId,
         ...(body.name !== undefined ? { name: body.name } : {}),
         ...(url !== undefined ? { url } : {}),
+        ...(body.adapter !== undefined ? { adapter: body.adapter } : {}),
         ...(body.eventTypes !== undefined ? { eventTypes: body.eventTypes } : {}),
         ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
         actorUserId: principal.userId,

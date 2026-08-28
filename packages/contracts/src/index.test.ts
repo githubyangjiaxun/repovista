@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
+  batchGuardrailReviewsRequestSchema,
+  batchGuardrailReviewsResponseSchema,
   createNotificationEndpointResponseSchema,
   guardrailReviewHistoryPageSchema,
   guardrailReviewSchema,
   guardrailReviewsResponseSchema,
   notificationDeliveryPageSchema,
   notificationEndpointSchema,
+  notificationEventTypesSchema,
   updateGuardrailReviewRequestSchema,
 } from "./index.js";
 
@@ -107,5 +110,78 @@ describe("Guardrail review contracts", () => {
     expect(
       notificationDeliveryPageSchema.parse({ deliveries: [], nextCursor: null }).deliveries,
     ).toEqual([]);
+    expect(endpoint.adapter).toBe("generic");
+    expect(
+      notificationEventTypesSchema.parse([
+        "guardrail_review.updated",
+        "guardrail_review.cleared",
+        "guardrail_review.batch_updated",
+      ]),
+    ).toHaveLength(3);
+    expect(() =>
+      notificationEventTypesSchema.parse([
+        "guardrail_review.batch_updated",
+        "guardrail_review.batch_updated",
+      ]),
+    ).toThrow(/unique/);
+  });
+
+  it("enforces atomic batch bounds, unique findings, Unicode notes, and note-free responses", () => {
+    const item = { findingId: "large_file:abcd", status: "acknowledged" as const, note: "  🙂  " };
+    expect(batchGuardrailReviewsRequestSchema.parse({ items: [item] }).items[0]?.note).toBe("🙂");
+    expect(
+      batchGuardrailReviewsRequestSchema.parse({
+        items: Array.from({ length: 50 }, (_, index) => ({
+          findingId: `finding-${index}`,
+          status: "false_positive" as const,
+          note: "",
+        })),
+      }).items,
+    ).toHaveLength(50);
+    expect(() =>
+      batchGuardrailReviewsRequestSchema.parse({
+        items: Array.from({ length: 51 }, (_, index) => ({
+          findingId: `finding-${index}`,
+          status: "acknowledged" as const,
+        })),
+      }),
+    ).toThrow();
+    expect(() =>
+      batchGuardrailReviewsRequestSchema.parse({
+        items: [item, item],
+      }),
+    ).toThrow(/unique/);
+    expect(() =>
+      batchGuardrailReviewsRequestSchema.parse({
+        items: [{ ...item, note: "🙂".repeat(2_001) }],
+      }),
+    ).toThrow(/2,000/);
+
+    const response = {
+      batchId: snapshotId,
+      snapshot: { id: snapshotId, commitSha: "a".repeat(40) },
+      applied: [
+        {
+          findingId: item.findingId,
+          subjectKey,
+          status: item.status,
+          noteLength: 1,
+          changed: true,
+        },
+      ],
+      changed: 1,
+      unchanged: 0,
+      idempotentReplay: false,
+    };
+    expect(batchGuardrailReviewsResponseSchema.parse(response)).toMatchObject({ changed: 1 });
+    expect(() =>
+      batchGuardrailReviewsResponseSchema.parse({
+        ...response,
+        applied: [{ ...response.applied[0], note: "secret" }],
+      }),
+    ).toThrow();
+    expect(() => batchGuardrailReviewsResponseSchema.parse({ ...response, changed: 0 })).toThrow(
+      /count/,
+    );
   });
 });

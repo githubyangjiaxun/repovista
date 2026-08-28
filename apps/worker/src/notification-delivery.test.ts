@@ -138,4 +138,52 @@ describe("notification delivery worker", () => {
     ).resolves.toBe(false);
     expect(store.claimNotificationDelivery).not.toHaveBeenCalled();
   });
+
+  it("renders a provider snapshot before signing and sending", async () => {
+    let body = "";
+    const slackDelivery = {
+      ...delivery,
+      adapter: "slack" as const,
+      url: "https://hooks.slack.com/services/T000/B000/secret",
+      payload: {
+        ...delivery.payload,
+        eventType: "guardrail_review.updated",
+        findingId: "large_file:abc",
+        transition: { fromStatus: "unreviewed", toStatus: "acknowledged", noteChanged: false },
+      },
+    };
+    const fetchImplementation = vi.fn(async (_url: string | URL, init?: RequestInit) => {
+      body = String(init?.body ?? "");
+      return new Response(null, { status: 204 });
+    }) as unknown as typeof fetch;
+    await expect(
+      executeNotificationDelivery(
+        createStore(),
+        slackDelivery,
+        config,
+        dependencies(fetchImplementation),
+      ),
+    ).resolves.toBe("succeeded");
+    const parsed = JSON.parse(body) as { text: string; blocks: unknown[] };
+    expect(parsed.text).toContain("RepoVista guardrail_review.updated");
+    expect(parsed.blocks.length).toBeGreaterThan(0);
+    expect(body).not.toContain("schemaVersion");
+  });
+
+  it("rejects a non-official Slack host before making a request", async () => {
+    const fetchImplementation = vi.fn() as unknown as typeof fetch;
+    const store = createStore();
+    await expect(
+      executeNotificationDelivery(
+        store,
+        { ...delivery, adapter: "slack", url: "https://hooks.example.com/relay" },
+        config,
+        dependencies(fetchImplementation),
+      ),
+    ).resolves.toBe("failed");
+    expect(fetchImplementation).not.toHaveBeenCalled();
+    expect(store.failNotificationDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({ retryable: false, statusCode: null }),
+    );
+  });
 });

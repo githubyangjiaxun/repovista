@@ -4,7 +4,9 @@ import type {
   AuthScope,
   EmbeddingIndex,
   EmbeddingProvider,
+  GuardrailReviewStatus,
   Job,
+  NotificationAdapter,
   NotificationDeliveryStatus,
   NotificationEventType,
   PullRequestAnalysis,
@@ -20,6 +22,7 @@ import type {
   WorkspaceSummary,
 } from "@repovista/contracts";
 import {
+  batchGuardrailReviewsResponseSchema,
   embeddingIndexSchema,
   guardrailExplanationSchema,
   guardrailExplanationSummarySchema,
@@ -28,6 +31,7 @@ import {
   guardrailReviewSchema,
   guardrailReviewStatusSchema,
   idSchema,
+  notificationAdapterSchema,
   notificationDeliverySchema,
   notificationDeliveryStatusSchema,
   notificationEndpointSchema,
@@ -53,6 +57,7 @@ import { guardrailFindingSubjectKey } from "@repovista/guardrails";
 import type { DatabaseClient, DatabasePool } from "./pool.js";
 import { withTransaction } from "./pool.js";
 import type {
+  ApplyGuardrailReviewBatchInput,
   AssignRepositoryGuardrailProfileInput,
   AuditEventInput,
   AuditEventRecord,
@@ -84,6 +89,7 @@ import type {
   GuardrailExplanationPair,
   GuardrailExplanationRecord,
   GuardrailProfileRecord,
+  GuardrailReviewBatchResult,
   GuardrailReviewHistoryPage,
   GuardrailReviewHistoryRecord,
   GuardrailReviewRecord,
@@ -237,6 +243,7 @@ interface NotificationEndpointRow {
   workspace_id: string;
   name: string;
   url: string;
+  adapter: NotificationAdapter;
   event_types: unknown;
   enabled: boolean;
   created_by: string | null;
@@ -250,7 +257,8 @@ interface NotificationDeliveryRow {
   id: string;
   workspace_id: string;
   endpoint_id: string;
-  event_type: "guardrail_review.updated" | "guardrail_review.cleared";
+  event_type: NotificationEventType;
+  adapter: NotificationAdapter;
   event_key: string;
   payload_json: Record<string, unknown>;
   status: "queued" | "running" | "succeeded" | "failed";
@@ -270,6 +278,7 @@ interface ClaimedNotificationDeliveryRow {
   endpoint_id: string;
   url: string;
   event_type: NotificationEventType;
+  adapter: NotificationAdapter;
   event_key: string;
   payload_json: Record<string, unknown>;
   attempt_count: number;
@@ -588,6 +597,7 @@ function mapNotificationEndpoint(row: NotificationEndpointRow): NotificationEndp
     workspaceId: row.workspace_id,
     name: row.name,
     url: row.url,
+    adapter: notificationAdapterSchema.parse(row.adapter),
     eventTypes: notificationEventTypeSchema.array().parse(row.event_types),
     enabled: row.enabled,
     createdBy: row.created_by,
@@ -604,6 +614,7 @@ function mapNotificationDelivery(row: NotificationDeliveryRow): NotificationDeli
     workspaceId: row.workspace_id,
     endpointId: row.endpoint_id,
     eventType: row.event_type,
+    adapter: notificationAdapterSchema.parse(row.adapter),
     eventKey: row.event_key,
     status: notificationDeliveryStatusSchema.parse(row.status),
     attemptCount: Number(row.attempt_count),
@@ -2247,6 +2258,319 @@ export class RepoVistaStore {
     });
   }
 
+  async applyGuardrailReviewBatch(
+    input: ApplyGuardrailReviewBatchInput,
+  ): Promise<GuardrailReviewBatchResult> {
+    if (input.items.length < 1 || input.items.length > 50) {
+      throw new DomainError(
+        "GUARDRAIL_REVIEW_BATCH_INVALID",
+        "A Guardrail review batch must contain between 1 and 50 items.",
+      );
+    }
+    if (!/^sha256:[a-f0-9]{64}$/.test(input.requestHash)) {
+      throw new DomainError(
+        "GUARDRAIL_REVIEW_BATCH_INVALID",
+        "The Guardrail review batch request hash is invalid.",
+      );
+    }
+    if (
+      input.idempotencyKey.length < 1 ||
+      input.idempotencyKey.length > 200 ||
+      [...input.idempotencyKey].some((character) => {
+        const code = character.codePointAt(0) ?? 0;
+        return code < 0x20 || code > 0x7e;
+      })
+    ) {
+      throw new DomainError(
+        "GUARDRAIL_REVIEW_BATCH_INVALID",
+        "The Idempotency-Key must contain 1 to 200 printable characters.",
+      );
+    }
+    const duplicate = new Set<string>();
+    for (const item of input.items) {
+      if (duplicate.has(item.findingId)) {
+        throw new DomainError(
+          "GUARDRAIL_REVIEW_BATCH_INVALID",
+          "Finding IDs must be unique within a batch.",
+        );
+      }
+      duplicate.add(item.findingId);
+      if (!/^sha256:[a-f0-9]{64}$/.test(item.subjectKey)) {
+        throw new DomainError(
+          "GUARDRAIL_REVIEW_BATCH_INVALID",
+          "A Guardrail review subject key is invalid.",
+        );
+      }
+      if (Array.from(item.note).length > 2_000) {
+        throw new DomainError(
+          "GUARDRAIL_REVIEW_NOTE_TOO_LONG",
+          "A Guardrail review note may contain at most 2,000 characters.",
+        );
+      }
+    }
+
+    return withTransaction(this.pool, async (client) => {
+      const snapshot = await client.query<{ id: string; commit_sha: string | null }>(
+        "SELECT id, commit_sha FROM repository_snapshots WHERE id = $1 AND workspace_id = $2 " +
+          "AND status = 'ready' FOR UPDATE",
+        [input.snapshotId, input.workspaceId],
+      );
+      const snapshotRow = snapshot.rows[0];
+      if (!snapshotRow || !snapshotRow.commit_sha) {
+        throw new DomainError(
+          "SNAPSHOT_NOT_FOUND",
+          "The requested snapshot does not exist in this Workspace.",
+        );
+      }
+
+      const reservation = await client.query<{ id: string }>(
+        "INSERT INTO guardrail_review_batches " +
+          "(id, workspace_id, snapshot_id, idempotency_key, request_hash, result_json, created_by) " +
+          'VALUES ($1, $2, $3, $4, $5, \'{"state":"pending"}\'::jsonb, $6) ' +
+          "ON CONFLICT (workspace_id, snapshot_id, idempotency_key) DO NOTHING RETURNING id",
+        [
+          input.batchId,
+          input.workspaceId,
+          input.snapshotId,
+          input.idempotencyKey,
+          input.requestHash,
+          input.actorUserId,
+        ],
+      );
+      if (reservation.rows.length === 0) {
+        const existing = await client.query<{
+          id: string;
+          request_hash: string;
+          result_json: unknown;
+        }>(
+          "SELECT id, request_hash, result_json FROM guardrail_review_batches " +
+            "WHERE workspace_id = $1 AND snapshot_id = $2 AND idempotency_key = $3 FOR UPDATE",
+          [input.workspaceId, input.snapshotId, input.idempotencyKey],
+        );
+        const row = existing.rows[0];
+        if (!row) {
+          throw new DomainError(
+            "GUARDRAIL_REVIEW_BATCH_UNAVAILABLE",
+            "The Guardrail review batch reservation could not be read.",
+            { retryable: true },
+          );
+        }
+        if (row.request_hash !== input.requestHash) {
+          throw new DomainError(
+            "GUARDRAIL_REVIEW_BATCH_CONFLICT",
+            "The Idempotency-Key was already used with different batch contents.",
+          );
+        }
+        const replay = batchGuardrailReviewsResponseSchema.safeParse(row.result_json);
+        if (!replay.success) {
+          throw new DomainError(
+            "GUARDRAIL_REVIEW_BATCH_UNAVAILABLE",
+            "The stored Guardrail review batch result is incomplete.",
+            { retryable: true },
+          );
+        }
+        return { ...replay.data, idempotentReplay: true };
+      }
+
+      const applied: import("./types.js").GuardrailReviewBatchResultItem[] = [];
+      const changedItems: Array<{
+        findingId: string;
+        subjectKey: string;
+        fromStatus: GuardrailReviewStatus;
+        toStatus: GuardrailReviewStatus;
+        fromNoteLength: number;
+        toNoteLength: number;
+        noteChanged: boolean;
+      }> = [];
+      for (const item of input.items) {
+        const note = item.status === "unreviewed" ? "" : item.note.trim();
+        const previous = await client.query<{
+          status: GuardrailReviewStatus;
+          note: string;
+          subject_key: string;
+          reviewed_by: string | null;
+        }>(
+          "SELECT status, note, subject_key, reviewed_by FROM guardrail_reviews " +
+            "WHERE workspace_id = $1 AND snapshot_id = $2 AND finding_id = $3 FOR UPDATE",
+          [input.workspaceId, input.snapshotId, item.findingId],
+        );
+        const before = previous.rows[0];
+        const fromStatus: GuardrailReviewStatus = before?.status ?? "unreviewed";
+        const fromNoteLength = safeNoteLength(Array.from(before?.note ?? "").length);
+        const noteChanged = before ? before.note !== note : Array.from(note).length > 0;
+        const changed = before
+          ? item.status === "unreviewed" ||
+            before?.status !== item.status ||
+            before?.note !== note ||
+            before?.subject_key !== item.subjectKey ||
+            before?.reviewed_by !== input.actorUserId
+          : item.status !== "unreviewed";
+
+        if (changed && item.status === "unreviewed") {
+          if (before) {
+            await client.query(
+              "DELETE FROM guardrail_reviews WHERE workspace_id = $1 AND snapshot_id = $2 AND finding_id = $3",
+              [input.workspaceId, input.snapshotId, item.findingId],
+            );
+          }
+        } else if (changed) {
+          await client.query(
+            "INSERT INTO guardrail_reviews (id, workspace_id, snapshot_id, finding_id, subject_key, status, note, reviewed_by) " +
+              "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) " +
+              "ON CONFLICT (workspace_id, snapshot_id, finding_id) DO UPDATE SET subject_key = EXCLUDED.subject_key, " +
+              "status = EXCLUDED.status, note = EXCLUDED.note, reviewed_by = EXCLUDED.reviewed_by, updated_at = now()",
+            [
+              createId(),
+              input.workspaceId,
+              input.snapshotId,
+              item.findingId,
+              item.subjectKey,
+              item.status,
+              note,
+              input.actorUserId,
+            ],
+          );
+        }
+
+        applied.push({
+          findingId: item.findingId,
+          subjectKey: item.subjectKey,
+          status: item.status,
+          noteLength: safeNoteLength(Array.from(note).length),
+          changed,
+        });
+        if (!changed) continue;
+        const action =
+          item.status === "unreviewed" ? "guardrail_review.clear" : "guardrail_review.upsert";
+        await this.appendAuditEvent(client, {
+          workspaceId: input.workspaceId,
+          actorUserId: input.actorUserId,
+          actorKind: input.actorKind,
+          action,
+          resourceType: "guardrail_review",
+          resourceId: item.findingId,
+          metadata: {
+            snapshotId: input.snapshotId,
+            subjectKey: item.subjectKey,
+            fromStatus,
+            toStatus: item.status,
+            previousNoteLength: fromNoteLength,
+            noteLength: safeNoteLength(Array.from(note).length),
+            noteChanged,
+            batchId: input.batchId,
+          },
+        });
+        changedItems.push({
+          findingId: item.findingId,
+          subjectKey: item.subjectKey,
+          fromStatus,
+          toStatus: item.status,
+          fromNoteLength,
+          toNoteLength: safeNoteLength(Array.from(note).length),
+          noteChanged,
+        });
+      }
+
+      if (changedItems.length > 0) {
+        const batchAuditId = await this.appendAuditEvent(client, {
+          workspaceId: input.workspaceId,
+          actorUserId: input.actorUserId,
+          actorKind: input.actorKind,
+          action: "guardrail_review.batch_update",
+          resourceType: "guardrail_review_batch",
+          resourceId: input.batchId,
+          metadata: {
+            snapshotId: input.snapshotId,
+            commitSha: snapshotRow.commit_sha,
+            changed: changedItems.length,
+            unchanged: input.items.length - changedItems.length,
+            changes: changedItems,
+          },
+        });
+        await this.enqueueBatchReviewNotification(client, {
+          auditId: batchAuditId,
+          workspaceId: input.workspaceId,
+          snapshotId: input.snapshotId,
+          commitSha: snapshotRow.commit_sha,
+          changes: changedItems,
+          actorKind: input.actorKind,
+          actorUserId: input.actorUserId,
+          maxAttempts: input.notificationMaxAttempts,
+        });
+      }
+
+      const result: GuardrailReviewBatchResult = {
+        batchId: input.batchId,
+        snapshot: { id: input.snapshotId, commitSha: snapshotRow.commit_sha },
+        applied,
+        changed: changedItems.length,
+        unchanged: input.items.length - changedItems.length,
+        idempotentReplay: false,
+      };
+      await client.query(
+        "UPDATE guardrail_review_batches SET result_json = $2::jsonb WHERE id = $1 AND workspace_id = $3",
+        [input.batchId, JSON.stringify(result), input.workspaceId],
+      );
+      return result;
+    });
+  }
+
+  private async enqueueBatchReviewNotification(
+    client: DatabaseClient,
+    input: {
+      auditId: number;
+      workspaceId: string;
+      snapshotId: string;
+      commitSha: string;
+      changes: Array<{
+        findingId: string;
+        subjectKey: string;
+        fromStatus: GuardrailReviewStatus;
+        toStatus: GuardrailReviewStatus;
+        fromNoteLength: number;
+        toNoteLength: number;
+        noteChanged: boolean;
+      }>;
+      actorKind: Principal["kind"];
+      actorUserId: string | null;
+      maxAttempts?: number;
+    },
+  ): Promise<void> {
+    const endpoints = await client.query<{ id: string; adapter: NotificationAdapter }>(
+      "SELECT id, adapter FROM workspace_notification_endpoints " +
+        "WHERE workspace_id = $1 AND enabled = true AND event_types @> $2::jsonb",
+      [input.workspaceId, JSON.stringify(["guardrail_review.batch_updated"])],
+    );
+    if (endpoints.rows.length === 0) return;
+    const payload = {
+      schemaVersion: "repovista.notification.v1",
+      eventId: String(input.auditId),
+      eventType: "guardrail_review.batch_updated" as const,
+      workspaceId: input.workspaceId,
+      snapshotId: input.snapshotId,
+      commitSha: input.commitSha,
+      changes: input.changes.map((change) => ({ ...change })),
+      actor: { kind: input.actorKind, userId: input.actorUserId },
+    } satisfies Record<string, unknown>;
+    for (const endpoint of endpoints.rows) {
+      await client.query(
+        "INSERT INTO notification_deliveries " +
+          "(id, workspace_id, endpoint_id, event_type, adapter, event_key, payload_json, max_attempts) " +
+          "VALUES ($1, $2, $3, 'guardrail_review.batch_updated', $4, $5, $6::jsonb, COALESCE($7, 5)) " +
+          "ON CONFLICT (endpoint_id, event_key) DO NOTHING",
+        [
+          createId(),
+          input.workspaceId,
+          endpoint.id,
+          endpoint.adapter,
+          String(input.auditId),
+          JSON.stringify(payload),
+          input.maxAttempts === undefined ? null : notificationAttemptLimit(input.maxAttempts),
+        ],
+      );
+    }
+  }
+
   private async enqueueReviewNotification(
     client: DatabaseClient,
     input: {
@@ -2268,9 +2592,10 @@ export class RepoVistaStore {
   ): Promise<void> {
     const endpoints = await client.query<{
       id: string;
+      adapter: NotificationAdapter;
       event_types: unknown;
     }>(
-      "SELECT id, event_types FROM workspace_notification_endpoints " +
+      "SELECT id, adapter, event_types FROM workspace_notification_endpoints " +
         "WHERE workspace_id = $1 AND enabled = true AND event_types @> $2::jsonb",
       [input.workspaceId, JSON.stringify([input.eventType])],
     );
@@ -2295,13 +2620,14 @@ export class RepoVistaStore {
     for (const endpoint of endpoints.rows) {
       await client.query(
         "INSERT INTO notification_deliveries " +
-          "(id, workspace_id, endpoint_id, event_type, event_key, payload_json, max_attempts) " +
-          "VALUES ($1, $2, $3, $4, $5, $6::jsonb, COALESCE($7, 5)) ON CONFLICT (endpoint_id, event_key) DO NOTHING",
+          "(id, workspace_id, endpoint_id, event_type, adapter, event_key, payload_json, max_attempts) " +
+          "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, COALESCE($8, 5)) ON CONFLICT (endpoint_id, event_key) DO NOTHING",
         [
           createId(),
           input.workspaceId,
           endpoint.id,
           input.eventType,
+          endpoint.adapter,
           String(input.auditId),
           JSON.stringify(payload),
           input.maxAttempts === undefined ? null : notificationAttemptLimit(input.maxAttempts),
@@ -2383,7 +2709,7 @@ export class RepoVistaStore {
 
   async listNotificationEndpoints(workspaceId: string): Promise<NotificationEndpointRecord[]> {
     const result = await this.pool.query<NotificationEndpointRow>(
-      "SELECT e.id, e.workspace_id, e.name, e.url, e.event_types, e.enabled, e.created_by, " +
+      "SELECT e.id, e.workspace_id, e.name, e.url, e.adapter, e.event_types, e.enabled, e.created_by, " +
         "e.created_at, e.updated_at, latest.created_at AS last_delivery_at, latest.status AS last_delivery_status " +
         "FROM workspace_notification_endpoints e " +
         "LEFT JOIN LATERAL (SELECT d.created_at, d.status FROM notification_deliveries d " +
@@ -2399,7 +2725,7 @@ export class RepoVistaStore {
     endpointId: string,
   ): Promise<NotificationEndpointRecord | null> {
     const result = await this.pool.query<NotificationEndpointRow>(
-      "SELECT e.id, e.workspace_id, e.name, e.url, e.event_types, e.enabled, e.created_by, " +
+      "SELECT e.id, e.workspace_id, e.name, e.url, e.adapter, e.event_types, e.enabled, e.created_by, " +
         "e.created_at, e.updated_at, latest.created_at AS last_delivery_at, latest.status AS last_delivery_status " +
         "FROM workspace_notification_endpoints e " +
         "LEFT JOIN LATERAL (SELECT d.created_at, d.status FROM notification_deliveries d " +
@@ -2418,15 +2744,16 @@ export class RepoVistaStore {
     const result = await withTransaction(this.pool, async (client) => {
       const inserted = await client.query<NotificationEndpointRow>(
         "INSERT INTO workspace_notification_endpoints " +
-          "(id, workspace_id, name, url, event_types, enabled, created_by) " +
-          "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7) " +
-          "RETURNING id, workspace_id, name, url, event_types, enabled, created_by, created_at, updated_at, " +
+          "(id, workspace_id, name, url, adapter, event_types, enabled, created_by) " +
+          "VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8) " +
+          "RETURNING id, workspace_id, name, url, adapter, event_types, enabled, created_by, created_at, updated_at, " +
           "NULL::timestamptz AS last_delivery_at, NULL::text AS last_delivery_status",
         [
           endpointId,
           input.workspaceId,
           input.name.trim(),
           input.url,
+          input.adapter ?? "generic",
           JSON.stringify(eventTypes),
           input.enabled,
           input.createdBy,
@@ -2461,9 +2788,9 @@ export class RepoVistaStore {
     return withTransaction(this.pool, async (client) => {
       const updated = await client.query<NotificationEndpointRow>(
         "UPDATE workspace_notification_endpoints SET name = COALESCE($3, name), url = COALESCE($4, url), " +
-          "event_types = COALESCE($5::jsonb, event_types), enabled = COALESCE($6, enabled), updated_at = now() " +
+          "adapter = COALESCE($5, adapter), event_types = COALESCE($6::jsonb, event_types), enabled = COALESCE($7, enabled), updated_at = now() " +
           "WHERE workspace_id = $1 AND id = $2 " +
-          "RETURNING id, workspace_id, name, url, event_types, enabled, created_by, created_at, updated_at, " +
+          "RETURNING id, workspace_id, name, url, adapter, event_types, enabled, created_by, created_at, updated_at, " +
           "(SELECT max(d.created_at) FROM notification_deliveries d WHERE d.endpoint_id = id) AS last_delivery_at, " +
           "(SELECT d.status FROM notification_deliveries d WHERE d.endpoint_id = id ORDER BY d.created_at DESC, d.id DESC LIMIT 1) AS last_delivery_status",
         [
@@ -2471,6 +2798,7 @@ export class RepoVistaStore {
           input.endpointId,
           input.name?.trim() ?? null,
           input.url ?? null,
+          input.adapter ?? null,
           eventTypes ? JSON.stringify(eventTypes) : null,
           input.enabled ?? null,
         ],
@@ -2547,7 +2875,7 @@ export class RepoVistaStore {
     }
     values.push(limit + 1);
     const result = await this.pool.query<NotificationDeliveryRow>(
-      "SELECT d.id, d.workspace_id, d.endpoint_id, d.event_type, d.event_key, d.payload_json, d.status, " +
+      "SELECT d.id, d.workspace_id, d.endpoint_id, d.event_type, d.adapter, d.event_key, d.payload_json, d.status, " +
         "d.attempt_count, d.max_attempts, d.next_attempt_at, d.last_status_code, d.last_error, d.delivered_at, " +
         "d.created_at, d.updated_at FROM notification_deliveries d " +
         `WHERE ${predicates.join(" AND ")} ORDER BY d.created_at DESC, d.id DESC LIMIT $${values.length}`,
@@ -2570,8 +2898,13 @@ export class RepoVistaStore {
     input: QueueNotificationTestInput,
   ): Promise<NotificationDeliveryRecord> {
     return withTransaction(this.pool, async (client) => {
-      const endpoint = await client.query<{ id: string; url: string; enabled: boolean }>(
-        "SELECT id, url, enabled FROM workspace_notification_endpoints WHERE workspace_id = $1 AND id = $2 FOR SHARE",
+      const endpoint = await client.query<{
+        id: string;
+        url: string;
+        adapter: NotificationAdapter;
+        enabled: boolean;
+      }>(
+        "SELECT id, url, adapter, enabled FROM workspace_notification_endpoints WHERE workspace_id = $1 AND id = $2 FOR SHARE",
         [input.workspaceId, input.endpointId],
       );
       if (!endpoint.rows[0])
@@ -2588,12 +2921,13 @@ export class RepoVistaStore {
         workspaceId: input.workspaceId,
       };
       const inserted = await client.query<NotificationDeliveryRow>(
-        "INSERT INTO notification_deliveries (id, workspace_id, endpoint_id, event_type, event_key, payload_json, max_attempts) " +
-          "VALUES ($1, $2, $3, 'guardrail_review.updated', $4, $5::jsonb, $6) RETURNING id, workspace_id, endpoint_id, event_type, event_key, payload_json, status, attempt_count, max_attempts, next_attempt_at, last_status_code, last_error, delivered_at, created_at, updated_at",
+        "INSERT INTO notification_deliveries (id, workspace_id, endpoint_id, event_type, adapter, event_key, payload_json, max_attempts) " +
+          "VALUES ($1, $2, $3, 'guardrail_review.updated', $4, $5, $6::jsonb, $7) RETURNING id, workspace_id, endpoint_id, event_type, adapter, event_key, payload_json, status, attempt_count, max_attempts, next_attempt_at, last_status_code, last_error, delivered_at, created_at, updated_at",
         [
           createId(),
           input.workspaceId,
           input.endpointId,
+          endpoint.rows[0].adapter,
           eventKey,
           JSON.stringify(payload),
           notificationAttemptLimit(input.maxAttempts),
@@ -2632,7 +2966,7 @@ export class RepoVistaStore {
           "lease_owner = $1, lease_expires_at = now() + ($2::integer * interval '1 second'), updated_at = now() " +
           "FROM candidate c, workspace_notification_endpoints e " +
           "WHERE d.id = c.id AND e.workspace_id = d.workspace_id AND e.id = d.endpoint_id " +
-          "RETURNING d.id, d.workspace_id, d.endpoint_id, e.url, d.event_type, d.event_key, " +
+          "RETURNING d.id, d.workspace_id, d.endpoint_id, e.url, d.event_type, d.adapter, d.event_key, " +
           "d.payload_json, d.attempt_count, d.max_attempts",
         [workerId, leaseSeconds],
       );
@@ -2644,6 +2978,7 @@ export class RepoVistaStore {
         endpointId: row.endpoint_id,
         url: row.url,
         eventType: row.event_type,
+        adapter: notificationAdapterSchema.parse(row.adapter),
         eventKey: row.event_key,
         payload: row.payload_json,
         attemptCount: Number(row.attempt_count),

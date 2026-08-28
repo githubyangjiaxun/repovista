@@ -7,10 +7,16 @@ import {
   verifyModelAnswer,
 } from "@repovista/ai";
 import type { AppConfig } from "@repovista/config";
-import type { GraphLevel, GuardrailReview, RelationType } from "@repovista/contracts";
+import type {
+  BatchGuardrailReviewsResponse,
+  GraphLevel,
+  GuardrailReview,
+  RelationType,
+} from "@repovista/contracts";
 import {
   askRequestSchema,
   assignGuardrailProfileRequestSchema,
+  batchGuardrailReviewsRequestSchema,
   createGuardrailExplanationRequestSchema,
   createGuardrailProfileRequestSchema,
   createPullRequestAnalysisRequestSchema,
@@ -26,7 +32,7 @@ import {
   updateGuardrailReviewRequestSchema,
 } from "@repovista/contracts";
 import type { RepoVistaStore, SearchEvidenceRecord } from "@repovista/database";
-import { DomainError, type Principal } from "@repovista/domain";
+import { createId, DomainError, type Principal } from "@repovista/domain";
 import { EMBEDDING_INPUT_VERSION } from "@repovista/embeddings";
 import {
   createMarkdownExport,
@@ -205,6 +211,19 @@ function parseInput<T extends z.ZodType>(schema: T, value: unknown): z.infer<T> 
 
 function response<T>(request: FastifyRequest, data: T) {
   return { data, meta: { requestId: request.id } };
+}
+
+function requestIdempotencyKey(request: FastifyRequest, fallback: string): string {
+  const raw = request.headers["idempotency-key"];
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  if (value === undefined) return `generated:${fallback}`;
+  if (!/^[\x20-\x7e]{1,200}$/.test(value)) {
+    throw new DomainError(
+      "GUARDRAIL_REVIEW_BATCH_INVALID",
+      "The Idempotency-Key must contain 1 to 200 printable ASCII characters.",
+    );
+  }
+  return value;
 }
 
 async function requestPrincipal(
@@ -1456,6 +1475,72 @@ export function registerRoutes(
       .send(response(request, { entries, nextCursor: history.nextCursor }));
   });
 
+  app.post("/v1/snapshots/:snapshotId/guardrails/reviews/batch", async (request, reply) => {
+    const { snapshotId } = parseInput(snapshotParamsSchema, request.params);
+    const parsedBody = batchGuardrailReviewsRequestSchema.safeParse(request.body);
+    if (!parsedBody.success) {
+      throw new DomainError(
+        "GUARDRAIL_REVIEW_BATCH_INVALID",
+        "The Guardrail review batch contains invalid input.",
+        {
+          details: {
+            issues: parsedBody.error.issues.map((issue) => ({
+              path: issue.path.join("."),
+              message: issue.message,
+            })),
+          },
+        },
+      );
+    }
+    const auth = await resolveRequestAuth(request, store);
+    verifySessionCsrf(request, config, auth);
+    const principal = requireGuardrailReviewWritePrincipal(auth.principal);
+    const access = await requireSnapshotAccess(request, store, snapshotId);
+    await assertReviewWriteScope(store, access, principal);
+    const report = await loadGuardrailReport(store, snapshotId);
+    const items = parsedBody.data.items.map((item) => {
+      const finding = report.findings.find((candidate) => candidate.id === item.findingId);
+      if (!finding) {
+        throw new DomainError(
+          "GUARDRAIL_FINDING_NOT_FOUND",
+          `The Finding ${item.findingId} does not belong to this Snapshot.`,
+        );
+      }
+      return {
+        findingId: finding.id,
+        subjectKey: guardrailFindingSubjectKey(finding),
+        status: item.status,
+        note: item.note,
+      };
+    });
+    if (typeof store.applyGuardrailReviewBatch !== "function") {
+      throw new DomainError(
+        "GUARDRAIL_REVIEW_BATCH_UNAVAILABLE",
+        "Batch Guardrail review storage is unavailable on this server.",
+        { retryable: true },
+      );
+    }
+    const batchId = createId();
+    const idempotencyKey = requestIdempotencyKey(request, batchId);
+    const requestHash = `sha256:${createHash("sha256")
+      .update(JSON.stringify({ items }))
+      .digest("hex")}`;
+    const result = (await store.applyGuardrailReviewBatch({
+      workspaceId: access.workspaceId,
+      snapshotId,
+      batchId,
+      idempotencyKey,
+      requestHash,
+      commitSha: report.snapshot.commitSha,
+      items,
+      actorUserId: principal.userId,
+      actorKind: principal.kind,
+      notificationMaxAttempts: config.NOTIFICATION_MAX_ATTEMPTS,
+    })) as BatchGuardrailReviewsResponse;
+    reply.code(202).header("Cache-Control", "private, no-store");
+    return response(request, result);
+  });
+
   app.put("/v1/snapshots/:snapshotId/guardrails/reviews/:findingId", async (request, reply) => {
     const { snapshotId, findingId } = parseInput(guardrailReviewParamsSchema, request.params);
     const body = parseInput(updateGuardrailReviewRequestSchema, request.body);
@@ -1753,7 +1838,7 @@ export function registerRoutes(
     const access = await requireSnapshotAccess(request, store, snapshotId);
     const report = await loadGuardrailReport(store, snapshotId);
     const reviewData = await loadGuardrailReviews(store, snapshotId, access.workspaceId, report);
-    const body = JSON.stringify(buildSarifReport(report, "1.3.0", reviewData.reviews), null, 2);
+    const body = JSON.stringify(buildSarifReport(report, "1.4.0", reviewData.reviews), null, 2);
     const etag = `"sha256-${createHash("sha256").update(body).digest("base64url")}"`;
     return reply
       .header(

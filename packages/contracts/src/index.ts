@@ -1031,6 +1031,57 @@ export const updateGuardrailReviewRequestSchema = z
   .strict();
 export type UpdateGuardrailReviewRequest = z.infer<typeof updateGuardrailReviewRequestSchema>;
 
+export const guardrailReviewBatchItemSchema = z
+  .object({
+    findingId: z.string().trim().min(1).max(300),
+    status: guardrailReviewStatusSchema,
+    note: guardrailReviewNoteSchema.trim().default(""),
+  })
+  .strict();
+export type GuardrailReviewBatchItem = z.infer<typeof guardrailReviewBatchItemSchema>;
+
+export const batchGuardrailReviewsRequestSchema = z
+  .object({
+    items: z
+      .array(guardrailReviewBatchItemSchema)
+      .min(1)
+      .max(50)
+      .refine((items) => new Set(items.map((item) => item.findingId)).size === items.length, {
+        message: "Finding IDs must be unique within a batch.",
+      }),
+  })
+  .strict();
+export type BatchGuardrailReviewsRequest = z.infer<typeof batchGuardrailReviewsRequestSchema>;
+
+export const guardrailReviewBatchResultItemSchema = z
+  .object({
+    findingId: z.string().trim().min(1).max(300),
+    subjectKey: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+    status: guardrailReviewStatusSchema,
+    noteLength: z.number().int().nonnegative().max(2_000),
+    changed: z.boolean(),
+  })
+  .strict();
+export type GuardrailReviewBatchResultItem = z.infer<typeof guardrailReviewBatchResultItemSchema>;
+
+export const batchGuardrailReviewsResponseSchema = z
+  .object({
+    batchId: idSchema,
+    snapshot: z.object({ id: idSchema, commitSha: commitShaSchema }).strict(),
+    applied: z.array(guardrailReviewBatchResultItemSchema).min(1).max(50),
+    changed: z.number().int().nonnegative().max(50),
+    unchanged: z.number().int().nonnegative().max(50),
+    idempotentReplay: z.boolean(),
+  })
+  .strict()
+  .refine((value) => value.changed + value.unchanged === value.applied.length, {
+    message: "Changed and unchanged counts must match the applied batch size.",
+  })
+  .refine((value) => value.applied.filter((item) => item.changed).length === value.changed, {
+    message: "Changed count must match the applied item flags.",
+  });
+export type BatchGuardrailReviewsResponse = z.infer<typeof batchGuardrailReviewsResponseSchema>;
+
 // v1.3 review history is projected from append-only audit events. It keeps
 // transition metadata useful for handoff without retaining the note body.
 export const guardrailReviewHistoryActionSchema = z.enum([
@@ -1073,16 +1124,20 @@ export const guardrailReviewHistoryPageSchema = z.object({
 });
 export type GuardrailReviewHistoryPage = z.infer<typeof guardrailReviewHistoryPageSchema>;
 
+export const notificationAdapterSchema = z.enum(["generic", "slack"]);
+export type NotificationAdapter = z.infer<typeof notificationAdapterSchema>;
+
 export const notificationEventTypeSchema = z.enum([
   "guardrail_review.updated",
   "guardrail_review.cleared",
+  "guardrail_review.batch_updated",
 ]);
 export type NotificationEventType = z.infer<typeof notificationEventTypeSchema>;
 
 export const notificationEventTypesSchema = z
   .array(notificationEventTypeSchema)
   .min(1)
-  .max(2)
+  .max(3)
   .refine((values) => new Set(values).size === values.length, {
     message: "Notification event types must be unique.",
   });
@@ -1092,6 +1147,7 @@ export const notificationEndpointSchema = z.object({
   workspaceId: idSchema,
   name: z.string().min(1).max(100),
   url: z.url().max(2_048),
+  adapter: notificationAdapterSchema.default("generic"),
   eventTypes: notificationEventTypesSchema,
   enabled: z.boolean(),
   createdBy: idSchema.nullable(),
@@ -1105,6 +1161,7 @@ export type NotificationEndpoint = z.infer<typeof notificationEndpointSchema>;
 const notificationEndpointFields = {
   name: z.string().trim().min(1).max(100),
   url: z.string().trim().min(1).max(2_048),
+  adapter: notificationAdapterSchema,
   eventTypes: notificationEventTypesSchema,
   enabled: z.boolean(),
 };
@@ -1116,6 +1173,7 @@ export const createNotificationEndpointRequestSchema = z
       "guardrail_review.updated",
       "guardrail_review.cleared",
     ]),
+    adapter: notificationEndpointFields.adapter.default("generic"),
     enabled: notificationEndpointFields.enabled.default(true),
   })
   .strict();
@@ -1152,6 +1210,7 @@ export const notificationDeliverySchema = z.object({
   workspaceId: idSchema,
   endpointId: idSchema,
   eventType: notificationEventTypeSchema,
+  adapter: notificationAdapterSchema.default("generic"),
   eventKey: z.string().min(1).max(300),
   status: notificationDeliveryStatusSchema,
   attemptCount: z.number().int().nonnegative().max(20),

@@ -3892,6 +3892,73 @@ a {
   gap: 10px;
 }
 
+.guardrail-review-batch {
+  margin-top: 18px;
+  padding: 13px;
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(126, 232, 190, 0.25);
+  border-radius: 11px;
+  background: rgba(126, 232, 190, 0.045);
+}
+
+.guardrail-review-batch-heading,
+.guardrail-review-batch-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.guardrail-review-batch-heading span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.guardrail-review-batch-heading button,
+.guardrail-review-batch-controls button {
+  min-height: 30px;
+  padding: 6px 9px;
+  border: 1px solid rgba(126, 232, 190, 0.35);
+  border-radius: 7px;
+  color: var(--accent);
+  background: rgba(126, 232, 190, 0.06);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.guardrail-review-batch-controls label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.guardrail-review-batch-controls select,
+.guardrail-review-batch-controls textarea {
+  min-width: 180px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.18);
+  font: inherit;
+}
+
+.guardrail-review-batch-controls textarea {
+  min-height: 38px;
+  resize: vertical;
+}
+
+.guardrail-finding-select {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .guardrail-finding {
   padding: 18px;
   display: grid;

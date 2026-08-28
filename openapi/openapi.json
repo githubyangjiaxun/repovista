@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RepoVista API",
-    "version": "1.3.0",
+    "version": "1.4.0",
     "description": "Evidence-first repository indexing with private GitHub App access, Workspace authorization, immutable Guardrail policy profiles, deterministic Architecture Guardrails and SARIF, Workspace-scoped human review metadata, separate deterministic JSON exports, verified explanation history and structural comparison, auditable sessions, API tokens, versioned semantic indexes, transparent hybrid retrieval, architecture stories, pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, and grounded answers."
   },
   "servers": [
@@ -1439,6 +1439,57 @@
             }
           },
           "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/v1/snapshots/{snapshotId}/guardrails/reviews/batch": {
+      "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
+      "post": {
+        "operationId": "batchUpdateGuardrailReviews",
+        "summary": "Apply up to 50 human review changes atomically",
+        "tags": ["Snapshots", "Guardrails"],
+        "security": [{ "CookieSession": [] }, { "BearerToken": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/CsrfHeader" },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 200 }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/BatchGuardrailReviewsRequest" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Batch applied or idempotently replayed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/BatchGuardrailReviewsResponse" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
           "404": { "$ref": "#/components/responses/NotFound" },
           "409": { "$ref": "#/components/responses/Conflict" },
           "503": { "$ref": "#/components/responses/ServiceUnavailable" }
@@ -4780,6 +4831,66 @@
           "note": { "type": "string", "maxLength": 2000, "default": "" }
         }
       },
+      "BatchGuardrailReviewsRequest": {
+        "type": "object",
+        "required": ["items"],
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "description": "Finding IDs must be unique within the batch.",
+            "items": {
+              "type": "object",
+              "required": ["findingId", "status"],
+              "additionalProperties": false,
+              "properties": {
+                "findingId": { "type": "string", "minLength": 1, "maxLength": 300 },
+                "status": { "$ref": "#/components/schemas/GuardrailReviewStatus" },
+                "note": { "type": "string", "maxLength": 2000, "default": "" }
+              }
+            }
+          }
+        }
+      },
+      "BatchGuardrailReviewsResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["batchId", "snapshot", "applied", "changed", "unchanged", "idempotentReplay"],
+        "properties": {
+          "batchId": { "$ref": "#/components/schemas/Uuid" },
+          "snapshot": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "commitSha"],
+            "properties": {
+              "id": { "$ref": "#/components/schemas/Uuid" },
+              "commitSha": { "type": "string", "pattern": "^[a-fA-F0-9]{7,64}$" }
+            }
+          },
+          "applied": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "required": ["findingId", "subjectKey", "status", "noteLength", "changed"],
+              "additionalProperties": false,
+              "properties": {
+                "findingId": { "type": "string", "minLength": 1, "maxLength": 300 },
+                "subjectKey": { "$ref": "#/components/schemas/GuardrailExplanationSubjectKey" },
+                "status": { "$ref": "#/components/schemas/GuardrailReviewStatus" },
+                "noteLength": { "type": "integer", "minimum": 0, "maximum": 2000 },
+                "changed": { "type": "boolean" }
+              }
+            }
+          },
+          "changed": { "type": "integer", "minimum": 0, "maximum": 50 },
+          "unchanged": { "type": "integer", "minimum": 0, "maximum": 50 },
+          "idempotentReplay": { "type": "boolean" }
+        }
+      },
       "GuardrailJsonExport": {
         "type": "object",
         "required": ["schemaVersion", "deterministic", "reviews"],
@@ -6148,9 +6259,17 @@
           }
         }
       },
+      "NotificationAdapter": {
+        "type": "string",
+        "enum": ["generic", "slack"]
+      },
       "NotificationEventType": {
         "type": "string",
-        "enum": ["guardrail_review.updated", "guardrail_review.cleared"]
+        "enum": [
+          "guardrail_review.updated",
+          "guardrail_review.cleared",
+          "guardrail_review.batch_updated"
+        ]
       },
       "NotificationDeliveryStatus": {
         "type": "string",
@@ -6163,6 +6282,7 @@
           "workspaceId",
           "name",
           "url",
+          "adapter",
           "eventTypes",
           "enabled",
           "createdBy",
@@ -6176,11 +6296,12 @@
           "workspaceId": { "$ref": "#/components/schemas/Uuid" },
           "name": { "type": "string", "minLength": 1, "maxLength": 100 },
           "url": { "type": "string", "format": "uri", "maxLength": 2048 },
+          "adapter": { "$ref": "#/components/schemas/NotificationAdapter" },
           "eventTypes": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 2,
-            "uniqueItems": true,
+            "maxItems": 3,
+            "description": "Event types must be unique.",
             "items": { "$ref": "#/components/schemas/NotificationEventType" }
           },
           "enabled": { "type": "boolean" },
@@ -6205,11 +6326,12 @@
         "properties": {
           "name": { "type": "string", "minLength": 1, "maxLength": 100 },
           "url": { "type": "string", "format": "uri", "maxLength": 2048 },
+          "adapter": { "$ref": "#/components/schemas/NotificationAdapter", "default": "generic" },
           "eventTypes": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 2,
-            "uniqueItems": true,
+            "maxItems": 3,
+            "description": "Event types must be unique.",
             "items": { "$ref": "#/components/schemas/NotificationEventType" }
           },
           "enabled": { "type": "boolean", "default": true }
@@ -6221,11 +6343,12 @@
         "properties": {
           "name": { "type": "string", "minLength": 1, "maxLength": 100 },
           "url": { "type": "string", "format": "uri", "maxLength": 2048 },
+          "adapter": { "$ref": "#/components/schemas/NotificationAdapter" },
           "eventTypes": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 2,
-            "uniqueItems": true,
+            "maxItems": 3,
+            "description": "Event types must be unique.",
             "items": { "$ref": "#/components/schemas/NotificationEventType" }
           },
           "enabled": { "type": "boolean" }
@@ -6246,6 +6369,7 @@
           "workspaceId",
           "endpointId",
           "eventType",
+          "adapter",
           "eventKey",
           "status",
           "attemptCount",
@@ -6262,6 +6386,7 @@
           "workspaceId": { "$ref": "#/components/schemas/Uuid" },
           "endpointId": { "$ref": "#/components/schemas/Uuid" },
           "eventType": { "$ref": "#/components/schemas/NotificationEventType" },
+          "adapter": { "$ref": "#/components/schemas/NotificationAdapter" },
           "eventKey": { "type": "string", "minLength": 1, "maxLength": 300 },
           "status": { "$ref": "#/components/schemas/NotificationDeliveryStatus" },
           "attemptCount": { "type": "integer", "minimum": 0, "maximum": 20 },

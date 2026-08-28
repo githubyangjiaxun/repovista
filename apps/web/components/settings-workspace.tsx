@@ -5,6 +5,7 @@ import type {
   AuditEvent,
   CreateApiTokenResponse,
   GitHubInstallation,
+  NotificationAdapter,
   NotificationDelivery,
   NotificationEndpoint,
   WorkspaceMember,
@@ -71,14 +72,18 @@ export function SettingsWorkspace() {
   const [rawToken, setRawToken] = useState<string | null>(null);
   const [notificationName, setNotificationName] = useState("");
   const [notificationUrl, setNotificationUrl] = useState("");
+  const [notificationAdapter, setNotificationAdapter] = useState<NotificationAdapter>("generic");
   const [notificationUpdated, setNotificationUpdated] = useState(true);
   const [notificationCleared, setNotificationCleared] = useState(true);
   const [notificationSecret, setNotificationSecret] = useState<string | null>(null);
   const [editingEndpointId, setEditingEndpointId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
   const [editingUrl, setEditingUrl] = useState("");
+  const [editingAdapter, setEditingAdapter] = useState<NotificationAdapter>("generic");
   const [editingUpdated, setEditingUpdated] = useState(true);
   const [editingCleared, setEditingCleared] = useState(true);
+  const [notificationBatchUpdated, setNotificationBatchUpdated] = useState(true);
+  const [editingBatchUpdated, setEditingBatchUpdated] = useState(true);
   const workspace = session?.workspace ?? null;
   const owner = workspace?.role === "owner";
   const canTestNotifications = workspace?.role !== "viewer";
@@ -232,6 +237,7 @@ export function SettingsWorkspace() {
     const eventTypes = [
       ...(notificationUpdated ? (["guardrail_review.updated"] as const) : []),
       ...(notificationCleared ? (["guardrail_review.cleared"] as const) : []),
+      ...(notificationBatchUpdated ? (["guardrail_review.batch_updated"] as const) : []),
     ];
     if (eventTypes.length === 0) {
       setError("Select at least one notification event.");
@@ -241,6 +247,7 @@ export function SettingsWorkspace() {
       const created = await createNotificationEndpoint(workspace.id, {
         name: notificationName.trim(),
         url: notificationUrl.trim(),
+        adapter: notificationAdapter,
         eventTypes,
       });
       setNotificationSecret(created.signingSecret);
@@ -253,8 +260,10 @@ export function SettingsWorkspace() {
     setEditingEndpointId(endpoint.id);
     setEditingName(endpoint.name);
     setEditingUrl(endpoint.url);
+    setEditingAdapter(endpoint.adapter);
     setEditingUpdated(endpoint.eventTypes.includes("guardrail_review.updated"));
     setEditingCleared(endpoint.eventTypes.includes("guardrail_review.cleared"));
+    setEditingBatchUpdated(endpoint.eventTypes.includes("guardrail_review.batch_updated"));
   }
 
   async function saveNotificationEdit(event: FormEvent<HTMLFormElement>, endpointId: string) {
@@ -263,6 +272,7 @@ export function SettingsWorkspace() {
     const eventTypes = [
       ...(editingUpdated ? (["guardrail_review.updated"] as const) : []),
       ...(editingCleared ? (["guardrail_review.cleared"] as const) : []),
+      ...(editingBatchUpdated ? (["guardrail_review.batch_updated"] as const) : []),
     ];
     if (eventTypes.length === 0) {
       setError("Select at least one notification event.");
@@ -272,6 +282,7 @@ export function SettingsWorkspace() {
       await updateNotificationEndpoint(workspace.id, endpointId, {
         name: editingName.trim(),
         url: editingUrl.trim(),
+        adapter: editingAdapter,
         eventTypes,
       });
       setEditingEndpointId(null);
@@ -594,6 +605,19 @@ export function SettingsWorkspace() {
               value={notificationUrl}
             />
             <label>
+              <span>Adapter</span>
+              <select
+                aria-label="Notification adapter"
+                onChange={(event) =>
+                  setNotificationAdapter(event.target.value as NotificationAdapter)
+                }
+                value={notificationAdapter}
+              >
+                <option value="generic">Generic Webhook</option>
+                <option value="slack">Slack Incoming Webhook</option>
+              </select>
+            </label>
+            <label>
               <input
                 checked={notificationUpdated}
                 onChange={(event) => setNotificationUpdated(event.target.checked)}
@@ -608,6 +632,14 @@ export function SettingsWorkspace() {
                 type="checkbox"
               />
               Review cleared
+            </label>
+            <label>
+              <input
+                checked={notificationBatchUpdated}
+                onChange={(event) => setNotificationBatchUpdated(event.target.checked)}
+                type="checkbox"
+              />
+              Batch review updated
             </label>
             <button
               className="secondary-button"
@@ -662,6 +694,19 @@ export function SettingsWorkspace() {
                       value={editingUrl}
                     />
                     <label>
+                      <span>Adapter</span>
+                      <select
+                        aria-label={`Edit adapter for ${endpoint.name}`}
+                        onChange={(event) =>
+                          setEditingAdapter(event.target.value as NotificationAdapter)
+                        }
+                        value={editingAdapter}
+                      >
+                        <option value="generic">Generic Webhook</option>
+                        <option value="slack">Slack Incoming Webhook</option>
+                      </select>
+                    </label>
+                    <label>
                       <input
                         checked={editingUpdated}
                         onChange={(event) => setEditingUpdated(event.target.checked)}
@@ -676,6 +721,14 @@ export function SettingsWorkspace() {
                         type="checkbox"
                       />
                       Cleared
+                    </label>
+                    <label>
+                      <input
+                        checked={editingBatchUpdated}
+                        onChange={(event) => setEditingBatchUpdated(event.target.checked)}
+                        type="checkbox"
+                      />
+                      Batch updated
                     </label>
                     <button className="secondary-button" type="submit">
                       <Check size={14} /> Save
@@ -693,6 +746,7 @@ export function SettingsWorkspace() {
                     <div>
                       <strong>{endpoint.name}</strong>
                       <small>{endpoint.url}</small>
+                      <small>Adapter: {endpoint.adapter}</small>
                       <small>{endpoint.eventTypes.join(", ")}</small>
                     </div>
                     <span className="settings-badge">
@@ -754,8 +808,8 @@ export function SettingsWorkspace() {
                 <span>
                   <strong>{delivery.eventType}</strong>
                   <small>
-                    {delivery.status} · {delivery.attemptCount}/{delivery.maxAttempts} attempts ·
-                    HTTP {delivery.lastStatusCode ?? "—"}
+                    {delivery.adapter} · {delivery.status} · {delivery.attemptCount}/
+                    {delivery.maxAttempts} attempts · HTTP {delivery.lastStatusCode ?? "—"}
                   </small>
                 </span>
                 <time dateTime={delivery.updatedAt}>

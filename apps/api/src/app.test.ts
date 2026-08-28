@@ -1769,6 +1769,209 @@ describe("RepoVista API", () => {
     expect(cleared.json().data.status).toBe("unreviewed");
   });
 
+  it("applies an atomic batch review with server-owned subjects and idempotency metadata", async () => {
+    const store = createStore();
+    const graph = await store.getSnapshotGraphData(snapshotId);
+    if (!graph) throw new Error("Expected graph data fixture.");
+    const firstFile = graph.files[0];
+    if (!firstFile) throw new Error("Expected file fixture.");
+    const secondFile = {
+      ...firstFile,
+      id: `${fileId}-second`,
+      path: "src/other.ts",
+    };
+    vi.mocked(store.getSnapshotGraphData).mockResolvedValue({
+      ...graph,
+      files: [
+        { ...firstFile, lineCount: 801, byteSize: 120_000 },
+        { ...secondFile, lineCount: 802, byteSize: 121_000 },
+      ],
+    });
+    const batchStore = store as unknown as {
+      applyGuardrailReviewBatch: ReturnType<typeof vi.fn>;
+    };
+    batchStore.applyGuardrailReviewBatch = vi.fn(async (input) => ({
+      batchId: "01900000-0000-7000-8000-000000000099",
+      snapshot: { id: input.snapshotId, commitSha: snapshot.commitSha },
+      applied: input.items.map(
+        (
+          item: { findingId: string; subjectKey: string; status: string; note: string },
+          index: number,
+        ) => ({
+          findingId: item.findingId,
+          subjectKey: item.subjectKey,
+          status: item.status,
+          noteLength: Array.from(item.note).length,
+          changed: index === 0,
+        }),
+      ),
+      changed: 1,
+      unchanged: input.items.length - 1,
+      idempotentReplay: false,
+    }));
+    const { app } = createTestApp(store);
+    openApps.push(app);
+    const report = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/guardrails`,
+    });
+    const findings = report.json().data.findings as Array<{ id: string }>;
+    expect(findings.length).toBeGreaterThanOrEqual(2);
+    const auth = authenticateOwner(store);
+    const result = await app.inject({
+      method: "POST",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/batch`,
+      headers: {
+        cookie: auth.cookie,
+        origin: "http://localhost:3000",
+        "x-repovista-csrf": auth.csrfToken,
+        "idempotency-key": "batch-api-test-1",
+      },
+      payload: {
+        items: [
+          { findingId: findings[0]?.id, status: "acknowledged", note: "  first 🙂  " },
+          { findingId: findings[1]?.id, status: "false_positive", note: "second" },
+        ],
+      },
+    });
+
+    expect(result.statusCode).toBe(202);
+    expect(result.headers["cache-control"]).toBe("private, no-store");
+    expect(result.json().data).toMatchObject({
+      batchId: "01900000-0000-7000-8000-000000000099",
+      changed: 1,
+      unchanged: 1,
+      idempotentReplay: false,
+    });
+    expect(batchStore.applyGuardrailReviewBatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId,
+        snapshotId,
+        idempotencyKey: "batch-api-test-1",
+        commitSha: snapshot.commitSha,
+        items: [
+          expect.objectContaining({
+            findingId: findings[0]?.id,
+            status: "acknowledged",
+            note: "first 🙂",
+          }),
+          expect.objectContaining({
+            findingId: findings[1]?.id,
+            status: "false_positive",
+            note: "second",
+          }),
+        ],
+      }),
+    );
+    const input = batchStore.applyGuardrailReviewBatch.mock.calls[0]?.[0];
+    expect(input.requestHash).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(input.items[0]?.subjectKey).toMatch(/^sha256:[a-f0-9]{64}$/);
+  });
+
+  it("enforces authentication, CSRF, workspace, Finding, and storage boundaries for batch reviews", async () => {
+    const store = createStore();
+    const graph = await store.getSnapshotGraphData(snapshotId);
+    if (!graph) throw new Error("Expected graph data fixture.");
+    const file = graph.files[0];
+    if (!file) throw new Error("Expected file fixture.");
+    vi.mocked(store.getSnapshotGraphData).mockResolvedValue({
+      ...graph,
+      files: [{ ...file, lineCount: 801, byteSize: 120_000 }],
+    });
+    const batchStore = store as unknown as {
+      applyGuardrailReviewBatch?: ReturnType<typeof vi.fn>;
+      getSnapshotAccess?: ReturnType<typeof vi.fn>;
+    };
+    batchStore.applyGuardrailReviewBatch = vi.fn(async (input) => ({
+      batchId: "01900000-0000-7000-8000-000000000098",
+      snapshot: { id: input.snapshotId, commitSha: snapshot.commitSha },
+      applied: input.items.map(
+        (item: { findingId: string; subjectKey: string; status: string }) => ({
+          findingId: item.findingId,
+          subjectKey: item.subjectKey,
+          status: item.status,
+          noteLength: 0,
+          changed: true,
+        }),
+      ),
+      changed: input.items.length,
+      unchanged: 0,
+      idempotentReplay: false,
+    }));
+    const { app } = createTestApp(store);
+    openApps.push(app);
+    const report = await app.inject({
+      method: "GET",
+      url: `/v1/snapshots/${snapshotId}/guardrails`,
+    });
+    const findingId = report.json().data.findings[0]?.id as string;
+    const payload = { items: [{ findingId, status: "acknowledged" as const }] };
+
+    const anonymous = await app.inject({
+      method: "POST",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/batch`,
+      payload,
+    });
+    expect(anonymous.statusCode).toBe(401);
+    expect(anonymous.json().error.code).toBe("AUTH_REQUIRED");
+
+    const viewer = authenticateToken(store, { role: "viewer" });
+    const viewerDenied = await app.inject({
+      method: "POST",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/batch`,
+      headers: viewer,
+      payload,
+    });
+    expect(viewerDenied.statusCode).toBe(403);
+    expect(viewerDenied.json().error.code).toBe("WORKSPACE_FORBIDDEN");
+
+    const auth = authenticateOwner(store);
+    const csrfDenied = await app.inject({
+      method: "POST",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/batch`,
+      headers: { cookie: auth.cookie, origin: "http://localhost:3000" },
+      payload,
+    });
+    expect(csrfDenied.statusCode).toBe(403);
+    expect(csrfDenied.json().error.code).toBe("CSRF_INVALID");
+
+    batchStore.getSnapshotAccess = vi.fn(async () => ({
+      repositoryId,
+      workspaceId: "01900000-0000-7000-8000-000000000099",
+      visibility: "private" as const,
+      githubInstallationId: null,
+      role: "owner" as const,
+    }));
+    const crossWorkspace = await app.inject({
+      method: "POST",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/batch`,
+      headers: { authorization: authenticateToken(store).authorization },
+      payload,
+    });
+    expect(crossWorkspace.statusCode).toBe(403);
+    expect(crossWorkspace.json().error.code).toBe("WORKSPACE_FORBIDDEN");
+
+    batchStore.getSnapshotAccess = undefined;
+    const external = await app.inject({
+      method: "POST",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/batch`,
+      headers: { authorization: authenticateToken(store).authorization },
+      payload: { items: [{ findingId: "foreign-finding", status: "acknowledged" }] },
+    });
+    expect(external.statusCode).toBe(404);
+    expect(external.json().error.code).toBe("GUARDRAIL_FINDING_NOT_FOUND");
+
+    batchStore.applyGuardrailReviewBatch = undefined;
+    const unavailable = await app.inject({
+      method: "POST",
+      url: `/v1/snapshots/${snapshotId}/guardrails/reviews/batch`,
+      headers: { authorization: authenticateToken(store).authorization },
+      payload,
+    });
+    expect(unavailable.statusCode).toBe(503);
+    expect(unavailable.json().error.code).toBe("GUARDRAIL_REVIEW_BATCH_UNAVAILABLE");
+  });
+
   it("keeps the bundled Demo review metadata read-only", async () => {
     const store = createStore();
     const demoRepository = {

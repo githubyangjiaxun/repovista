@@ -94,9 +94,17 @@
   exponential retry, DNS/IP SSRF checks, timeout, redirect rejection, API/CLI/Web/OpenAPI, migration `0010`,
   tests, and release evidence.
 
+## v1.4 — Batch Review and provider-specific notification adapters（implemented 2026-08-29）
+
+- [Done](./docs/releases/v1.4-开发计划.md) Atomic batch Review actions for 1–50 Findings with server-owned
+  subject keys, request hashing, idempotent replay, and conflict detection.
+- [Done](./docs/releases/v1.4-开发计划.md) Generic/Slack notification adapters with official Slack HTTPS
+  host policy, adapter snapshots, bounded payload rendering, and no note/source/model/credential leakage.
+- [Done](./docs/releases/v1.4-开发计划.md) API, CLI, Web, OpenAPI, Migration `0011`, PostgreSQL upgrade checks,
+  tests, and release evidence.
+
 ## Next candidates
 
-- Batch review actions and provider-specific notification adapters, keeping deterministic analysis,
-  human metadata, and external delivery separate.
+- Additional provider adapters after a separately reviewed protocol and operational threat model.
 
 Roadmap ordering may change based on measured usage and contributor feedback.

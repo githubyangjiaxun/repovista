@@ -8,6 +8,7 @@ import type {
   GuardrailReview,
   GuardrailReviewHistoryPage,
   GuardrailReviewsResponse,
+  NotificationAdapter,
   NotificationDelivery,
   NotificationDeliveryPage,
   NotificationEndpoint,
@@ -134,6 +135,7 @@ const commandHelp: Record<string, string> = {
     "       repovista guardrails reviews list <snapshot-id> [options]",
     "       repovista guardrails reviews set <snapshot-id> <finding-id> <status> [options]",
     "       repovista guardrails reviews clear <snapshot-id> <finding-id> [options]",
+    "       repovista guardrails reviews batch <snapshot-id> [--item <finding-id>=<status>] [options]",
     "       repovista guardrails reviews history <snapshot-id> [options]",
     "       repovista guardrails profiles [--json]",
     "       repovista guardrails profile create <key> --name <name> [options]",
@@ -164,9 +166,9 @@ const commandHelp: Record<string, string> = {
     "Usage: repovista notifications endpoints <list|create|update|delete|test> ...",
     "       repovista notifications deliveries list <workspace-id> [options]",
     "",
-    "Endpoint create options: --name <name> --url <https-url> [--event <event>] [--disabled]",
-    "Endpoint update options: --name <name> --url <https-url> [--event <event>] [--enabled|--disabled]",
-    "Events: guardrail_review.updated, guardrail_review.cleared",
+    "Endpoint create options: --name <name> --url <https-url> [--adapter generic|slack] [--event <event>] [--disabled]",
+    "Endpoint update options: --name <name> --url <https-url> [--adapter generic|slack] [--event <event>] [--enabled|--disabled]",
+    "Events: guardrail_review.updated, guardrail_review.cleared, guardrail_review.batch_updated",
     "The create command prints the signing secret once; it is never returned again.",
   ].join("\n"),
   doctor: "Usage: repovista doctor [--json]",
@@ -626,11 +628,30 @@ function formatGuardrailReviewHistory(history: GuardrailReviewHistoryPage): stri
   return lines.join("\n");
 }
 
+function formatGuardrailReviewBatch(
+  result: import("@repovista/contracts").BatchGuardrailReviewsResponse,
+): string {
+  const lines = [
+    `Guardrail review batch ${result.idempotentReplay ? "replayed" : "applied"}`,
+    `Batch: ${result.batchId}`,
+    `Snapshot: ${result.snapshot.id} · Commit: ${result.snapshot.commitSha.slice(0, 12)}`,
+    `Changed: ${result.changed} · Unchanged: ${result.unchanged}`,
+  ];
+  for (const item of result.applied) {
+    lines.push(
+      `- [${item.status}] ${item.findingId} · note length ${item.noteLength}${item.changed ? " · changed" : " · unchanged"}`,
+    );
+  }
+  lines.push("Deterministic Guardrail status and CI decisions are unchanged by reviews.");
+  return lines.join("\n");
+}
+
 function formatNotificationEndpoint(endpoint: NotificationEndpoint): string {
   return [
     `${endpoint.enabled ? "enabled " : "disabled"}  ${endpoint.name}`,
     `  ID: ${endpoint.id}`,
     `  URL: ${endpoint.url}`,
+    `  Adapter: ${endpoint.adapter}`,
     `  Events: ${endpoint.eventTypes.join(", ")}`,
     `  Last delivery: ${endpoint.lastDeliveryStatus ?? "none"}${endpoint.lastDeliveryAt ? ` (${endpoint.lastDeliveryAt})` : ""}`,
   ].join("\n");
@@ -641,6 +662,7 @@ function formatNotificationDelivery(delivery: NotificationDelivery): string {
     `${delivery.status}  ${delivery.eventType}`,
     `  ID: ${delivery.id}`,
     `  Endpoint: ${delivery.endpointId}`,
+    `  Adapter: ${delivery.adapter}`,
     `  Attempts: ${delivery.attemptCount}/${delivery.maxAttempts}`,
     `  HTTP: ${delivery.lastStatusCode ?? "—"}`,
     `  Next attempt: ${delivery.nextAttemptAt ?? "—"}`,
@@ -781,7 +803,11 @@ function positiveInteger(value: string | undefined, label: string, maximum?: num
   return parsed;
 }
 
-const NOTIFICATION_EVENTS = ["guardrail_review.updated", "guardrail_review.cleared"] as const;
+const NOTIFICATION_EVENTS = [
+  "guardrail_review.updated",
+  "guardrail_review.cleared",
+  "guardrail_review.batch_updated",
+] as const;
 
 function notificationEventOptions(
   options: ParsedOptions["options"],
@@ -789,13 +815,13 @@ function notificationEventOptions(
   const raw = options.event;
   if (raw === undefined) return undefined;
   const values = Array.isArray(raw) ? raw : typeof raw === "string" ? [raw] : [];
-  if (values.length < 1 || values.length > 2) {
-    throw new UsageError("Use one or two --event values.");
+  if (values.length < 1 || values.length > 3) {
+    throw new UsageError("Use one to three --event values.");
   }
   const events = values.map((value) => {
     if (!(NOTIFICATION_EVENTS as readonly string[]).includes(value)) {
       throw new UsageError(
-        `Unknown notification event: ${value}. Use guardrail_review.updated or guardrail_review.cleared.`,
+        `Unknown notification event: ${value}. Use guardrail_review.updated, guardrail_review.cleared, or guardrail_review.batch_updated.`,
       );
     }
     return value as (typeof NOTIFICATION_EVENTS)[number];
@@ -937,6 +963,8 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
         name: "string",
         model: "string",
         note: "string",
+        item: "repeat",
+        idempotency_key: "string",
         provider: "string",
         status: "string",
         sarif: "string",
@@ -946,6 +974,7 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
       notifications: {
         name: "string",
         url: "string",
+        adapter: "string",
         event: "repeat",
         enabled: "boolean",
         disabled: "boolean",
@@ -1315,6 +1344,50 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
     if (command === "guardrails") {
       if (parsed.positionals[0] === "reviews") {
         const action = parsed.positionals[1];
+        if (action === "batch") {
+          if (parsed.positionals.length !== 3) {
+            throw new UsageError("guardrails reviews batch requires exactly a snapshot ID.");
+          }
+          const snapshotId = requireId(parsed.positionals[2], "Snapshot ID");
+          const rawItems = parsed.options.item;
+          const itemValues =
+            rawItems === undefined
+              ? []
+              : Array.isArray(rawItems)
+                ? rawItems
+                : typeof rawItems === "string"
+                  ? [rawItems]
+                  : [];
+          if (itemValues.length < 1 || itemValues.length > 50) {
+            throw new UsageError("Batch review requires one to 50 --item values.");
+          }
+          const fallbackNote = optionalString(parsed.options.note) ?? "";
+          const items = itemValues.map((raw) => {
+            const match =
+              /^(.*?)(?:=|:)(unreviewed|acknowledged|accepted_risk|false_positive)(?:\|(.*))?$/.exec(
+                raw,
+              );
+            if (!match?.[1] || !match[2]) {
+              throw new UsageError("Each --item must use <finding-id>=<status>.");
+            }
+            const findingId = match[1];
+            const status = match[2] as GuardrailReview["status"];
+            const note = match[3] ?? fallbackNote;
+            if (findingId.length < 1 || findingId.length > 300) {
+              throw new UsageError("Finding IDs must contain between 1 and 300 characters.");
+            }
+            return { findingId, status, note };
+          });
+          const result = await client.applyGuardrailReviewBatch(snapshotId, {
+            items,
+            ...(optionalString(parsed.options.idempotency_key)
+              ? { idempotencyKey: optionalString(parsed.options.idempotency_key) }
+              : {}),
+          });
+          if (json) writeJson(output, result);
+          else output.stdout(formatGuardrailReviewBatch(result));
+          return 0;
+        }
         if (action === "list") {
           if (parsed.positionals.length !== 3) {
             throw new UsageError("guardrails reviews list requires exactly a snapshot ID.");
@@ -1404,7 +1477,7 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
           }
           return 0;
         }
-        throw new UsageError("guardrails reviews requires list, set, or clear.");
+        throw new UsageError("guardrails reviews requires list, set, clear, batch, or history.");
       }
       if (parsed.positionals[0] === "explanations") {
         const action = parsed.positionals[1];
@@ -1623,10 +1696,15 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
           if (parsed.options.enabled === true && parsed.options.disabled === true) {
             throw new UsageError("Use either --enabled or --disabled, not both.");
           }
+          const adapter = optionalString(parsed.options.adapter);
+          if (adapter && !["generic", "slack"].includes(adapter)) {
+            throw new UsageError("--adapter must be generic or slack.");
+          }
           const eventTypes = notificationEventOptions(parsed.options);
           const created = await client.createNotificationEndpoint(workspaceId, {
             name,
             url,
+            ...(adapter ? { adapter: adapter as NotificationAdapter } : {}),
             ...(eventTypes ? { eventTypes } : {}),
             ...(parsed.options.disabled === true ? { enabled: false } : {}),
           });
@@ -1658,10 +1736,16 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
             ...(optionalString(parsed.options.url)
               ? { url: optionalString(parsed.options.url) }
               : {}),
+            ...(optionalString(parsed.options.adapter)
+              ? { adapter: optionalString(parsed.options.adapter) as NotificationAdapter }
+              : {}),
             ...(eventTypes ? { eventTypes } : {}),
             ...(parsed.options.enabled === true ? { enabled: true } : {}),
             ...(parsed.options.disabled === true ? { enabled: false } : {}),
           };
+          if (input.adapter && !["generic", "slack"].includes(input.adapter)) {
+            throw new UsageError("--adapter must be generic or slack.");
+          }
           if (Object.keys(input).length === 0) {
             throw new UsageError("Endpoint update requires at least one field to change.");
           }

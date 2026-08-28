@@ -1,6 +1,6 @@
 # API 接口契约
 
-状态：v1.3 已实现；机器契约与路由校验通过（2026-08-28）
+状态：v1.4 已实现；机器契约与路由校验通过（2026-08-29）
 Base path：`/v1`
 机器事实来源：`openapi/openapi.json`
 
@@ -94,11 +94,11 @@ Access Check；无权资源使用稳定 404，不把 ID 是否存在
 | POST | `/v1/share-reports` | 创建 Architecture Story v2 |
 | GET | `/v1/share-reports/{slug}` | 读取 v1 Tour 或 v2 Story |
 
-基础路由共 49 个 Operation；当前完整契约共 72 个 Operation。
+基础路由共 49 个 Operation；当前完整契约共 73 个 Operation。
 
 v0.6 增加两个 Snapshot 派生读接口；v0.7 增加一个基线比较接口；v0.8 增加五个策略 Profile
 接口；v0.9 增加两个解释接口；v1.0 增加历史和解释比较接口；v1.2 增加 Review/JSON 导出接口；
-v1.3 增加 Review 历史和通知 Endpoint/Delivery 接口，共 72 个 Operation：
+v1.3 增加 Review 历史和通知 Endpoint/Delivery 接口；截至 v1.4，完整契约共 73 个 Operation：
 
 | Method | Path | 用途 |
 |---|---|---|
@@ -183,7 +183,14 @@ v1.3 Review 历史只投影 append-only `audit_events`，返回状态、备注�
 | POST | `/v1/workspaces/{workspaceId}/notification-endpoints/{endpointId}/test` | Editor/Owner 排队不含敏感内容的测试事件 |
 | GET | `/v1/workspaces/{workspaceId}/notification-deliveries` | 成员按 Endpoint/status 游标分页读取投递状态 |
 
-可订阅事件为 `guardrail_review.updated` 和 `guardrail_review.cleared`。API 只写数据库 outbox，不同步
+### v1.4 Batch Review 路由
+
+| Method | Path | 用途 |
+|---|---|---|
+| POST | `/v1/snapshots/{snapshotId}/guardrails/reviews/batch` | 在同一 Ready Snapshot 内原子更新最多 50 个 Finding 的 Review 状态；支持 `Idempotency-Key` 重放与冲突检测 |
+
+可订阅事件为 `guardrail_review.updated`、`guardrail_review.cleared` 和
+`guardrail_review.batch_updated`。API 只写数据库 outbox，不同步
 访问外部 URL。Worker 领取带租约的投递，使用 `X-RepoVista-Timestamp` 与
 `X-RepoVista-Signature: sha256=...` HMAC 头，拒绝重定向并执行 HTTPS（生产）、DNS/IP SSRF 检查和硬超时。
 网络错误、408/425/429/5xx 按有限指数退避；其他 4xx 不重试。Payload 只含事件身份、状态/备注长度变化和

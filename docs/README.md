@@ -1,6 +1,6 @@
 # RepoVista 工程文档
 
-状态：v1.3 Review Timeline & Signed Notifications 已完成实现与本地发布门禁；远端 CI 结果以 v1.3 验收记录为准（2026-08-28）
+状态：v1.4 Batch Review & Notification Adapters 已完成实现与本地发布门禁；远端 CI 结果以 v1.4 验收记录为准（2026-08-29）
 
 本目录描述当前代码，而不是早期愿景。发生冲突时，事实来源优先级如下：
 
@@ -147,6 +147,18 @@
 | [v1.3 测试与发布计划](./operations/v1.3测试与发布计划.md) | 自动化矩阵、SSRF/重试测试和发布门禁 |
 | [v1.3 验收记录](./releases/v1.3-验收记录.md) | 实际命令、数据库、CI、Compose 和 Git 证据 |
 
+## v1.4 实施完成
+
+| 文档 | 内容 |
+|---|---|
+| [版本开发计划](./releases/v1.4-开发计划.md) | 批量 Review、通知适配器、范围、非目标和完成定义 |
+| [v1.4 后端开发文档](./backend/v1.4后端开发文档.md) | 批量 API、幂等、事务、权限和 Worker 投递 |
+| [v1.4 数据库设计](./database/v1.4数据库设计.md) | Migration 0011、批量记录、适配器快照和不变式 |
+| [v1.4 前端开发文档](./frontend/v1.4前端开发文档.md) | 多选批量操作、错误恢复、可访问性和状态同步 |
+| [v1.4 AI 可信边界](./ai/v1.4批量Review与通知可信边界.md) | 确定性 Finding、人审元数据、通知和 AI 的隔离 |
+| [v1.4 测试与发布计划](./operations/v1.4测试与发布计划.md) | 契约、API、数据库、适配器、E2E 和发布门禁 |
+| [v1.4 验收记录](./releases/v1.4-验收记录.md) | 实际测试数据库、质量门禁、CI 状态和外部集成边界 |
+
 ## v1.2 实施完成
 
 | 文档 | 内容 |
@@ -171,7 +183,7 @@
 | 文档 | 内容 |
 |---|---|
 | [后端开发文档](./backend/后端开发文档.md) | Fastify 请求边界、配置、错误和模块职责 |
-| [API 接口契约](./backend/API接口契约.md) | 72 个当前 Operation、Cookie/Bearer、Workspace、策略 Profile、Guardrails/Review/通知/导出/解释历史/结构比较/SARIF、SSE、Retrieval、Story 与 PR Impact |
+| [API 接口契约](./backend/API接口契约.md) | 73 个当前 Operation、Cookie/Bearer、Workspace、策略 Profile、Guardrails/Review/通知/导出/解释历史/结构比较/SARIF、SSE、Retrieval、Story 与 PR Impact |
 | [任务与索引流水线](./backend/任务与索引流水线.md) | 租约任务、安全克隆、扫描、解析和持久化 |
 
 ## 数据与可信 AI

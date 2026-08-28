@@ -8,8 +8,10 @@ import {
   isBlockedHostname,
   isBlockedIp,
   isRetryableNotificationStatus,
+  type NotificationAdapterId,
+  renderNotificationPayload,
   signNotificationPayload,
-  validateNotificationUrl,
+  validateNotificationAdapterUrl,
 } from "@repovista/notifications";
 
 export type NotificationDeliveryStore = Pick<
@@ -65,11 +67,12 @@ function retryableFailure(error: unknown): boolean {
 }
 
 async function assertSafeResolvedHost(
+  adapter: NotificationAdapterId,
   url: string,
   production: boolean,
   resolve: NotificationDeliveryDependencies["lookup"],
 ): Promise<string> {
-  const normalized = validateNotificationUrl(url, production);
+  const normalized = validateNotificationAdapterUrl(adapter, url, production);
   const parsed = new URL(normalized);
   // URL.hostname includes brackets for IPv6 in some Node versions.
   const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
@@ -216,12 +219,14 @@ export async function executeNotificationDelivery(
         { retryable: true },
       );
     }
+    const adapter = delivery.adapter ?? "generic";
     const url = await assertSafeResolvedHost(
+      adapter,
       delivery.url,
       config.APP_ENV === "production",
       resolved.lookup,
     );
-    const body = JSON.stringify(delivery.payload);
+    const body = JSON.stringify(renderNotificationPayload(adapter, delivery.payload));
     const timestamp = String(Math.floor(resolved.now() / 1_000));
     const secret = deriveNotificationSigningSecret(
       config.NOTIFICATION_SIGNING_SECRET,
@@ -237,7 +242,7 @@ export async function executeNotificationDelivery(
         signal: controller.signal,
         headers: {
           "Content-Type": "application/json",
-          "User-Agent": "RepoVista-Notification/1.3",
+          "User-Agent": "RepoVista-Notification/1.4",
           "X-RepoVista-Event": delivery.eventType,
           "X-RepoVista-Delivery": delivery.id,
           "X-RepoVista-Timestamp": timestamp,

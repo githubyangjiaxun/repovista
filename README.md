@@ -27,6 +27,23 @@ The map, source browser, search, reading path, and share reports remain useful w
 key. The default `fake` provider is a transparent deterministic evidence summarizer, so the full
 workflow can be evaluated locally before connecting Ollama or an OpenAI-compatible endpoint.
 
+## What v1.4 adds
+
+- Atomic batch Review actions for up to 50 server-selected Findings, with all-or-nothing PostgreSQL
+  transactions, request hashing, and `Idempotency-Key` replay/conflict handling.
+- Generic and Slack notification adapters. Generic remains wire-compatible; Slack renders a bounded
+  Incoming Webhook payload and accepts only HTTPS on the official `hooks.slack.com` or
+  `hooks.slack-gov.com` hosts.
+- Delivery rows persist the adapter snapshot, so changing an Endpoint cannot rewrite an already queued
+  message. Unchanged batch items produce no extra audit event or notification.
+- Batch notifications contain only Finding identity and status/note-length summaries. Review note text,
+  source code, model prompts/answers, and credentials never enter notification payloads or Slack blocks.
+
+The batch workflow is collaboration metadata, not an AI or CI quality signal. See the [v1.4 plan](docs/releases/v1.4-开发计划.md),
+[backend contract](docs/backend/v1.4后端开发文档.md), [database design](docs/database/v1.4数据库设计.md),
+[frontend document](docs/frontend/v1.4前端开发文档.md), [AI trust boundary](docs/ai/v1.4批量Review与通知可信边界.md),
+[test and release plan](docs/operations/v1.4测试与发布计划.md), and [acceptance record](docs/releases/v1.4-验收记录.md).
+
 ## What v1.3 adds
 
 - An append-only Review timeline with cursor pagination, Snapshot/Finding isolation, and status/note-length
@@ -412,10 +429,11 @@ Additional release checks:
 ```bash
 pnpm test:e2e
 docker compose config --quiet
-DATABASE_TEST_URL=postgresql://repovista:repovista@localhost:5432/repovista pnpm test
+DATABASE_TEST_URL=postgresql://repovista:repovista@localhost:5432/repovista_test \
+pnpm --filter @repovista/database test
 ```
 
-`pnpm check` validates the 72-operation OpenAPI contract, formatting/lint rules, TypeScript,
+`pnpm check` validates the 73-operation OpenAPI contract, formatting/lint rules, TypeScript,
 unit/integration tests that have their required environment, and production builds. Playwright
 covers import, incremental progress, Python source navigation, map/source exploration, grounded
 answers, sharing, repository listing, deterministic Markdown/SVG downloads, pull-request impact
@@ -477,6 +495,13 @@ Read [SECURITY.md](./SECURITY.md) before reporting a vulnerability.
 - [v1.3 frontend document](./docs/frontend/v1.3前端开发文档.md)
 - [v1.3 test and release plan](./docs/operations/v1.3测试与发布计划.md)
 - [v1.3 acceptance record](./docs/releases/v1.3-验收记录.md)
+- [v1.4 development plan](./docs/releases/v1.4-开发计划.md)
+- [v1.4 backend development document](./docs/backend/v1.4后端开发文档.md)
+- [v1.4 database design](./docs/database/v1.4数据库设计.md)
+- [v1.4 frontend development document](./docs/frontend/v1.4前端开发文档.md)
+- [v1.4 AI trust boundary](./docs/ai/v1.4批量Review与通知可信边界.md)
+- [v1.4 test and release plan](./docs/operations/v1.4测试与发布计划.md)
+- [v1.4 acceptance record](./docs/releases/v1.4-验收记录.md)
 
 The machine-readable API source of truth is [openapi/openapi.json](./openapi/openapi.json).
 

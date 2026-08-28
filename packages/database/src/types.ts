@@ -15,6 +15,7 @@ import type {
   GuardrailReviewStatus,
   GuardrailThresholds,
   Job,
+  NotificationAdapter,
   RepositorySummary,
   RetrievalStatus,
   ShareReportContent,
@@ -562,6 +563,7 @@ export interface NotificationEndpointRecord {
   workspaceId: string;
   name: string;
   url: string;
+  adapter: NotificationAdapter;
   eventTypes: import("@repovista/contracts").NotificationEventType[];
   enabled: boolean;
   createdBy: string | null;
@@ -575,6 +577,7 @@ export interface CreateNotificationEndpointInput {
   workspaceId: string;
   name: string;
   url: string;
+  adapter?: NotificationAdapter;
   eventTypes: import("@repovista/contracts").NotificationEventType[];
   enabled: boolean;
   createdBy: string;
@@ -586,6 +589,7 @@ export interface UpdateNotificationEndpointInput {
   endpointId: string;
   name?: string;
   url?: string;
+  adapter?: NotificationAdapter;
   eventTypes?: import("@repovista/contracts").NotificationEventType[];
   enabled?: boolean;
   actorUserId: string;
@@ -597,6 +601,7 @@ export interface NotificationDeliveryRecord {
   workspaceId: string;
   endpointId: string;
   eventType: import("@repovista/contracts").NotificationEventType;
+  adapter: NotificationAdapter;
   eventKey: string;
   status: import("@repovista/contracts").NotificationDeliveryStatus;
   attemptCount: number;
@@ -635,6 +640,7 @@ export interface ClaimedNotificationDelivery {
   endpointId: string;
   url: string;
   eventType: import("@repovista/contracts").NotificationEventType;
+  adapter?: NotificationAdapter;
   eventKey: string;
   payload: Record<string, unknown>;
   attemptCount: number;
@@ -659,6 +665,43 @@ export interface UpsertGuardrailReviewInput {
   reviewedBy: string;
   actorKind: Principal["kind"];
   notificationMaxAttempts?: number;
+}
+
+export interface GuardrailReviewBatchItemInput {
+  findingId: string;
+  subjectKey: string;
+  status: GuardrailReviewStatus;
+  note: string;
+}
+
+export interface ApplyGuardrailReviewBatchInput {
+  workspaceId: string;
+  snapshotId: string;
+  batchId: string;
+  idempotencyKey: string;
+  requestHash: string;
+  commitSha: string;
+  items: GuardrailReviewBatchItemInput[];
+  actorUserId: string;
+  actorKind: Principal["kind"];
+  notificationMaxAttempts?: number;
+}
+
+export interface GuardrailReviewBatchResultItem {
+  findingId: string;
+  subjectKey: string;
+  status: GuardrailReviewStatus;
+  noteLength: number;
+  changed: boolean;
+}
+
+export interface GuardrailReviewBatchResult {
+  batchId: string;
+  snapshot: { id: string; commitSha: string };
+  applied: GuardrailReviewBatchResultItem[];
+  changed: number;
+  unchanged: number;
+  idempotentReplay: boolean;
 }
 
 export interface DeleteGuardrailReviewInput {

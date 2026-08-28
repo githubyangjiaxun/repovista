@@ -31,6 +31,7 @@ import { useOptionalAuth } from "@/components/auth-provider";
 import {
   apiErrorMessage,
   apiFetch,
+  applyGuardrailReviewBatch,
   fetchGuardrailJson,
   fetchGuardrailSarif,
   type GuardrailExplanationResult,
@@ -256,6 +257,12 @@ export function GuardrailsPanel({
   const [reviewHistoryLoadingMore, setReviewHistoryLoadingMore] = useState<Record<string, boolean>>(
     {},
   );
+  const [selectedFindingIds, setSelectedFindingIds] = useState<Set<string>>(new Set());
+  const [batchStatus, setBatchStatus] = useState<GuardrailReview["status"]>("acknowledged");
+  const [batchNote, setBatchNote] = useState("");
+  const [batchLoading, setBatchLoading] = useState(false);
+  const [batchError, setBatchError] = useState<string | null>(null);
+  const batchIdempotencyKey = useRef<string | null>(null);
   const [baselineSnapshotId, setBaselineSnapshotId] = useState("");
   const [comparison, setComparison] = useState<GuardrailComparison | null>(null);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
@@ -317,6 +324,12 @@ export function GuardrailsPanel({
     setReviewHistoryErrors({});
     setReviewHistoryLoading({});
     setReviewHistoryLoadingMore({});
+    setSelectedFindingIds(new Set());
+    setBatchStatus("acknowledged");
+    setBatchNote("");
+    setBatchLoading(false);
+    setBatchError(null);
+    batchIdempotencyKey.current = null;
     setExplanations({});
     setExplanationErrors({});
     setExplainingFindingId(null);
@@ -613,6 +626,84 @@ export function GuardrailsPanel({
       }));
     } finally {
       setReviewLoading((current) => ({ ...current, [findingId]: false }));
+    }
+  }
+
+  function toggleFindingSelection(findingId: string): void {
+    setSelectedFindingIds((current) => {
+      const next = new Set(current);
+      if (next.has(findingId)) next.delete(findingId);
+      else if (next.size < 50) next.add(findingId);
+      return next;
+    });
+  }
+
+  function toggleAllFindingSelection(): void {
+    if (!report) return;
+    const selectableCount = Math.min(report.findings.length, 50);
+    setSelectedFindingIds((current) =>
+      current.size === selectableCount
+        ? new Set()
+        : new Set(report.findings.slice(0, 50).map((finding) => finding.id)),
+    );
+  }
+
+  async function applyReviewBatch(): Promise<void> {
+    if (!canManageReviews || !report || selectedFindingIds.size === 0 || batchLoading) return;
+    if (Array.from(batchNote).length > 2_000) {
+      setBatchError("Batch review note must be 2,000 characters or fewer.");
+      return;
+    }
+    setBatchLoading(true);
+    setBatchError(null);
+    batchIdempotencyKey.current ??= `web-${crypto.randomUUID()}`;
+    try {
+      const result = await applyGuardrailReviewBatch(snapshotId, {
+        idempotencyKey: batchIdempotencyKey.current,
+        items: Array.from(selectedFindingIds).map((findingId) => ({
+          findingId,
+          status: batchStatus,
+          note: batchNote,
+        })),
+      });
+      setReviewDrafts((current) => {
+        const next = { ...current };
+        for (const item of result.applied) {
+          next[item.findingId] = {
+            status: item.status,
+            note: item.status === "unreviewed" ? "" : batchNote,
+          };
+        }
+        return next;
+      });
+      setReviews((current) => {
+        const next = { ...current };
+        for (const item of result.applied) {
+          const previous = next[item.findingId];
+          next[item.findingId] = {
+            findingId: item.findingId,
+            subjectKey: item.subjectKey,
+            status: item.status,
+            note: item.status === "unreviewed" ? "" : batchNote,
+            reviewer: previous?.reviewer ?? null,
+            reviewedAt: previous?.reviewedAt ?? null,
+            updatedAt: previous?.updatedAt ?? null,
+          };
+        }
+        return next;
+      });
+      setReviewHistories((current) => {
+        const next = { ...current };
+        for (const item of result.applied) delete next[item.findingId];
+        return next;
+      });
+      setSelectedFindingIds(new Set());
+      setBatchNote("");
+      batchIdempotencyKey.current = null;
+    } catch (cause) {
+      setBatchError(apiErrorMessage(cause, "Unable to apply the batch review."));
+    } finally {
+      setBatchLoading(false);
     }
   }
 
@@ -1169,52 +1260,29 @@ export function GuardrailsPanel({
           <span>Reindex a later commit to evaluate it against the same fixed profile.</span>
         </div>
       ) : (
-        <div className="guardrail-findings">
-          {report.findings.map((finding) => (
-            <article className={`guardrail-finding finding-${finding.severity}`} key={finding.id}>
-              <div className="guardrail-finding-icon">
-                {finding.severity === "error" ? (
-                  <CircleAlert size={19} />
-                ) : finding.severity === "warning" ? (
-                  <AlertTriangle size={19} />
-                ) : (
-                  <Info size={19} />
-                )}
+        <>
+          {canManageReviews ? (
+            <section className="guardrail-review-batch" aria-label="Batch review actions">
+              <div className="guardrail-review-batch-heading">
+                <strong>Batch review</strong>
+                <span>{selectedFindingIds.size} selected (maximum 50)</span>
+                <button onClick={toggleAllFindingSelection} type="button">
+                  {selectedFindingIds.size === Math.min(report.findings.length, 50)
+                    ? "Clear all"
+                    : "Select all"}
+                </button>
               </div>
-              <div className="guardrail-finding-body">
-                <div>
-                  <span>{finding.severity}</span>
-                  <code>{finding.ruleId}</code>
-                </div>
-                <h2>{finding.title}</h2>
-                <p>{finding.message}</p>
-                <small>{metricText(finding.metric)}</small>
-                <section
-                  className="guardrail-review"
-                  aria-label={`Human review for ${finding.title}`}
-                >
-                  <div className="guardrail-review-heading">
-                    <strong>Human review</strong>
-                    <span
-                      className={`guardrail-review-status review-${reviews[finding.id]?.status ?? "unreviewed"}`}
-                    >
-                      {reviews[finding.id]?.status ?? "unreviewed"}
-                    </span>
-                  </div>
-                  <p className="guardrail-review-disclaimer">
-                    Review metadata never changes deterministic status or CI decisions.
-                  </p>
+              {selectedFindingIds.size > 0 ? (
+                <div className="guardrail-review-batch-controls">
                   <label>
                     <span>Status</span>
                     <select
-                      aria-label={`Review status for ${finding.title}`}
-                      disabled={!canManageReviews || reviewLoading[finding.id] === true}
+                      aria-label="Batch review status"
+                      disabled={batchLoading}
                       onChange={(event) =>
-                        updateReviewDraft(finding.id, {
-                          status: event.target.value as GuardrailReview["status"],
-                        })
+                        setBatchStatus(event.target.value as GuardrailReview["status"])
                       }
-                      value={reviewDrafts[finding.id]?.status ?? "unreviewed"}
+                      value={batchStatus}
                     >
                       <option value="unreviewed">Unreviewed</option>
                       <option value="acknowledged">Acknowledged</option>
@@ -1225,412 +1293,529 @@ export function GuardrailsPanel({
                   <label>
                     <span>Note</span>
                     <textarea
-                      aria-label={`Review note for ${finding.title}`}
-                      disabled={!canManageReviews || reviewLoading[finding.id] === true}
+                      aria-label="Batch review note"
+                      disabled={batchLoading}
                       // HTML maxLength counts UTF-16 code units; the API limit is
                       // 2,000 Unicode code points, so allow up to 4,000 units
-                      // and let saveReview enforce the exact code-point bound.
+                      // and let applyReviewBatch enforce the exact code-point bound.
                       maxLength={4_000}
-                      onChange={(event) =>
-                        updateReviewDraft(finding.id, { note: event.target.value })
-                      }
-                      placeholder="Optional handoff note"
-                      value={reviewDrafts[finding.id]?.note ?? ""}
+                      onChange={(event) => setBatchNote(event.target.value)}
+                      placeholder="Optional note for selected Findings"
+                      value={batchNote}
                     />
                   </label>
-                  {canManageReviews ? (
-                    <div className="guardrail-review-actions">
-                      <button
-                        disabled={reviewLoading[finding.id] === true}
-                        onClick={() => void saveReview(finding.id)}
-                        type="button"
-                      >
-                        {reviewLoading[finding.id] ? (
-                          <LoaderCircle className="spin" size={14} />
-                        ) : (
-                          <Save size={14} />
-                        )}
-                        Save review
-                      </button>
-                      <button
-                        disabled={
-                          reviewLoading[finding.id] === true ||
-                          (reviews[finding.id]?.status ?? "unreviewed") === "unreviewed"
-                        }
-                        onClick={() => void clearReview(finding.id)}
-                        type="button"
-                      >
-                        Clear
-                      </button>
-                    </div>
-                  ) : (
-                    <small>Viewer mode: review editing is unavailable.</small>
-                  )}
-                  {reviewErrors[finding.id] ? (
-                    <div className="guardrail-review-error" role="alert">
-                      {reviewErrors[finding.id]}
-                    </div>
-                  ) : null}
-                  {session?.authenticated ? (
-                    <>
-                      <button
-                        aria-controls={`guardrail-review-history-${finding.id}`}
-                        aria-expanded={openReviewHistories[finding.id] === true}
-                        onClick={() => toggleReviewHistory(finding.id)}
-                        type="button"
-                      >
-                        <History size={14} /> Review history
-                      </button>
-                      {openReviewHistories[finding.id] ? (
-                        <section
-                          className="guardrail-review-history"
-                          id={`guardrail-review-history-${finding.id}`}
-                          aria-busy={
-                            reviewHistoryLoading[finding.id] === true ||
-                            reviewHistoryLoadingMore[finding.id] === true
-                          }
-                          aria-label={`Review history for ${finding.title}`}
-                        >
-                          {reviewHistoryLoading[finding.id] ? (
-                            <output>
-                              <LoaderCircle className="spin" size={14} /> Loading review history…
-                            </output>
-                          ) : null}
-                          {reviewHistoryErrors[finding.id] ? (
-                            <div className="guardrail-review-error" role="alert">
-                              <span>{reviewHistoryErrors[finding.id]}</span>
-                              <button
-                                onClick={() => void loadReviewHistory(finding.id)}
-                                type="button"
-                              >
-                                Retry
-                              </button>
-                            </div>
-                          ) : null}
-                          {!reviewHistoryLoading[finding.id] &&
-                          reviewHistories[finding.id]?.entries.length === 0 ? (
-                            <p>No review changes recorded for this Finding.</p>
-                          ) : null}
-                          {reviewHistories[finding.id]?.entries.length ? (
-                            <>
-                              <ol>
-                                {reviewHistories[finding.id]?.entries.map((entry) => (
-                                  <li key={entry.id}>
-                                    <strong>
-                                      {entry.fromStatus} → {entry.toStatus}
-                                    </strong>{" "}
-                                    <span>
-                                      note {entry.fromNoteLength} → {entry.toNoteLength}
-                                      {entry.noteChanged ? " · text changed" : ""}
-                                    </span>
-                                    <small>
-                                      {entry.actorLogin ? `@${entry.actorLogin}` : entry.actorKind}{" "}
-                                      · {entry.createdAt}
-                                    </small>
-                                  </li>
-                                ))}
-                              </ol>
-                              {reviewHistories[finding.id]?.nextCursor ? (
-                                <button
-                                  disabled={reviewHistoryLoadingMore[finding.id] === true}
-                                  onClick={() =>
-                                    void loadReviewHistory(finding.id, {
-                                      append: true,
-                                      cursor: reviewHistories[finding.id]?.nextCursor ?? undefined,
-                                    })
-                                  }
-                                  type="button"
-                                >
-                                  {reviewHistoryLoadingMore[finding.id] ? "Loading…" : "Load more"}
-                                </button>
-                              ) : null}
-                            </>
-                          ) : null}
-                        </section>
-                      ) : null}
-                    </>
-                  ) : null}
-                  {reviews[finding.id]?.reviewer ? (
-                    <small>
-                      Reviewed by{" "}
-                      {reviews[finding.id]?.reviewer?.login ??
-                        reviews[finding.id]?.reviewer?.displayName}{" "}
-                      · {reviews[finding.id]?.updatedAt}
-                    </small>
-                  ) : null}
-                </section>
-                <div className="guardrail-explanation-actions">
-                  {canRequestExplanations ? (
-                    <button
-                      aria-label={`Explain ${finding.title} with AI`}
-                      aria-busy={explainingFindingId === finding.id}
-                      disabled={explainingFindingId === finding.id}
-                      onClick={() => void explainFinding(finding.id)}
-                      type="button"
-                    >
-                      {explainingFindingId === finding.id ? (
-                        <LoaderCircle className="spin" size={14} />
-                      ) : null}
-                      {explainingFindingId === finding.id
-                        ? "Verifying explanation…"
-                        : "Explain with AI"}
-                    </button>
-                  ) : null}
                   <button
-                    aria-controls={`guardrail-history-${finding.id}`}
-                    aria-expanded={openHistories[finding.id] === true}
-                    onClick={() => toggleExplanationHistory(finding.id)}
+                    disabled={batchLoading}
+                    onClick={() => void applyReviewBatch()}
                     type="button"
                   >
-                    <History size={14} /> Explanation history
+                    {batchLoading ? (
+                      <LoaderCircle className="spin" size={14} />
+                    ) : (
+                      <Save size={14} />
+                    )}
+                    Apply to selected
                   </button>
                 </div>
-                {explanationErrors[finding.id] ? (
-                  <div className="guardrail-explanation-error" role="alert">
-                    {explanationErrors[finding.id]}
+              ) : null}
+              {batchError ? (
+                <div className="guardrail-review-error" role="alert">
+                  {batchError}
+                </div>
+              ) : null}
+            </section>
+          ) : null}
+          <div className="guardrail-findings">
+            {report.findings.map((finding) => (
+              <article className={`guardrail-finding finding-${finding.severity}`} key={finding.id}>
+                <div className="guardrail-finding-icon">
+                  {finding.severity === "error" ? (
+                    <CircleAlert size={19} />
+                  ) : finding.severity === "warning" ? (
+                    <AlertTriangle size={19} />
+                  ) : (
+                    <Info size={19} />
+                  )}
+                </div>
+                <div className="guardrail-finding-body">
+                  {canManageReviews ? (
+                    <label className="guardrail-finding-select">
+                      <input
+                        aria-label={`Select ${finding.title} for batch review`}
+                        checked={selectedFindingIds.has(finding.id)}
+                        onChange={() => toggleFindingSelection(finding.id)}
+                        type="checkbox"
+                      />
+                      <span>Select for batch review</span>
+                    </label>
+                  ) : null}
+                  <div>
+                    <span>{finding.severity}</span>
+                    <code>{finding.ruleId}</code>
                   </div>
-                ) : null}
-                {explanations[finding.id] ? (
+                  <h2>{finding.title}</h2>
+                  <p>{finding.message}</p>
+                  <small>{metricText(finding.metric)}</small>
                   <section
-                    className="guardrail-explanation"
-                    aria-label="Verified Guardrail explanation"
+                    className="guardrail-review"
+                    aria-label={`Human review for ${finding.title}`}
                   >
-                    <div className="guardrail-explanation-meta">
-                      <strong>
-                        Verified explanation · {explanations[finding.id]?.answer.status}
-                      </strong>
-                      <span>
-                        {explanations[finding.id]?.answer.provider} ·{" "}
-                        {explanations[finding.id]?.answer.model}
-                      </span>
-                    </div>
-                    <div className="guardrail-explanation-provenance">
-                      <span>
-                        {explanations[finding.id]?.finding.ruleId} ·{" "}
-                        {explanations[finding.id]?.finding.severity}
-                      </span>
-                      <code title={explanations[finding.id]?.finding.fingerprint}>
-                        {explanations[finding.id]?.finding.fingerprint.slice(0, 19)}
-                      </code>
-                    </div>
-                    <p>{explanations[finding.id]?.answer.summary}</p>
-                    {explanations[finding.id]?.answer.steps.length ? (
-                      <ol>
-                        {explanations[finding.id]?.answer.steps.map((step, index) => (
-                          <li key={`${finding.id}-explanation-${index}`}>{step.text}</li>
-                        ))}
-                      </ol>
-                    ) : null}
-                    {explanations[finding.id]?.answer.limitations.length ? (
-                      <ul className="guardrail-explanation-limitations">
-                        {explanations[finding.id]?.answer.limitations.map((limitation, index) => (
-                          <li key={`${finding.id}-limitation-${index}`}>{limitation}</li>
-                        ))}
-                      </ul>
-                    ) : null}
-                    <div className="guardrail-explanation-provenance">
-                      <span title={explanations[finding.id]?.snapshot.commitSha}>
-                        commit {explanations[finding.id]?.snapshot.commitSha.slice(0, 12)}
-                      </span>
-                      <span title={explanations[finding.id]?.profileFingerprint}>
-                        profile {explanations[finding.id]?.profileFingerprint.slice(0, 19)}
-                      </span>
-                      <code>{explanations[finding.id]?.promptVersion}</code>
-                      <span>
-                        {explanations[finding.id]?.answer.citations.length} fixed citations
-                      </span>
-                    </div>
-                    {explanations[finding.id]?.answer.citations.map((citation) => (
-                      <button
-                        key={`${finding.id}-${citation.evidenceId}`}
-                        onClick={() =>
-                          void onOpenSource(citation.path, citation.startLine, citation.endLine)
-                        }
-                        type="button"
+                    <div className="guardrail-review-heading">
+                      <strong>Human review</strong>
+                      <span
+                        className={`guardrail-review-status review-${reviews[finding.id]?.status ?? "unreviewed"}`}
                       >
-                        <FileCode2 size={13} /> {citation.path}:{citation.startLine}-
-                        {citation.endLine}
-                      </button>
-                    ))}
-                  </section>
-                ) : null}
-                {openHistories[finding.id] ? (
-                  <section
-                    className="guardrail-explanation-history"
-                    id={`guardrail-history-${finding.id}`}
-                    aria-busy={
-                      historyLoading[finding.id] === true || historyLoadingMore[finding.id] === true
-                    }
-                    aria-label={`Explanation history for ${finding.title}`}
-                  >
-                    <div className="guardrail-explanation-history-heading">
-                      <div>
-                        <History size={16} />
-                        <strong>Saved verified explanations</strong>
-                      </div>
-                      {histories[finding.id] ? (
-                        <code title={histories[finding.id]?.subjectKey}>
-                          {histories[finding.id]?.subjectKey.slice(0, 19)}…
-                        </code>
-                      ) : null}
+                        {reviews[finding.id]?.status ?? "unreviewed"}
+                      </span>
                     </div>
-                    {historyLoading[finding.id] ? (
-                      <output>
-                        <LoaderCircle className="spin" size={15} /> Loading explanation history…
-                      </output>
-                    ) : null}
-                    {historyErrors[finding.id] ? (
-                      <div className="guardrail-explanation-history-error" role="alert">
-                        <span>{historyErrors[finding.id]}</span>
+                    <p className="guardrail-review-disclaimer">
+                      Review metadata never changes deterministic status or CI decisions.
+                    </p>
+                    <label>
+                      <span>Status</span>
+                      <select
+                        aria-label={`Review status for ${finding.title}`}
+                        disabled={!canManageReviews || reviewLoading[finding.id] === true}
+                        onChange={(event) =>
+                          updateReviewDraft(finding.id, {
+                            status: event.target.value as GuardrailReview["status"],
+                          })
+                        }
+                        value={reviewDrafts[finding.id]?.status ?? "unreviewed"}
+                      >
+                        <option value="unreviewed">Unreviewed</option>
+                        <option value="acknowledged">Acknowledged</option>
+                        <option value="accepted_risk">Accepted risk</option>
+                        <option value="false_positive">False positive</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Note</span>
+                      <textarea
+                        aria-label={`Review note for ${finding.title}`}
+                        disabled={!canManageReviews || reviewLoading[finding.id] === true}
+                        // HTML maxLength counts UTF-16 code units; the API limit is
+                        // 2,000 Unicode code points, so allow up to 4,000 units
+                        // and let saveReview enforce the exact code-point bound.
+                        maxLength={4_000}
+                        onChange={(event) =>
+                          updateReviewDraft(finding.id, { note: event.target.value })
+                        }
+                        placeholder="Optional handoff note"
+                        value={reviewDrafts[finding.id]?.note ?? ""}
+                      />
+                    </label>
+                    {canManageReviews ? (
+                      <div className="guardrail-review-actions">
                         <button
-                          onClick={() => void loadExplanationHistory(finding.id)}
+                          disabled={reviewLoading[finding.id] === true}
+                          onClick={() => void saveReview(finding.id)}
                           type="button"
                         >
-                          Retry
+                          {reviewLoading[finding.id] ? (
+                            <LoaderCircle className="spin" size={14} />
+                          ) : (
+                            <Save size={14} />
+                          )}
+                          Save review
+                        </button>
+                        <button
+                          disabled={
+                            reviewLoading[finding.id] === true ||
+                            (reviews[finding.id]?.status ?? "unreviewed") === "unreviewed"
+                          }
+                          onClick={() => void clearReview(finding.id)}
+                          type="button"
+                        >
+                          Clear
                         </button>
                       </div>
+                    ) : (
+                      <small>Viewer mode: review editing is unavailable.</small>
+                    )}
+                    {reviewErrors[finding.id] ? (
+                      <div className="guardrail-review-error" role="alert">
+                        {reviewErrors[finding.id]}
+                      </div>
                     ) : null}
-                    {!historyLoading[finding.id] &&
-                    histories[finding.id]?.explanations.length === 0 ? (
-                      <p className="guardrail-explanation-history-empty">
-                        No saved explanations exist for this logical Finding yet.
-                      </p>
-                    ) : null}
-                    {histories[finding.id]?.explanations.length ? (
+                    {session?.authenticated ? (
                       <>
-                        <div className="guardrail-explanation-history-list">
-                          {histories[finding.id]?.explanations.map((item) => (
-                            <article key={item.id}>
-                              <div>
-                                <strong>
-                                  {item.answer.status} · {item.answer.provider}/{item.answer.model}
-                                </strong>
-                                <code>{item.snapshot.commitSha.slice(0, 12)}</code>
-                              </div>
-                              <p>{item.answer.summary}</p>
-                              <div>
-                                <span>Snapshot {item.snapshot.id}</span>
-                                <span>{item.promptVersion}</span>
-                                <span>{item.answer.citationCount} citations</span>
-                                <span>{item.createdAt}</span>
-                              </div>
-                              <code title={item.profileFingerprint}>
-                                profile {item.profileFingerprint.slice(0, 19)}…
-                              </code>
-                            </article>
-                          ))}
-                        </div>
-                        {histories[finding.id]?.nextCursor ? (
-                          <button
-                            className="guardrail-explanation-load-more"
-                            disabled={historyLoadingMore[finding.id] === true}
-                            onClick={() =>
-                              void loadExplanationHistory(finding.id, {
-                                append: true,
-                                cursor: histories[finding.id]?.nextCursor ?? undefined,
-                              })
+                        <button
+                          aria-controls={`guardrail-review-history-${finding.id}`}
+                          aria-expanded={openReviewHistories[finding.id] === true}
+                          onClick={() => toggleReviewHistory(finding.id)}
+                          type="button"
+                        >
+                          <History size={14} /> Review history
+                        </button>
+                        {openReviewHistories[finding.id] ? (
+                          <section
+                            className="guardrail-review-history"
+                            id={`guardrail-review-history-${finding.id}`}
+                            aria-busy={
+                              reviewHistoryLoading[finding.id] === true ||
+                              reviewHistoryLoadingMore[finding.id] === true
                             }
-                            type="button"
+                            aria-label={`Review history for ${finding.title}`}
                           >
-                            {historyLoadingMore[finding.id] ? (
-                              <LoaderCircle className="spin" size={14} />
+                            {reviewHistoryLoading[finding.id] ? (
+                              <output>
+                                <LoaderCircle className="spin" size={14} /> Loading review history…
+                              </output>
                             ) : null}
-                            {historyLoadingMore[finding.id] ? "Loading more…" : "Load more"}
-                          </button>
+                            {reviewHistoryErrors[finding.id] ? (
+                              <div className="guardrail-review-error" role="alert">
+                                <span>{reviewHistoryErrors[finding.id]}</span>
+                                <button
+                                  onClick={() => void loadReviewHistory(finding.id)}
+                                  type="button"
+                                >
+                                  Retry
+                                </button>
+                              </div>
+                            ) : null}
+                            {!reviewHistoryLoading[finding.id] &&
+                            reviewHistories[finding.id]?.entries.length === 0 ? (
+                              <p>No review changes recorded for this Finding.</p>
+                            ) : null}
+                            {reviewHistories[finding.id]?.entries.length ? (
+                              <>
+                                <ol>
+                                  {reviewHistories[finding.id]?.entries.map((entry) => (
+                                    <li key={entry.id}>
+                                      <strong>
+                                        {entry.fromStatus} → {entry.toStatus}
+                                      </strong>{" "}
+                                      <span>
+                                        note {entry.fromNoteLength} → {entry.toNoteLength}
+                                        {entry.noteChanged ? " · text changed" : ""}
+                                      </span>
+                                      <small>
+                                        {entry.actorLogin
+                                          ? `@${entry.actorLogin}`
+                                          : entry.actorKind}{" "}
+                                        · {entry.createdAt}
+                                      </small>
+                                    </li>
+                                  ))}
+                                </ol>
+                                {reviewHistories[finding.id]?.nextCursor ? (
+                                  <button
+                                    disabled={reviewHistoryLoadingMore[finding.id] === true}
+                                    onClick={() =>
+                                      void loadReviewHistory(finding.id, {
+                                        append: true,
+                                        cursor:
+                                          reviewHistories[finding.id]?.nextCursor ?? undefined,
+                                      })
+                                    }
+                                    type="button"
+                                  >
+                                    {reviewHistoryLoadingMore[finding.id]
+                                      ? "Loading…"
+                                      : "Load more"}
+                                  </button>
+                                ) : null}
+                              </>
+                            ) : null}
+                          </section>
                         ) : null}
                       </>
                     ) : null}
-                    {(histories[finding.id]?.explanations.length ?? 0) >= 2 ? (
-                      <section
-                        className="guardrail-explanation-compare-controls"
-                        aria-label="Choose verified explanations to compare"
+                    {reviews[finding.id]?.reviewer ? (
+                      <small>
+                        Reviewed by{" "}
+                        {reviews[finding.id]?.reviewer?.login ??
+                          reviews[finding.id]?.reviewer?.displayName}{" "}
+                        · {reviews[finding.id]?.updatedAt}
+                      </small>
+                    ) : null}
+                  </section>
+                  <div className="guardrail-explanation-actions">
+                    {canRequestExplanations ? (
+                      <button
+                        aria-label={`Explain ${finding.title} with AI`}
+                        aria-busy={explainingFindingId === finding.id}
+                        disabled={explainingFindingId === finding.id}
+                        onClick={() => void explainFinding(finding.id)}
+                        type="button"
                       >
-                        <div>
-                          <label>
-                            <span>Base (older)</span>
-                            <select
-                              aria-label={`Base explanation for ${finding.title}`}
-                              onChange={(event) =>
-                                updateExplanationSelection(finding.id, "baseId", event.target.value)
-                              }
-                              value={historySelections[finding.id]?.baseId ?? ""}
-                            >
-                              {histories[finding.id]?.explanations.map((item) => (
-                                <option key={`base-${item.id}`} value={item.id}>
-                                  {explanationHistoryLabel(item)}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                          <label>
-                            <span>Head (newer)</span>
-                            <select
-                              aria-label={`Head explanation for ${finding.title}`}
-                              onChange={(event) =>
-                                updateExplanationSelection(finding.id, "headId", event.target.value)
-                              }
-                              value={historySelections[finding.id]?.headId ?? ""}
-                            >
-                              {histories[finding.id]?.explanations.map((item) => (
-                                <option key={`head-${item.id}`} value={item.id}>
-                                  {explanationHistoryLabel(item)}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                        </div>
+                        {explainingFindingId === finding.id ? (
+                          <LoaderCircle className="spin" size={14} />
+                        ) : null}
+                        {explainingFindingId === finding.id
+                          ? "Verifying explanation…"
+                          : "Explain with AI"}
+                      </button>
+                    ) : null}
+                    <button
+                      aria-controls={`guardrail-history-${finding.id}`}
+                      aria-expanded={openHistories[finding.id] === true}
+                      onClick={() => toggleExplanationHistory(finding.id)}
+                      type="button"
+                    >
+                      <History size={14} /> Explanation history
+                    </button>
+                  </div>
+                  {explanationErrors[finding.id] ? (
+                    <div className="guardrail-explanation-error" role="alert">
+                      {explanationErrors[finding.id]}
+                    </div>
+                  ) : null}
+                  {explanations[finding.id] ? (
+                    <section
+                      className="guardrail-explanation"
+                      aria-label="Verified Guardrail explanation"
+                    >
+                      <div className="guardrail-explanation-meta">
+                        <strong>
+                          Verified explanation · {explanations[finding.id]?.answer.status}
+                        </strong>
+                        <span>
+                          {explanations[finding.id]?.answer.provider} ·{" "}
+                          {explanations[finding.id]?.answer.model}
+                        </span>
+                      </div>
+                      <div className="guardrail-explanation-provenance">
+                        <span>
+                          {explanations[finding.id]?.finding.ruleId} ·{" "}
+                          {explanations[finding.id]?.finding.severity}
+                        </span>
+                        <code title={explanations[finding.id]?.finding.fingerprint}>
+                          {explanations[finding.id]?.finding.fingerprint.slice(0, 19)}
+                        </code>
+                      </div>
+                      <p>{explanations[finding.id]?.answer.summary}</p>
+                      {explanations[finding.id]?.answer.steps.length ? (
+                        <ol>
+                          {explanations[finding.id]?.answer.steps.map((step, index) => (
+                            <li key={`${finding.id}-explanation-${index}`}>{step.text}</li>
+                          ))}
+                        </ol>
+                      ) : null}
+                      {explanations[finding.id]?.answer.limitations.length ? (
+                        <ul className="guardrail-explanation-limitations">
+                          {explanations[finding.id]?.answer.limitations.map((limitation, index) => (
+                            <li key={`${finding.id}-limitation-${index}`}>{limitation}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                      <div className="guardrail-explanation-provenance">
+                        <span title={explanations[finding.id]?.snapshot.commitSha}>
+                          commit {explanations[finding.id]?.snapshot.commitSha.slice(0, 12)}
+                        </span>
+                        <span title={explanations[finding.id]?.profileFingerprint}>
+                          profile {explanations[finding.id]?.profileFingerprint.slice(0, 19)}
+                        </span>
+                        <code>{explanations[finding.id]?.promptVersion}</code>
+                        <span>
+                          {explanations[finding.id]?.answer.citations.length} fixed citations
+                        </span>
+                      </div>
+                      {explanations[finding.id]?.answer.citations.map((citation) => (
                         <button
-                          disabled={
-                            explanationComparisonLoading[finding.id] === true ||
-                            !historySelections[finding.id]?.baseId ||
-                            !historySelections[finding.id]?.headId ||
-                            historySelections[finding.id]?.baseId ===
-                              historySelections[finding.id]?.headId
+                          key={`${finding.id}-${citation.evidenceId}`}
+                          onClick={() =>
+                            void onOpenSource(citation.path, citation.startLine, citation.endLine)
                           }
-                          onClick={() => void compareExplanationHistory(finding.id)}
                           type="button"
                         >
-                          {explanationComparisonLoading[finding.id] ? (
-                            <LoaderCircle className="spin" size={14} />
-                          ) : (
-                            <GitCompareArrows size={14} />
-                          )}
-                          Compare saved explanations
+                          <FileCode2 size={13} /> {citation.path}:{citation.startLine}-
+                          {citation.endLine}
                         </button>
-                      </section>
-                    ) : null}
-                    {explanationComparisonErrors[finding.id] ? (
-                      <div className="guardrail-explanation-history-error" role="alert">
-                        {explanationComparisonErrors[finding.id]}
-                      </div>
-                    ) : null}
-                    <ExplanationComparisonView
-                      comparison={explanationComparisons[finding.id]}
-                      onOpenCitation={(explanation, citation) =>
-                        void (onOpenSnapshotSource
-                          ? onOpenSnapshotSource(
-                              explanation.snapshot.id,
-                              citation.path,
-                              citation.startLine,
-                              citation.endLine,
-                            )
-                          : onOpenSource(citation.path, citation.startLine, citation.endLine))
+                      ))}
+                    </section>
+                  ) : null}
+                  {openHistories[finding.id] ? (
+                    <section
+                      className="guardrail-explanation-history"
+                      id={`guardrail-history-${finding.id}`}
+                      aria-busy={
+                        historyLoading[finding.id] === true ||
+                        historyLoadingMore[finding.id] === true
                       }
-                    />
-                  </section>
-                ) : null}
-              </div>
-              <button
-                aria-label={`Open evidence for ${finding.title}`}
-                onClick={() => void onOpenSource(finding.path, finding.startLine, finding.endLine)}
-                type="button"
-              >
-                <FileCode2 size={14} />
-                {finding.path}:{finding.startLine}-{finding.endLine}
-              </button>
-            </article>
-          ))}
-        </div>
+                      aria-label={`Explanation history for ${finding.title}`}
+                    >
+                      <div className="guardrail-explanation-history-heading">
+                        <div>
+                          <History size={16} />
+                          <strong>Saved verified explanations</strong>
+                        </div>
+                        {histories[finding.id] ? (
+                          <code title={histories[finding.id]?.subjectKey}>
+                            {histories[finding.id]?.subjectKey.slice(0, 19)}…
+                          </code>
+                        ) : null}
+                      </div>
+                      {historyLoading[finding.id] ? (
+                        <output>
+                          <LoaderCircle className="spin" size={15} /> Loading explanation history…
+                        </output>
+                      ) : null}
+                      {historyErrors[finding.id] ? (
+                        <div className="guardrail-explanation-history-error" role="alert">
+                          <span>{historyErrors[finding.id]}</span>
+                          <button
+                            onClick={() => void loadExplanationHistory(finding.id)}
+                            type="button"
+                          >
+                            Retry
+                          </button>
+                        </div>
+                      ) : null}
+                      {!historyLoading[finding.id] &&
+                      histories[finding.id]?.explanations.length === 0 ? (
+                        <p className="guardrail-explanation-history-empty">
+                          No saved explanations exist for this logical Finding yet.
+                        </p>
+                      ) : null}
+                      {histories[finding.id]?.explanations.length ? (
+                        <>
+                          <div className="guardrail-explanation-history-list">
+                            {histories[finding.id]?.explanations.map((item) => (
+                              <article key={item.id}>
+                                <div>
+                                  <strong>
+                                    {item.answer.status} · {item.answer.provider}/
+                                    {item.answer.model}
+                                  </strong>
+                                  <code>{item.snapshot.commitSha.slice(0, 12)}</code>
+                                </div>
+                                <p>{item.answer.summary}</p>
+                                <div>
+                                  <span>Snapshot {item.snapshot.id}</span>
+                                  <span>{item.promptVersion}</span>
+                                  <span>{item.answer.citationCount} citations</span>
+                                  <span>{item.createdAt}</span>
+                                </div>
+                                <code title={item.profileFingerprint}>
+                                  profile {item.profileFingerprint.slice(0, 19)}…
+                                </code>
+                              </article>
+                            ))}
+                          </div>
+                          {histories[finding.id]?.nextCursor ? (
+                            <button
+                              className="guardrail-explanation-load-more"
+                              disabled={historyLoadingMore[finding.id] === true}
+                              onClick={() =>
+                                void loadExplanationHistory(finding.id, {
+                                  append: true,
+                                  cursor: histories[finding.id]?.nextCursor ?? undefined,
+                                })
+                              }
+                              type="button"
+                            >
+                              {historyLoadingMore[finding.id] ? (
+                                <LoaderCircle className="spin" size={14} />
+                              ) : null}
+                              {historyLoadingMore[finding.id] ? "Loading more…" : "Load more"}
+                            </button>
+                          ) : null}
+                        </>
+                      ) : null}
+                      {(histories[finding.id]?.explanations.length ?? 0) >= 2 ? (
+                        <section
+                          className="guardrail-explanation-compare-controls"
+                          aria-label="Choose verified explanations to compare"
+                        >
+                          <div>
+                            <label>
+                              <span>Base (older)</span>
+                              <select
+                                aria-label={`Base explanation for ${finding.title}`}
+                                onChange={(event) =>
+                                  updateExplanationSelection(
+                                    finding.id,
+                                    "baseId",
+                                    event.target.value,
+                                  )
+                                }
+                                value={historySelections[finding.id]?.baseId ?? ""}
+                              >
+                                {histories[finding.id]?.explanations.map((item) => (
+                                  <option key={`base-${item.id}`} value={item.id}>
+                                    {explanationHistoryLabel(item)}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label>
+                              <span>Head (newer)</span>
+                              <select
+                                aria-label={`Head explanation for ${finding.title}`}
+                                onChange={(event) =>
+                                  updateExplanationSelection(
+                                    finding.id,
+                                    "headId",
+                                    event.target.value,
+                                  )
+                                }
+                                value={historySelections[finding.id]?.headId ?? ""}
+                              >
+                                {histories[finding.id]?.explanations.map((item) => (
+                                  <option key={`head-${item.id}`} value={item.id}>
+                                    {explanationHistoryLabel(item)}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                          </div>
+                          <button
+                            disabled={
+                              explanationComparisonLoading[finding.id] === true ||
+                              !historySelections[finding.id]?.baseId ||
+                              !historySelections[finding.id]?.headId ||
+                              historySelections[finding.id]?.baseId ===
+                                historySelections[finding.id]?.headId
+                            }
+                            onClick={() => void compareExplanationHistory(finding.id)}
+                            type="button"
+                          >
+                            {explanationComparisonLoading[finding.id] ? (
+                              <LoaderCircle className="spin" size={14} />
+                            ) : (
+                              <GitCompareArrows size={14} />
+                            )}
+                            Compare saved explanations
+                          </button>
+                        </section>
+                      ) : null}
+                      {explanationComparisonErrors[finding.id] ? (
+                        <div className="guardrail-explanation-history-error" role="alert">
+                          {explanationComparisonErrors[finding.id]}
+                        </div>
+                      ) : null}
+                      <ExplanationComparisonView
+                        comparison={explanationComparisons[finding.id]}
+                        onOpenCitation={(explanation, citation) =>
+                          void (onOpenSnapshotSource
+                            ? onOpenSnapshotSource(
+                                explanation.snapshot.id,
+                                citation.path,
+                                citation.startLine,
+                                citation.endLine,
+                              )
+                            : onOpenSource(citation.path, citation.startLine, citation.endLine))
+                        }
+                      />
+                    </section>
+                  ) : null}
+                </div>
+                <button
+                  aria-label={`Open evidence for ${finding.title}`}
+                  onClick={() =>
+                    void onOpenSource(finding.path, finding.startLine, finding.endLine)
+                  }
+                  type="button"
+                >
+                  <FileCode2 size={14} />
+                  {finding.path}:{finding.startLine}-{finding.endLine}
+                </button>
+              </article>
+            ))}
+          </div>
+        </>
       )}
     </section>
   );

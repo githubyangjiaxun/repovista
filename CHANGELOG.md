@@ -7,6 +7,27 @@ Keep a Changelog structure.
 
 No unreleased changes.
 
+## [1.4.0] - 2026-08-29
+
+### Added
+
+- Atomic batch Guardrail Review actions for up to 50 unique Findings, including server-owned subject keys,
+  PostgreSQL all-or-nothing transactions, request hashing, idempotent replay, and conflict detection.
+- Generic and Slack notification adapters, the `guardrail_review.batch_updated` event, official Slack HTTPS
+  host validation, bounded Slack blocks, and adapter snapshots on queued deliveries.
+- API, CLI, Web, OpenAPI, Worker, and migration `0011_batch_reviews.sql` integration for the batch workflow.
+
+### Security and trust boundary
+
+- Unchanged batch items do not create extra audit or notification records. Notification payloads contain only
+  event/Finding identity and status/note-length summaries; note bodies, source, model output, and credentials
+  are excluded. No user template or code is executed.
+- Slack delivery is restricted to `hooks.slack.com` and `hooks.slack-gov.com` over HTTPS on the default port;
+  existing DNS/IP SSRF, timeout, redirect, signing, and retry controls remain active.
+
+See the [v1.4 acceptance record](docs/releases/v1.4-验收记录.md) for reproducible quality gates and explicit
+boundaries around real Slack, GitHub App, and external model testing.
+
 ## [1.3.0] - 2026-08-28
 
 ### Added

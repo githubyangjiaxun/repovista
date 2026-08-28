@@ -4,6 +4,8 @@ import {
   type AuthSession,
   askResultSchema,
   authSessionSchema,
+  type BatchGuardrailReviewsResponse,
+  batchGuardrailReviewsResponseSchema,
   type CreateEmbeddingIndexResponse,
   type CreateGuardrailExplanationResponse,
   type CreateNotificationEndpointResponse,
@@ -34,6 +36,7 @@ import {
   guardrailReviewsResponseSchema,
   type Job,
   jobSchema,
+  type NotificationAdapter,
   type NotificationDeliveryPage,
   type NotificationDeliveryStatus,
   type NotificationEndpoint,
@@ -393,6 +396,36 @@ export class RepoVistaClient {
     );
   }
 
+  applyGuardrailReviewBatch(
+    snapshotId: string,
+    input: {
+      items: Array<{
+        findingId: string;
+        status: GuardrailReview["status"];
+        note?: string;
+      }>;
+      idempotencyKey?: string;
+    },
+  ): Promise<BatchGuardrailReviewsResponse> {
+    const headers = new Headers();
+    if (input.idempotencyKey) headers.set("Idempotency-Key", input.idempotencyKey);
+    return this.requestEnvelope(
+      `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/reviews/batch`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          items: input.items.map((item) => ({
+            findingId: item.findingId,
+            status: item.status,
+            note: item.note ?? "",
+          })),
+        }),
+        headers,
+      },
+      (value) => batchGuardrailReviewsResponseSchema.parse(value),
+    );
+  }
+
   listNotificationEndpoints(workspaceId: string): Promise<NotificationEndpoint[]> {
     return this.requestEnvelope(
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/notification-endpoints`,
@@ -406,6 +439,7 @@ export class RepoVistaClient {
     input: {
       name: string;
       url: string;
+      adapter?: NotificationAdapter;
       eventTypes?: NotificationEventType[];
       enabled?: boolean;
     },
@@ -423,6 +457,7 @@ export class RepoVistaClient {
     input: {
       name?: string;
       url?: string;
+      adapter?: NotificationAdapter;
       eventTypes?: NotificationEventType[];
       enabled?: boolean;
     },

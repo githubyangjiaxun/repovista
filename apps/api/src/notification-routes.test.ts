@@ -16,6 +16,7 @@ const endpoint = {
   workspaceId,
   name: "Team relay",
   url: "https://hooks.example.com/repovista",
+  adapter: "generic" as const,
   eventTypes: ["guardrail_review.updated", "guardrail_review.cleared"] as const,
   enabled: true,
   createdBy: ownerId,
@@ -30,6 +31,7 @@ const delivery = {
   workspaceId,
   endpointId,
   eventType: "guardrail_review.updated" as const,
+  adapter: "generic" as const,
   eventKey: "test:event",
   status: "queued" as const,
   attemptCount: 0,
@@ -168,6 +170,60 @@ describe("notification API routes", () => {
         headers,
       });
       expect(foreign.statusCode).toBe(404);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("validates Slack adapter hosts and forwards the adapter on CRUD", async () => {
+    const store = createStore();
+    const app = appFor(store);
+    try {
+      const slackUrl = "https://hooks.slack.com/services/T000/B000/fixture";
+      const created = await app.inject({
+        method: "POST",
+        url: `/v1/workspaces/${workspaceId}/notification-endpoints`,
+        headers,
+        payload: {
+          name: "Slack relay",
+          url: slackUrl,
+          adapter: "slack",
+          eventTypes: ["guardrail_review.batch_updated"],
+        },
+      });
+      expect(created.statusCode).toBe(201);
+      expect(store.createNotificationEndpoint).toHaveBeenCalledWith(
+        expect.objectContaining({ adapter: "slack", url: slackUrl }),
+      );
+
+      const updated = await app.inject({
+        method: "PATCH",
+        url: `/v1/workspaces/${workspaceId}/notification-endpoints/${endpointId}`,
+        headers,
+        payload: {
+          name: "Slack relay updated",
+          url: slackUrl,
+          adapter: "slack",
+          eventTypes: ["guardrail_review.updated"],
+        },
+      });
+      expect(updated.statusCode).toBe(200);
+      expect(store.updateNotificationEndpoint).toHaveBeenCalledWith(
+        expect.objectContaining({ adapter: "slack", url: slackUrl }),
+      );
+
+      const rejected = await app.inject({
+        method: "POST",
+        url: `/v1/workspaces/${workspaceId}/notification-endpoints`,
+        headers,
+        payload: {
+          name: "Not Slack",
+          url: "https://hooks.example.com/relay",
+          adapter: "slack",
+        },
+      });
+      expect(rejected.statusCode).toBe(400);
+      expect(rejected.json().error.code).toBe("NOTIFICATION_URL_INVALID");
     } finally {
       await app.close();
     }

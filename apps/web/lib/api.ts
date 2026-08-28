@@ -1,6 +1,7 @@
 import type {
   ApiTokenMetadata,
   AuthSession,
+  BatchGuardrailReviewsResponse,
   AskResult as ContractAskResult,
   CreateEmbeddingIndexResponse,
   GitHubIntegrationStatus,
@@ -15,6 +16,7 @@ import type {
   GuardrailReviewHistoryPage,
   GuardrailReviewsResponse,
   Job,
+  NotificationAdapter,
   NotificationDelivery,
   NotificationDeliveryPage,
   NotificationEndpoint,
@@ -314,6 +316,7 @@ export interface SnapshotFilePage {
 
 export type AskResult = ContractAskResult;
 export type {
+  BatchGuardrailReviewsResponse,
   GuardrailExplanation,
   GuardrailExplanationComparison,
   GuardrailExplanationHistory,
@@ -327,6 +330,7 @@ export type {
   NotificationDeliveryPage,
   NotificationEndpoint,
   NotificationEventType,
+  NotificationAdapter,
 };
 
 export interface GuardrailExplanationResult {
@@ -364,6 +368,33 @@ export async function listGuardrailReviewHistory(
   );
 }
 
+export async function applyGuardrailReviewBatch(
+  snapshotId: string,
+  input: {
+    items: Array<{
+      findingId: string;
+      status: GuardrailReview["status"];
+      note?: string;
+    }>;
+    idempotencyKey: string;
+  },
+): Promise<BatchGuardrailReviewsResponse> {
+  return apiFetch<BatchGuardrailReviewsResponse>(
+    `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/reviews/batch`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        items: input.items.map((item) => ({
+          findingId: item.findingId,
+          status: item.status,
+          note: item.note ?? "",
+        })),
+      }),
+      headers: { "Idempotency-Key": input.idempotencyKey },
+    },
+  );
+}
+
 export async function listNotificationEndpoints(
   workspaceId: string,
 ): Promise<NotificationEndpoint[]> {
@@ -378,6 +409,7 @@ export async function createNotificationEndpoint(
   input: {
     name: string;
     url: string;
+    adapter?: NotificationAdapter;
     eventTypes?: NotificationEventType[];
     enabled?: boolean;
   },
@@ -394,6 +426,7 @@ export async function updateNotificationEndpoint(
   input: {
     name?: string;
     url?: string;
+    adapter?: NotificationAdapter;
     eventTypes?: NotificationEventType[];
     enabled?: boolean;
   },

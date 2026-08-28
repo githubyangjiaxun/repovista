@@ -728,6 +728,194 @@ describe("GuardrailsPanel", () => {
     expect(document.querySelector(".guardrails-status.guardrails-fail")).toBeInTheDocument();
   });
 
+  it("selects multiple Findings and applies one atomic batch review", async () => {
+    auth.current.session = authenticatedSession("editor");
+    setApiCsrfToken(auth.current.session.csrfToken);
+    const batch = {
+      batchId: "01900000-0000-7000-0000-000000000040",
+      snapshot: { id: snapshotId, commitSha: report.snapshot.commitSha },
+      applied: [
+        {
+          findingId: reportFinding.id,
+          subjectKey: `sha256:${"d".repeat(64)}`,
+          status: "accepted_risk" as const,
+          noteLength: 11,
+          changed: true,
+        },
+      ],
+      changed: 1,
+      unchanged: 0,
+      idempotentReplay: false,
+    };
+    const fetchImplementation = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      const policy = policyResponse(url);
+      if (policy) return policy;
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails`)) return envelope(report);
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails/reviews`)) {
+        return envelope({
+          snapshot: { id: snapshotId, commitSha: report.snapshot.commitSha },
+          reviews: [],
+        });
+      }
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails/reviews/batch`)) {
+        expect(init?.method).toBe("POST");
+        expect(new Headers(init?.headers).get("X-RepoVista-CSRF")).toBe(
+          auth.current.session?.csrfToken,
+        );
+        expect(JSON.parse(String(init?.body))).toEqual({
+          items: [{ findingId: reportFinding.id, status: "accepted_risk", note: "Batch note" }],
+        });
+        return envelope(batch);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchImplementation);
+    render(
+      <GuardrailsPanel
+        onOpenSource={vi.fn()}
+        repositoryId={repositoryId}
+        snapshotId={snapshotId}
+      />,
+    );
+    const checkbox = await screen.findByRole("checkbox", {
+      name: "Select Package dependency cycle for batch review",
+    });
+    fireEvent.click(checkbox);
+    fireEvent.change(screen.getByRole("combobox", { name: "Batch review status" }), {
+      target: { value: "accepted_risk" },
+    });
+    fireEvent.change(screen.getByRole("textbox", { name: "Batch review note" }), {
+      target: { value: "Batch note" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply to selected" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("checkbox", {
+          name: "Select Package dependency cycle for batch review",
+        }),
+      ).not.toBeChecked(),
+    );
+    expect(screen.getByText("accepted_risk")).toBeInTheDocument();
+    expect(screen.getByText("Batch note")).toBeInTheDocument();
+    const batchRequest = fetchImplementation.mock.calls.find(([input]) =>
+      String(input).endsWith(`/v1/snapshots/${snapshotId}/guardrails/reviews/batch`),
+    );
+    expect(new Headers(batchRequest?.[1]?.headers).get("Idempotency-Key")).toMatch(/^web-/);
+  });
+
+  it("keeps batch selection and draft note after an atomic failure", async () => {
+    auth.current.session = authenticatedSession("editor");
+    setApiCsrfToken(auth.current.session.csrfToken);
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      const policy = policyResponse(url);
+      if (policy) return policy;
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails`)) return envelope(report);
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails/reviews`)) {
+        return envelope({
+          snapshot: { id: snapshotId, commitSha: report.snapshot.commitSha },
+          reviews: [],
+        });
+      }
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails/reviews/batch`)) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              code: "GUARDRAIL_REVIEW_BATCH_CONFLICT",
+              message: "The batch key conflicts with an earlier request.",
+              requestId: "batch-request-7",
+              retryable: false,
+            },
+          }),
+          { status: 409, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchImplementation);
+    render(
+      <GuardrailsPanel
+        onOpenSource={vi.fn()}
+        repositoryId={repositoryId}
+        snapshotId={snapshotId}
+      />,
+    );
+    fireEvent.click(
+      await screen.findByRole("checkbox", {
+        name: "Select Package dependency cycle for batch review",
+      }),
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "Batch review note" }), {
+      target: { value: "Keep this draft" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply to selected" }));
+    expect(
+      await screen.findByText(
+        "The batch key conflicts with an earlier request. Request ID: batch-request-7",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Batch review note" })).toHaveValue(
+      "Keep this draft",
+    );
+    expect(
+      screen.getByRole("checkbox", { name: "Select Package dependency cycle for batch review" }),
+    ).toBeChecked();
+  });
+
+  it("caps select-all at 50 Findings and keeps the button state accurate", async () => {
+    auth.current.session = authenticatedSession("editor");
+    setApiCsrfToken(auth.current.session.csrfToken);
+    const manyFindings = Array.from({ length: 51 }, (_, index) => ({
+      ...reportFinding,
+      id: `dependency_cycle:${index + 1}`,
+      fingerprint: `sha256:${String(index + 1).padStart(64, "0")}`,
+      title: `Package dependency cycle ${index + 1}`,
+      path: `src/package-${index + 1}/index.ts`,
+    }));
+    const manyReport = {
+      ...report,
+      summary: { total: manyFindings.length, errors: manyFindings.length, warnings: 0, infos: 0 },
+      findings: manyFindings,
+    };
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      const policy = policyResponse(url);
+      if (policy) return policy;
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails`)) return envelope(manyReport);
+      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails/reviews`)) {
+        return envelope({
+          snapshot: { id: snapshotId, commitSha: report.snapshot.commitSha },
+          reviews: [],
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchImplementation);
+    render(
+      <GuardrailsPanel
+        onOpenSource={vi.fn()}
+        repositoryId={repositoryId}
+        snapshotId={snapshotId}
+      />,
+    );
+
+    const selectAll = await screen.findByRole("button", { name: "Select all" });
+    fireEvent.click(selectAll);
+    expect(await screen.findByText("50 selected (maximum 50)")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Clear all" })).toBeInTheDocument();
+    const checkboxes = screen.getAllByRole("checkbox", {
+      name: /Select .* for batch review/,
+    });
+    expect(checkboxes).toHaveLength(51);
+    for (const checkbox of checkboxes.slice(0, 50)) expect(checkbox).toBeChecked();
+    expect(checkboxes[50]).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
+    expect(await screen.findByText("0 selected (maximum 50)")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Select all" })).toBeInTheDocument();
+  });
+
   it("keeps review controls disabled for Viewers while still showing metadata", async () => {
     auth.current.session = authenticatedSession("viewer");
     const review = {

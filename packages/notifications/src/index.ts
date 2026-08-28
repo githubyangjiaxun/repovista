@@ -5,9 +5,17 @@ import { DomainError } from "@repovista/domain";
 export const NOTIFICATION_EVENT_TYPES = [
   "guardrail_review.updated",
   "guardrail_review.cleared",
+  "guardrail_review.batch_updated",
 ] as const;
 
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number];
+
+export const NOTIFICATION_ADAPTER_IDS = ["generic", "slack"] as const;
+export type NotificationAdapterId = (typeof NOTIFICATION_ADAPTER_IDS)[number];
+
+export function isNotificationAdapterId(value: string): value is NotificationAdapterId {
+  return (NOTIFICATION_ADAPTER_IDS as readonly string[]).includes(value);
+}
 
 export function isNotificationEventType(value: string): value is NotificationEventType {
   return (NOTIFICATION_EVENT_TYPES as readonly string[]).includes(value);
@@ -108,6 +116,122 @@ export function validateNotificationUrl(value: string, production = false): stri
     );
   }
   return normalized;
+}
+
+/**
+ * Validate an endpoint URL against the selected adapter's policy. Generic
+ * endpoints retain the v1.3 URL policy; Slack endpoints are deliberately
+ * restricted to the two official Incoming Webhook hosts and HTTPS in every
+ * environment.
+ */
+export function validateNotificationAdapterUrl(
+  adapter: NotificationAdapterId,
+  value: string,
+  production = false,
+): string {
+  if (!isNotificationAdapterId(adapter)) {
+    throw new DomainError("NOTIFICATION_ADAPTER_INVALID", "The notification adapter is invalid.");
+  }
+  const normalized = validateNotificationUrl(value, production);
+  if (adapter !== "slack") return normalized;
+  const parsed = new URL(normalized);
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.port !== "" ||
+    !["hooks.slack.com", "hooks.slack-gov.com"].includes(parsed.hostname.toLowerCase())
+  ) {
+    throw new DomainError(
+      "NOTIFICATION_URL_INVALID",
+      "Slack endpoints must use HTTPS on the default port at hooks.slack.com or hooks.slack-gov.com.",
+    );
+  }
+  return normalized;
+}
+
+function stringField(payload: Record<string, unknown>, key: string): string | null {
+  const value = payload[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function escapeSlackText(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+/**
+ * Render a server-owned notification event for a provider. No user supplied
+ * template or code is executed here. The generic adapter is intentionally a
+ * pass-through so existing consumers remain wire compatible.
+ */
+export function renderNotificationPayload(
+  adapter: NotificationAdapterId,
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!isNotificationAdapterId(adapter)) {
+    throw new DomainError("NOTIFICATION_ADAPTER_INVALID", "The notification adapter is invalid.");
+  }
+  if (adapter === "generic") return payload;
+
+  const eventType = stringField(payload, "eventType") ?? "notification";
+  const snapshotId = stringField(payload, "snapshotId");
+  const commitSha = stringField(payload, "commitSha") ?? stringField(payload, "snapshotCommitSha");
+  const transition =
+    typeof payload.transition === "object" &&
+    payload.transition !== null &&
+    !Array.isArray(payload.transition)
+      ? payload.transition
+      : null;
+  const changes = Array.isArray(payload.changes)
+    ? payload.changes
+    : stringField(payload, "findingId") && transition
+      ? [{ findingId: payload.findingId, ...transition }]
+      : [];
+  const boundedChanges = changes.filter(
+    (value): value is Record<string, unknown> =>
+      typeof value === "object" && value !== null && !Array.isArray(value),
+  );
+  const count = boundedChanges.length;
+  const location = [
+    snapshotId ? `snapshot ${snapshotId.slice(0, 12)}` : null,
+    commitSha ? `commit ${commitSha.slice(0, 12)}` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const text = `RepoVista ${eventType}${location ? ` · ${location}` : ""}${count ? ` · ${count} Finding${count === 1 ? "" : "s"}` : ""}`;
+  const blocks: Record<string, unknown>[] = [
+    { type: "header", text: { type: "plain_text", text: "RepoVista Guardrail Review" } },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*${escapeSlackText(eventType)}*${location ? `\n${escapeSlackText(location)}` : ""}`,
+      },
+    },
+  ];
+  const changeLines = boundedChanges.slice(0, 50).map((change) => {
+    const findingId = typeof change.findingId === "string" ? change.findingId : "unknown-finding";
+    const fromStatus = typeof change.fromStatus === "string" ? change.fromStatus : "unreviewed";
+    const toStatus = typeof change.toStatus === "string" ? change.toStatus : "unreviewed";
+    const noteSummary = change.noteChanged === true ? "note changed" : "note unchanged";
+    return `• \`${escapeSlackText(findingId.slice(0, 120))}\`: ${escapeSlackText(fromStatus)} → *${escapeSlackText(toStatus)}* · ${noteSummary}`;
+  });
+  for (let index = 0; index < changeLines.length; index += 10) {
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: changeLines.slice(index, index + 10).join("\n"),
+      },
+    });
+  }
+  if (count > 50) {
+    blocks.push({
+      type: "context",
+      elements: [
+        { type: "mrkdwn", text: `…and ${count - 50} more Finding${count - 50 === 1 ? "" : "s"}.` },
+      ],
+    });
+  }
+  return { text, blocks };
 }
 
 export function deriveNotificationSigningSecret(masterSecret: string, endpointId: string): string {

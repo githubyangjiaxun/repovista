@@ -139,9 +139,11 @@ export function buildApp(dependencies: AppDependencies = {}): {
                           error.code === "PR_ANALYSIS_REVISION_CONFLICT" ||
                           error.code === "GUARDRAIL_COMPARISON_INCOMPATIBLE" ||
                           error.code === "GUARDRAIL_EXPLANATION_COMPARISON_INCOMPATIBLE" ||
-                          error.code === "GUARDRAIL_EXPLANATION_EVIDENCE_UNAVAILABLE"
+                          error.code === "GUARDRAIL_EXPLANATION_EVIDENCE_UNAVAILABLE" ||
+                          error.code === "GUARDRAIL_REVIEW_BATCH_CONFLICT"
                         ? 409
-                        : error.code === "GUARDRAIL_REVIEW_UNAVAILABLE"
+                        : error.code === "GUARDRAIL_REVIEW_UNAVAILABLE" ||
+                            error.code === "GUARDRAIL_REVIEW_BATCH_UNAVAILABLE"
                           ? 503
                           : error.code === "NOTIFICATION_CONFIG_INVALID" ||
                               error.code === "NOTIFICATION_DELIVERY_UNAVAILABLE" ||

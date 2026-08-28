@@ -207,7 +207,7 @@ describe("RepoVista CLI", () => {
     const exitCode = await runCli(["--version"], dependencies);
 
     expect(exitCode).toBe(0);
-    expect(stdout).toEqual(["1.3.0"]);
+    expect(stdout).toEqual(["1.4.0"]);
     expect(stderr).toEqual([]);
     expect(fetchImplementation).not.toHaveBeenCalled();
   });
@@ -595,6 +595,89 @@ describe("RepoVista CLI", () => {
     expect(
       JSON.parse(String((fetchImplementation.mock.calls[1]?.[1] as RequestInit).body)),
     ).toEqual({ status: "accepted_risk", note: "Known boundary" });
+  });
+
+  it("applies a bounded batch review with an idempotency key", async () => {
+    const batch = {
+      batchId: jobId,
+      snapshot: { id: snapshotId, commitSha: snapshot.commitSha },
+      applied: [
+        {
+          findingId: guardrailFinding.id,
+          subjectKey,
+          status: "accepted_risk" as const,
+          noteLength: 14,
+          changed: true,
+        },
+      ],
+      changed: 1,
+      unchanged: 0,
+      idempotentReplay: false,
+    };
+    const fetchImplementation = vi.fn<typeof fetch>(async () => envelope(batch));
+    const { dependencies, stdout } = harness(fetchImplementation as typeof fetch);
+    const exitCode = await runCli(
+      [
+        "guardrails",
+        "reviews",
+        "batch",
+        snapshotId,
+        "--item",
+        `${guardrailFinding.id}=accepted_risk`,
+        "--note",
+        "Known boundary",
+        "--idempotency-key",
+        "batch-42",
+      ],
+      dependencies,
+    );
+    expect(exitCode).toBe(0);
+    expect(stdout.join("\n")).toContain("Guardrail review batch applied");
+    expect(stdout.join("\n")).toContain("Changed: 1 · Unchanged: 0");
+    const request = fetchImplementation.mock.calls[0]?.[1] as RequestInit;
+    expect(new Headers(request.headers).get("Idempotency-Key")).toBe("batch-42");
+    expect(JSON.parse(String(request.body))).toEqual({
+      items: [{ findingId: guardrailFinding.id, status: "accepted_risk", note: "Known boundary" }],
+    });
+  });
+
+  it("supports colon-delimited batch items without truncating colon-containing Finding IDs", async () => {
+    const batch = {
+      batchId: jobId,
+      snapshot: { id: snapshotId, commitSha: snapshot.commitSha },
+      applied: [
+        {
+          findingId: guardrailFinding.id,
+          subjectKey,
+          status: "acknowledged" as const,
+          noteLength: 0,
+          changed: true,
+        },
+      ],
+      changed: 1,
+      unchanged: 0,
+      idempotentReplay: false,
+    };
+    const fetchImplementation = vi.fn<typeof fetch>(async () => envelope(batch));
+    const { dependencies } = harness(fetchImplementation as typeof fetch);
+    expect(
+      await runCli(
+        [
+          "guardrails",
+          "reviews",
+          "batch",
+          snapshotId,
+          "--item",
+          `${guardrailFinding.id}:acknowledged`,
+        ],
+        dependencies,
+      ),
+    ).toBe(0);
+    expect(
+      JSON.parse(String((fetchImplementation.mock.calls[0]?.[1] as RequestInit).body)),
+    ).toEqual({
+      items: [{ findingId: guardrailFinding.id, status: "acknowledged", note: "" }],
+    });
   });
 
   it("writes a separate review JSON export with restrictive file permissions", async () => {

@@ -5,7 +5,9 @@ import {
   isBlockedIp,
   isRetryableNotificationStatus,
   notificationBackoffMs,
+  renderNotificationPayload,
   signNotificationPayload,
+  validateNotificationAdapterUrl,
   validateNotificationUrl,
 } from "./index.js";
 
@@ -60,5 +62,61 @@ describe("notification safety and signing", () => {
     expect(isRetryableNotificationStatus(503)).toBe(true);
     expect(isRetryableNotificationStatus(400)).toBe(false);
     expect(isRetryableNotificationStatus(301)).toBe(false);
+  });
+
+  it("keeps generic payloads lossless and renders bounded Slack blocks", () => {
+    const payload = {
+      schemaVersion: "repovista.notification.v1",
+      eventId: "42",
+      eventType: "guardrail_review.batch_updated",
+      snapshotId: "snapshot-1234567890",
+      commitSha: "abcdef0123456789abcdef0123456789abcdef01",
+      changes: Array.from({ length: 50 }, (_, index) => ({
+        findingId: `finding-${index}<unsafe>`,
+        fromStatus: "unreviewed",
+        toStatus: "acknowledged",
+        noteChanged: index % 2 === 0,
+      })),
+      secret: "must-not-be-rendered",
+    };
+    expect(renderNotificationPayload("generic", payload)).toBe(payload);
+    const rendered = renderNotificationPayload("slack", payload) as {
+      text: string;
+      blocks: Array<{ text?: { text?: string } }>;
+    };
+    expect(rendered.text).toContain("guardrail_review.batch_updated");
+    expect(rendered.text).toContain("50 Findings");
+    expect(JSON.stringify(rendered)).not.toContain("must-not-be-rendered");
+    expect(JSON.stringify(rendered)).toContain("&lt;unsafe&gt;");
+    expect(rendered.blocks.length).toBeLessThanOrEqual(50);
+    expect(JSON.stringify(rendered)).toContain("note changed");
+  });
+
+  it("renders a single review transition and enforces Slack host policy", () => {
+    const rendered = renderNotificationPayload("slack", {
+      eventType: "guardrail_review.updated",
+      findingId: "large_file:abc",
+      transition: {
+        fromStatus: "unreviewed",
+        toStatus: "accepted_risk",
+        noteChanged: false,
+      },
+    });
+    expect(JSON.stringify(rendered)).toContain("large_file:abc");
+    expect(() =>
+      validateNotificationAdapterUrl("slack", "https://hooks.example.com/relay"),
+    ).toThrow(/hooks\.slack/);
+    expect(() =>
+      validateNotificationAdapterUrl("slack", "http://hooks.slack.com/services/x"),
+    ).toThrow(/HTTPS/);
+    expect(() =>
+      validateNotificationAdapterUrl("slack", "https://hooks.slack.com:8443/services/x"),
+    ).toThrow(/default port/);
+    expect(validateNotificationAdapterUrl("slack", "https://hooks.slack.com/services/x")).toBe(
+      "https://hooks.slack.com/services/x",
+    );
+    expect(validateNotificationAdapterUrl("slack", "https://hooks.slack-gov.com/services/x")).toBe(
+      "https://hooks.slack-gov.com/services/x",
+    );
   });
 });
