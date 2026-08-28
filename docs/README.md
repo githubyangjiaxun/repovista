@@ -1,6 +1,6 @@
 # RepoVista 工程文档
 
-状态：v1.2 Reviewable Guardrails 已完成实现与本地发布门禁，等待推送后的 GitHub Actions 回执（2026-08-28）
+状态：v1.2 Reviewable Guardrails 已完成实现、本地发布门禁与远端 GitHub Actions 验证（2026-08-28）
 
 本目录描述当前代码，而不是早期愿景。发生冲突时，事实来源优先级如下：
 
