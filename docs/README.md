@@ -1,6 +1,6 @@
 # RepoVista 工程文档
 
-状态：v1.2 Reviewable Guardrails 已完成实现、本地发布门禁与远端 GitHub Actions 验证（2026-08-28）
+状态：v1.3 Review Timeline & Signed Notifications 已完成实现与本地发布门禁；远端 CI 结果以 v1.3 验收记录为准（2026-08-28）
 
 本目录描述当前代码，而不是早期愿景。发生冲突时，事实来源优先级如下：
 
@@ -135,6 +135,18 @@
 | [v1.1 测试与发布计划](./operations/v1.1测试与发布计划.md) | Fixture、PostgreSQL、Compose Smoke、Hardened Overlay 与 Git 门禁 |
 | [v1.1 验收记录](./releases/v1.1-验收记录.md) | 实际门禁结果、Compose/数据库证据、边界与 Git 审计 |
 
+## v1.3 实施完成
+
+| 文档 | 内容 |
+|---|---|
+| [版本开发计划](./releases/v1.3-开发计划.md) | Review Timeline、Signed Notifications 范围、非目标和完成定义 |
+| [v1.3 后端开发文档](./backend/v1.3后端开发文档.md) | 历史查询、Endpoint CRUD、Outbox、Worker 和错误契约 |
+| [v1.3 数据库设计](./database/v1.3数据库设计.md) | `workspace_notification_endpoints`、`notification_deliveries`、事务和租约不变量 |
+| [v1.3 前端开发文档](./frontend/v1.3前端开发文档.md) | Finding 时间线、Webhook 设置、一次性 Secret 和可访问性 |
+| [v1.3 人审与 AI 可信边界](./ai/v1.3人审与AI可信边界.md) | 人审、通知、确定性分析和 AI 的隔离边界 |
+| [v1.3 测试与发布计划](./operations/v1.3测试与发布计划.md) | 自动化矩阵、SSRF/重试测试和发布门禁 |
+| [v1.3 验收记录](./releases/v1.3-验收记录.md) | 实际命令、数据库、CI、Compose 和 Git 证据 |
+
 ## v1.2 实施完成
 
 | 文档 | 内容 |
@@ -159,7 +171,7 @@
 | 文档 | 内容 |
 |---|---|
 | [后端开发文档](./backend/后端开发文档.md) | Fastify 请求边界、配置、错误和模块职责 |
-| [API 接口契约](./backend/API接口契约.md) | 65 个当前 Operation、Cookie/Bearer、Workspace、策略 Profile、Guardrails/Review/导出/解释历史/结构比较/SARIF、SSE、Retrieval、Story 与 PR Impact |
+| [API 接口契约](./backend/API接口契约.md) | 72 个当前 Operation、Cookie/Bearer、Workspace、策略 Profile、Guardrails/Review/通知/导出/解释历史/结构比较/SARIF、SSE、Retrieval、Story 与 PR Impact |
 | [任务与索引流水线](./backend/任务与索引流水线.md) | 租约任务、安全克隆、扫描、解析和持久化 |
 
 ## 数据与可信 AI

@@ -1031,6 +1031,157 @@ export const updateGuardrailReviewRequestSchema = z
   .strict();
 export type UpdateGuardrailReviewRequest = z.infer<typeof updateGuardrailReviewRequestSchema>;
 
+// v1.3 review history is projected from append-only audit events. It keeps
+// transition metadata useful for handoff without retaining the note body.
+export const guardrailReviewHistoryActionSchema = z.enum([
+  "guardrail_review.upsert",
+  "guardrail_review.clear",
+]);
+export type GuardrailReviewHistoryAction = z.infer<typeof guardrailReviewHistoryActionSchema>;
+
+export const guardrailReviewHistoryEntrySchema = z.object({
+  id: z.number().int().positive(),
+  snapshotId: idSchema,
+  findingId: z.string().trim().min(1).max(300),
+  subjectKey: z.string().regex(/^sha256:[a-f0-9]{64}$/),
+  action: guardrailReviewHistoryActionSchema,
+  fromStatus: guardrailReviewStatusSchema,
+  toStatus: guardrailReviewStatusSchema,
+  fromNoteLength: z.number().int().nonnegative().max(2_000),
+  toNoteLength: z.number().int().nonnegative().max(2_000),
+  noteChanged: z.boolean(),
+  actorKind: z.enum(["anonymous", "session", "token", "github", "system"]),
+  actorLogin: z.string().nullable(),
+  createdAt: z.iso.datetime(),
+});
+export type GuardrailReviewHistoryEntry = z.infer<typeof guardrailReviewHistoryEntrySchema>;
+
+export const guardrailReviewHistoryQuerySchema = z.object({
+  findingId: z.string().trim().min(1).max(300).optional(),
+  status: guardrailReviewStatusSchema.optional(),
+  cursor: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{1,1000}$/)
+    .optional(),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+export type GuardrailReviewHistoryQuery = z.infer<typeof guardrailReviewHistoryQuerySchema>;
+
+export const guardrailReviewHistoryPageSchema = z.object({
+  entries: z.array(guardrailReviewHistoryEntrySchema),
+  nextCursor: z.string().nullable(),
+});
+export type GuardrailReviewHistoryPage = z.infer<typeof guardrailReviewHistoryPageSchema>;
+
+export const notificationEventTypeSchema = z.enum([
+  "guardrail_review.updated",
+  "guardrail_review.cleared",
+]);
+export type NotificationEventType = z.infer<typeof notificationEventTypeSchema>;
+
+export const notificationEventTypesSchema = z
+  .array(notificationEventTypeSchema)
+  .min(1)
+  .max(2)
+  .refine((values) => new Set(values).size === values.length, {
+    message: "Notification event types must be unique.",
+  });
+
+export const notificationEndpointSchema = z.object({
+  id: idSchema,
+  workspaceId: idSchema,
+  name: z.string().min(1).max(100),
+  url: z.url().max(2_048),
+  eventTypes: notificationEventTypesSchema,
+  enabled: z.boolean(),
+  createdBy: idSchema.nullable(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+  lastDeliveryAt: z.iso.datetime().nullable(),
+  lastDeliveryStatus: z.enum(["queued", "running", "succeeded", "failed"]).nullable(),
+});
+export type NotificationEndpoint = z.infer<typeof notificationEndpointSchema>;
+
+const notificationEndpointFields = {
+  name: z.string().trim().min(1).max(100),
+  url: z.string().trim().min(1).max(2_048),
+  eventTypes: notificationEventTypesSchema,
+  enabled: z.boolean(),
+};
+
+export const createNotificationEndpointRequestSchema = z
+  .object({
+    ...notificationEndpointFields,
+    eventTypes: notificationEndpointFields.eventTypes.default([
+      "guardrail_review.updated",
+      "guardrail_review.cleared",
+    ]),
+    enabled: notificationEndpointFields.enabled.default(true),
+  })
+  .strict();
+export type CreateNotificationEndpointRequest = z.infer<
+  typeof createNotificationEndpointRequestSchema
+>;
+
+export const updateNotificationEndpointRequestSchema = z
+  .object(notificationEndpointFields)
+  .partial()
+  .strict();
+export type UpdateNotificationEndpointRequest = z.infer<
+  typeof updateNotificationEndpointRequestSchema
+>;
+
+export const createNotificationEndpointResponseSchema = z.object({
+  endpoint: notificationEndpointSchema,
+  signingSecret: z.string().regex(/^rvwh_[A-Za-z0-9_-]{40,100}$/),
+});
+export type CreateNotificationEndpointResponse = z.infer<
+  typeof createNotificationEndpointResponseSchema
+>;
+
+export const notificationDeliveryStatusSchema = z.enum([
+  "queued",
+  "running",
+  "succeeded",
+  "failed",
+]);
+export type NotificationDeliveryStatus = z.infer<typeof notificationDeliveryStatusSchema>;
+
+export const notificationDeliverySchema = z.object({
+  id: idSchema,
+  workspaceId: idSchema,
+  endpointId: idSchema,
+  eventType: notificationEventTypeSchema,
+  eventKey: z.string().min(1).max(300),
+  status: notificationDeliveryStatusSchema,
+  attemptCount: z.number().int().nonnegative().max(20),
+  maxAttempts: z.number().int().positive().max(20),
+  nextAttemptAt: z.iso.datetime().nullable(),
+  lastStatusCode: z.number().int().min(100).max(599).nullable(),
+  lastError: z.string().max(500).nullable(),
+  deliveredAt: z.iso.datetime().nullable(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+});
+export type NotificationDelivery = z.infer<typeof notificationDeliverySchema>;
+
+export const notificationDeliveryQuerySchema = z.object({
+  endpointId: idSchema.optional(),
+  status: notificationDeliveryStatusSchema.optional(),
+  cursor: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{1,1000}$/)
+    .optional(),
+  limit: z.coerce.number().int().min(1).max(50).default(20),
+});
+export type NotificationDeliveryQuery = z.infer<typeof notificationDeliveryQuerySchema>;
+
+export const notificationDeliveryPageSchema = z.object({
+  deliveries: z.array(notificationDeliverySchema),
+  nextCursor: z.string().nullable(),
+});
+export type NotificationDeliveryPage = z.infer<typeof notificationDeliveryPageSchema>;
+
 export const createGuardrailExplanationRequestSchema = z
   .object({
     findingId: z.string().trim().min(1).max(300),

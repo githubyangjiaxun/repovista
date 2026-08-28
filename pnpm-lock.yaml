@@ -80,6 +80,9 @@ importers:
       '@repovista/impact':
         specifier: workspace:*
         version: link:../../packages/impact
+      '@repovista/notifications':
+        specifier: workspace:*
+        version: link:../../packages/notifications
       '@repovista/retrieval':
         specifier: workspace:*
         version: link:../../packages/retrieval
@@ -195,6 +198,9 @@ importers:
       '@repovista/impact':
         specifier: workspace:*
         version: link:../../packages/impact
+      '@repovista/notifications':
+        specifier: workspace:*
+        version: link:../../packages/notifications
       '@repovista/parser':
         specifier: workspace:*
         version: link:../../packages/parser
@@ -349,6 +355,12 @@ importers:
       '@repovista/contracts':
         specifier: workspace:*
         version: link:../contracts
+
+  packages/notifications:
+    dependencies:
+      '@repovista/domain':
+        specifier: workspace:*
+        version: link:../domain
 
   packages/parser:
     dependencies:

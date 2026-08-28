@@ -7,6 +7,33 @@ Keep a Changelog structure.
 
 No unreleased changes.
 
+## [1.3.0] - 2026-08-28
+
+### Added
+
+- Append-only Guardrail Review timeline with cursor pagination, Snapshot/Finding subject validation,
+  status/note-length transitions, and actor summaries without retaining note bodies.
+- Workspace notification Endpoint administration and signed Webhook events for
+  `guardrail_review.updated` and `guardrail_review.cleared`, including one-time secret display,
+  test delivery, delivery history, and Viewer-safe reads.
+- Durable notification outbox with per-endpoint idempotency, PostgreSQL leases/heartbeats, bounded
+  exponential retry, and deletion cleanup through migration `0010_notifications.sql`.
+- API, CLI, Web, OpenAPI, and Worker integration for notification delivery. Worker requests use HMAC
+  timestamp/signature headers, hard timeouts, redirect rejection, and DNS/IP SSRF checks.
+
+### Security and trust boundary
+
+- Notification payloads contain only event identity, Snapshot/Finding identity, status and note-length
+  transitions, and an actor summary. Review note text, source, model prompts/answers, and credentials are
+  never sent to a Webhook or AI provider.
+- Endpoint secrets are derived at runtime from `NOTIFICATION_SIGNING_SECRET` and the endpoint ID; the
+  secret is returned only during creation and is never stored in PostgreSQL, URLs, logs, or audit metadata.
+- Production targets must use HTTPS. Loopback, private, link-local, cloud-metadata, unresolved, and
+  redirected targets are rejected; transient failures are retried only up to the configured limit.
+
+See the [v1.3 acceptance record](docs/releases/v1.3-验收记录.md) for reproducible quality gates,
+isolated PostgreSQL evidence, and the explicit external-integration boundary.
+
 ## [1.2.0] - 2026-08-28
 
 ### Added

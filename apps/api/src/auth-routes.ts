@@ -9,6 +9,7 @@ import {
   parseCookieHeader,
   randomSecret,
   requirePrincipalAdmin,
+  requirePrincipalWrite,
   SESSION_COOKIE,
   safeReturnTo,
   serializeCookie,
@@ -17,14 +18,18 @@ import type { AppConfig } from "@repovista/config";
 import {
   addWorkspaceMemberRequestSchema,
   createApiTokenRequestSchema,
+  createNotificationEndpointRequestSchema,
   createWorkspaceRequestSchema,
   idSchema,
+  notificationDeliveryQuerySchema,
   switchWorkspaceRequestSchema,
+  updateNotificationEndpointRequestSchema,
   updateWorkspaceMemberRequestSchema,
 } from "@repovista/contracts";
 import type { RepoVistaStore } from "@repovista/database";
 import { DomainError, isDomainError } from "@repovista/domain";
 import { exchangeGitHubOAuthCode, type GitHubAppClient } from "@repovista/github";
+import { deriveNotificationSigningSecret, validateNotificationUrl } from "@repovista/notifications";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
@@ -53,9 +58,34 @@ const installationRepositoriesQuerySchema = z.object({
 const tokenParamsSchema = z.object({ tokenId: idSchema });
 const workspaceParamsSchema = z.object({ workspaceId: idSchema });
 const workspaceMemberParamsSchema = z.object({ workspaceId: idSchema, userId: idSchema });
+const notificationEndpointParamsSchema = z.object({ workspaceId: idSchema });
+const notificationEndpointItemParamsSchema = z.object({
+  workspaceId: idSchema,
+  endpointId: idSchema,
+});
 const auditQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(100),
 });
+
+function notificationConfigSecret(config: AppConfig): string {
+  if (!config.NOTIFICATION_SIGNING_SECRET) {
+    throw new DomainError(
+      "NOTIFICATION_CONFIG_INVALID",
+      "Outbound notifications are not configured on this server.",
+      { retryable: true },
+    );
+  }
+  return config.NOTIFICATION_SIGNING_SECRET;
+}
+
+function requireWorkspaceMember(
+  principal: Awaited<ReturnType<typeof requireAuthenticated>>,
+  workspaceId: string,
+): void {
+  if (principal.workspaceId !== workspaceId) {
+    throw new DomainError("WORKSPACE_NOT_FOUND", "The workspace is not available.");
+  }
+}
 
 function parseInput<T extends z.ZodType>(schema: T, value: unknown): z.infer<T> {
   const parsed = schema.safeParse(value);
@@ -345,6 +375,174 @@ export function registerAuthRoutes(
     const principal = requireAuthenticated(await resolveRequestAuth(request, store));
     const query = parseInput(auditQuerySchema, request.query);
     return response(request, await store.listAuditEvents(principal.workspaceId, query.limit));
+  });
+
+  app.get("/v1/workspaces/:workspaceId/notification-endpoints", async (request, reply) => {
+    const principal = requireAuthenticated(await resolveRequestAuth(request, store));
+    const { workspaceId } = parseInput(notificationEndpointParamsSchema, request.params);
+    requireWorkspaceMember(principal, workspaceId);
+    if (typeof store.listNotificationEndpoints !== "function") {
+      throw new DomainError(
+        "NOTIFICATION_DELIVERY_UNAVAILABLE",
+        "Notification endpoints are unavailable on this server.",
+        { retryable: true },
+      );
+    }
+    return reply
+      .header("Cache-Control", "private, no-store")
+      .send(response(request, await store.listNotificationEndpoints(workspaceId)));
+  });
+
+  app.post("/v1/workspaces/:workspaceId/notification-endpoints", async (request, reply) => {
+    const auth = await resolveRequestAuth(request, store);
+    const principal = requireSession(auth);
+    requirePrincipalAdmin(principal);
+    verifySessionCsrf(request, config, auth);
+    const { workspaceId } = parseInput(notificationEndpointParamsSchema, request.params);
+    requireWorkspaceMember(principal, workspaceId);
+    const body = parseInput(createNotificationEndpointRequestSchema, request.body);
+    const secret = notificationConfigSecret(config);
+    const url = validateNotificationUrl(body.url, config.APP_ENV === "production");
+    if (typeof store.createNotificationEndpoint !== "function") {
+      throw new DomainError(
+        "NOTIFICATION_DELIVERY_UNAVAILABLE",
+        "Notification endpoints are unavailable on this server.",
+        { retryable: true },
+      );
+    }
+    const endpoint = await store.createNotificationEndpoint({
+      workspaceId,
+      name: body.name,
+      url,
+      eventTypes: body.eventTypes,
+      enabled: body.enabled,
+      createdBy: principal.userId,
+      actorKind: principal.kind,
+    });
+    reply.code(201).header("Cache-Control", "private, no-store");
+    return response(request, {
+      endpoint,
+      signingSecret: deriveNotificationSigningSecret(secret, endpoint.id),
+    });
+  });
+
+  app.patch(
+    "/v1/workspaces/:workspaceId/notification-endpoints/:endpointId",
+    async (request, reply) => {
+      const auth = await resolveRequestAuth(request, store);
+      const principal = requireSession(auth);
+      requirePrincipalAdmin(principal);
+      verifySessionCsrf(request, config, auth);
+      const { workspaceId, endpointId } = parseInput(
+        notificationEndpointItemParamsSchema,
+        request.params,
+      );
+      requireWorkspaceMember(principal, workspaceId);
+      const body = parseInput(updateNotificationEndpointRequestSchema, request.body);
+      const url = body.url
+        ? validateNotificationUrl(body.url, config.APP_ENV === "production")
+        : undefined;
+      if (typeof store.updateNotificationEndpoint !== "function") {
+        throw new DomainError(
+          "NOTIFICATION_DELIVERY_UNAVAILABLE",
+          "Notification endpoints are unavailable on this server.",
+          { retryable: true },
+        );
+      }
+      const endpoint = await store.updateNotificationEndpoint({
+        workspaceId,
+        endpointId,
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(url !== undefined ? { url } : {}),
+        ...(body.eventTypes !== undefined ? { eventTypes: body.eventTypes } : {}),
+        ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+        actorUserId: principal.userId,
+        actorKind: principal.kind,
+      });
+      return reply.header("Cache-Control", "private, no-store").send(response(request, endpoint));
+    },
+  );
+
+  app.delete(
+    "/v1/workspaces/:workspaceId/notification-endpoints/:endpointId",
+    async (request, reply) => {
+      const auth = await resolveRequestAuth(request, store);
+      const principal = requireSession(auth);
+      requirePrincipalAdmin(principal);
+      verifySessionCsrf(request, config, auth);
+      const { workspaceId, endpointId } = parseInput(
+        notificationEndpointItemParamsSchema,
+        request.params,
+      );
+      requireWorkspaceMember(principal, workspaceId);
+      if (typeof store.deleteNotificationEndpoint !== "function") {
+        throw new DomainError(
+          "NOTIFICATION_DELIVERY_UNAVAILABLE",
+          "Notification endpoints are unavailable on this server.",
+          { retryable: true },
+        );
+      }
+      await store.deleteNotificationEndpoint(
+        workspaceId,
+        endpointId,
+        principal.userId,
+        principal.kind,
+      );
+      reply.code(204).send();
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/notification-endpoints/:endpointId/test",
+    async (request, reply) => {
+      const auth = await resolveRequestAuth(request, store);
+      verifySessionCsrf(request, config, auth);
+      const principal = requireAuthenticated(auth);
+      requirePrincipalWrite(principal);
+      const { workspaceId, endpointId } = parseInput(
+        notificationEndpointItemParamsSchema,
+        request.params,
+      );
+      requireWorkspaceMember(principal, workspaceId);
+      notificationConfigSecret(config);
+      if (typeof store.queueNotificationTest !== "function") {
+        throw new DomainError(
+          "NOTIFICATION_DELIVERY_UNAVAILABLE",
+          "Notification delivery is unavailable on this server.",
+          { retryable: true },
+        );
+      }
+      const delivery = await store.queueNotificationTest({
+        workspaceId,
+        endpointId,
+        actorUserId: principal.userId,
+        actorKind: principal.kind,
+        maxAttempts: config.NOTIFICATION_MAX_ATTEMPTS,
+      });
+      reply.code(202).header("Cache-Control", "private, no-store");
+      return response(request, delivery);
+    },
+  );
+
+  app.get("/v1/workspaces/:workspaceId/notification-deliveries", async (request, reply) => {
+    const principal = requireAuthenticated(await resolveRequestAuth(request, store));
+    const { workspaceId } = parseInput(notificationEndpointParamsSchema, request.params);
+    requireWorkspaceMember(principal, workspaceId);
+    const query = parseInput(notificationDeliveryQuerySchema, request.query);
+    if (typeof store.listNotificationDeliveries !== "function") {
+      throw new DomainError(
+        "NOTIFICATION_DELIVERY_UNAVAILABLE",
+        "Notification delivery history is unavailable on this server.",
+        { retryable: true },
+      );
+    }
+    const page = await store.listNotificationDeliveries(workspaceId, {
+      limit: query.limit,
+      ...(query.cursor ? { cursor: query.cursor } : {}),
+      ...(query.endpointId ? { endpointId: query.endpointId } : {}),
+      ...(query.status ? { status: query.status } : {}),
+    });
+    return reply.header("Cache-Control", "private, no-store").send(response(request, page));
   });
 
   app.get("/v1/auth/tokens", async (request) => {

@@ -9,6 +9,7 @@ import type {
   GuardrailProfile,
   GuardrailReport,
   GuardrailReview,
+  GuardrailReviewHistoryPage,
   GuardrailReviewsResponse,
   Snapshot,
 } from "@repovista/contracts";
@@ -246,6 +247,15 @@ export function GuardrailsPanel({
   >({});
   const [reviewLoading, setReviewLoading] = useState<Record<string, boolean>>({});
   const [reviewErrors, setReviewErrors] = useState<Record<string, string>>({});
+  const [openReviewHistories, setOpenReviewHistories] = useState<Record<string, boolean>>({});
+  const [reviewHistories, setReviewHistories] = useState<
+    Record<string, GuardrailReviewHistoryPage>
+  >({});
+  const [reviewHistoryErrors, setReviewHistoryErrors] = useState<Record<string, string>>({});
+  const [reviewHistoryLoading, setReviewHistoryLoading] = useState<Record<string, boolean>>({});
+  const [reviewHistoryLoadingMore, setReviewHistoryLoadingMore] = useState<Record<string, boolean>>(
+    {},
+  );
   const [baselineSnapshotId, setBaselineSnapshotId] = useState("");
   const [comparison, setComparison] = useState<GuardrailComparison | null>(null);
   const [comparisonError, setComparisonError] = useState<string | null>(null);
@@ -279,6 +289,9 @@ export function GuardrailsPanel({
   >({});
   const profileRequest = useRef(0);
   const explanationRequest = useRef(0);
+  const reviewHistoryEpoch = useRef(0);
+  const reviewHistoryContext = useRef("");
+  const reviewHistoryRequests = useRef<Record<string, number>>({});
   const explanationHistoryEpoch = useRef(0);
   const explanationHistoryContext = useRef("");
   const explanationHistoryRequests = useRef<Record<string, number>>({});
@@ -299,6 +312,11 @@ export function GuardrailsPanel({
     setReviewDrafts({});
     setReviewLoading({});
     setReviewErrors({});
+    setOpenReviewHistories({});
+    setReviewHistories({});
+    setReviewHistoryErrors({});
+    setReviewHistoryLoading({});
+    setReviewHistoryLoadingMore({});
     setExplanations({});
     setExplanationErrors({});
     setExplainingFindingId(null);
@@ -312,6 +330,9 @@ export function GuardrailsPanel({
     setExplanationComparisonErrors({});
     setExplanationComparisonLoading({});
     explanationRequest.current += 1;
+    reviewHistoryEpoch.current += 1;
+    reviewHistoryContext.current = currentHistoryContext;
+    reviewHistoryRequests.current = {};
     explanationHistoryEpoch.current += 1;
     explanationHistoryContext.current = currentHistoryContext;
     explanationHistoryRequests.current = {};
@@ -350,6 +371,71 @@ export function GuardrailsPanel({
       active = false;
     };
   }, [currentHistoryContext, session?.authenticated, snapshotId]);
+
+  async function loadReviewHistory(
+    findingId: string,
+    options: { append?: boolean; cursor?: string } = {},
+  ): Promise<void> {
+    if (!session?.authenticated) return;
+    const append = options.append === true;
+    const epoch = reviewHistoryEpoch.current;
+    const context = currentHistoryContext;
+    const requestNumber = (reviewHistoryRequests.current[findingId] ?? 0) + 1;
+    reviewHistoryRequests.current[findingId] = requestNumber;
+    const isCurrent = () =>
+      reviewHistoryEpoch.current === epoch &&
+      reviewHistoryContext.current === context &&
+      reviewHistoryRequests.current[findingId] === requestNumber;
+    setReviewHistoryErrors((current) => ({ ...current, [findingId]: "" }));
+    if (append) {
+      setReviewHistoryLoadingMore((current) => ({ ...current, [findingId]: true }));
+    } else {
+      setReviewHistoryLoading((current) => ({ ...current, [findingId]: true }));
+    }
+    const query = new URLSearchParams({ findingId, limit: "10" });
+    if (options.cursor) query.set("cursor", options.cursor);
+    try {
+      const result = await apiFetch<GuardrailReviewHistoryPage>(
+        `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/reviews/history?${query.toString()}`,
+        { cache: "no-store" },
+      );
+      if (!isCurrent()) return;
+      setReviewHistories((current) => {
+        const previous = append ? (current[findingId]?.entries ?? []) : [];
+        const seen = new Set(previous.map((entry) => entry.id));
+        return {
+          ...current,
+          [findingId]: {
+            ...result,
+            entries: [...previous, ...result.entries.filter((entry) => !seen.has(entry.id))],
+          },
+        };
+      });
+    } catch (cause) {
+      if (!isCurrent()) return;
+      setReviewHistoryErrors((current) => ({
+        ...current,
+        [findingId]: apiErrorMessage(cause, "Unable to load review history."),
+      }));
+    } finally {
+      if (isCurrent()) {
+        if (append) {
+          setReviewHistoryLoadingMore((current) => ({ ...current, [findingId]: false }));
+        } else {
+          setReviewHistoryLoading((current) => ({ ...current, [findingId]: false }));
+        }
+      }
+    }
+  }
+
+  function toggleReviewHistory(findingId: string): void {
+    if (!session?.authenticated) return;
+    const nextOpen = !openReviewHistories[findingId];
+    setOpenReviewHistories((current) => ({ ...current, [findingId]: nextOpen }));
+    if (nextOpen && !reviewHistories[findingId] && !reviewHistoryLoading[findingId]) {
+      void loadReviewHistory(findingId);
+    }
+  }
 
   useEffect(() => {
     const request = ++profileRequest.current;
@@ -1184,6 +1270,85 @@ export function GuardrailsPanel({
                     <div className="guardrail-review-error" role="alert">
                       {reviewErrors[finding.id]}
                     </div>
+                  ) : null}
+                  {session?.authenticated ? (
+                    <>
+                      <button
+                        aria-controls={`guardrail-review-history-${finding.id}`}
+                        aria-expanded={openReviewHistories[finding.id] === true}
+                        onClick={() => toggleReviewHistory(finding.id)}
+                        type="button"
+                      >
+                        <History size={14} /> Review history
+                      </button>
+                      {openReviewHistories[finding.id] ? (
+                        <section
+                          className="guardrail-review-history"
+                          id={`guardrail-review-history-${finding.id}`}
+                          aria-busy={
+                            reviewHistoryLoading[finding.id] === true ||
+                            reviewHistoryLoadingMore[finding.id] === true
+                          }
+                          aria-label={`Review history for ${finding.title}`}
+                        >
+                          {reviewHistoryLoading[finding.id] ? (
+                            <output>
+                              <LoaderCircle className="spin" size={14} /> Loading review history…
+                            </output>
+                          ) : null}
+                          {reviewHistoryErrors[finding.id] ? (
+                            <div className="guardrail-review-error" role="alert">
+                              <span>{reviewHistoryErrors[finding.id]}</span>
+                              <button
+                                onClick={() => void loadReviewHistory(finding.id)}
+                                type="button"
+                              >
+                                Retry
+                              </button>
+                            </div>
+                          ) : null}
+                          {!reviewHistoryLoading[finding.id] &&
+                          reviewHistories[finding.id]?.entries.length === 0 ? (
+                            <p>No review changes recorded for this Finding.</p>
+                          ) : null}
+                          {reviewHistories[finding.id]?.entries.length ? (
+                            <>
+                              <ol>
+                                {reviewHistories[finding.id]?.entries.map((entry) => (
+                                  <li key={entry.id}>
+                                    <strong>
+                                      {entry.fromStatus} → {entry.toStatus}
+                                    </strong>{" "}
+                                    <span>
+                                      note {entry.fromNoteLength} → {entry.toNoteLength}
+                                      {entry.noteChanged ? " · text changed" : ""}
+                                    </span>
+                                    <small>
+                                      {entry.actorLogin ? `@${entry.actorLogin}` : entry.actorKind}{" "}
+                                      · {entry.createdAt}
+                                    </small>
+                                  </li>
+                                ))}
+                              </ol>
+                              {reviewHistories[finding.id]?.nextCursor ? (
+                                <button
+                                  disabled={reviewHistoryLoadingMore[finding.id] === true}
+                                  onClick={() =>
+                                    void loadReviewHistory(finding.id, {
+                                      append: true,
+                                      cursor: reviewHistories[finding.id]?.nextCursor ?? undefined,
+                                    })
+                                  }
+                                  type="button"
+                                >
+                                  {reviewHistoryLoadingMore[finding.id] ? "Loading…" : "Load more"}
+                                </button>
+                              ) : null}
+                            </>
+                          ) : null}
+                        </section>
+                      ) : null}
+                    </>
                   ) : null}
                   {reviews[finding.id]?.reviewer ? (
                     <small>

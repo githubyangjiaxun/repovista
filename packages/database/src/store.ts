@@ -5,6 +5,8 @@ import type {
   EmbeddingIndex,
   EmbeddingProvider,
   Job,
+  NotificationDeliveryStatus,
+  NotificationEventType,
   PullRequestAnalysis,
   PullRequestAnalysisStatus,
   PullRequestFileChange,
@@ -22,9 +24,15 @@ import {
   guardrailExplanationSchema,
   guardrailExplanationSummarySchema,
   guardrailProfileSchema,
+  guardrailReviewHistoryActionSchema,
   guardrailReviewSchema,
   guardrailReviewStatusSchema,
   idSchema,
+  notificationDeliverySchema,
+  notificationDeliveryStatusSchema,
+  notificationEndpointSchema,
+  notificationEventTypeSchema,
+  notificationEventTypesSchema,
   pullRequestAnalysisSchema,
   pullRequestImpactSchema,
   retrievalStatusSchema,
@@ -50,6 +58,7 @@ import type {
   AuditEventRecord,
   ClaimedEmbeddingJob,
   ClaimedIndexJob,
+  ClaimedNotificationDelivery,
   CompletePullRequestAnalysisInput,
   CreateApiTokenInput,
   CreateGuardrailExplanationInput,
@@ -58,6 +67,7 @@ import type {
   CreateGuardrailProfileResult,
   CreateImportInput,
   CreateImportResult,
+  CreateNotificationEndpointInput,
   CreatePullRequestAnalysisInput,
   CreatePullRequestAnalysisResult,
   CreateSessionInput,
@@ -74,15 +84,23 @@ import type {
   GuardrailExplanationPair,
   GuardrailExplanationRecord,
   GuardrailProfileRecord,
+  GuardrailReviewHistoryPage,
+  GuardrailReviewHistoryRecord,
   GuardrailReviewRecord,
   IncrementalIndexBase,
   InstallationState,
   JobEventRecord,
   ListGuardrailExplanationHistoryOptions,
+  ListGuardrailReviewHistoryOptions,
+  ListNotificationDeliveriesOptions,
   ListSnapshotFilesOptions,
+  NotificationDeliveryPage,
+  NotificationDeliveryRecord,
+  NotificationEndpointRecord,
   PullRequestAnalysisCursor,
   PullRequestAnalysisJob,
   PullRequestAnalysisPage,
+  QueueNotificationTestInput,
   RepositoryAccess,
   RetrievalSearchRecord,
   RetrievalStatusOptions,
@@ -98,6 +116,7 @@ import type {
   SnapshotGraphData,
   SymbolEdgeRecord,
   SymbolRecord,
+  UpdateNotificationEndpointInput,
   UpsertGuardrailReviewInput,
   WorkspaceMemberRecord,
 } from "./types.js";
@@ -195,6 +214,82 @@ interface GuardrailReviewRow {
   reviewer_display_name: string | null;
   created_at: Date | string;
   updated_at: Date | string;
+}
+
+interface GuardrailReviewHistoryRow {
+  id: string | number;
+  snapshot_id: string;
+  finding_id: string;
+  subject_key: string;
+  action: string;
+  from_status: string;
+  to_status: string;
+  from_note_length: number;
+  to_note_length: number;
+  note_changed: boolean;
+  actor_kind: "anonymous" | "session" | "token" | "github" | "system";
+  actor_login: string | null;
+  created_at: Date | string;
+}
+
+interface NotificationEndpointRow {
+  id: string;
+  workspace_id: string;
+  name: string;
+  url: string;
+  event_types: unknown;
+  enabled: boolean;
+  created_by: string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+  last_delivery_at: Date | string | null;
+  last_delivery_status: "queued" | "running" | "succeeded" | "failed" | null;
+}
+
+interface NotificationDeliveryRow {
+  id: string;
+  workspace_id: string;
+  endpoint_id: string;
+  event_type: "guardrail_review.updated" | "guardrail_review.cleared";
+  event_key: string;
+  payload_json: Record<string, unknown>;
+  status: "queued" | "running" | "succeeded" | "failed";
+  attempt_count: number;
+  max_attempts: number;
+  next_attempt_at: Date | string | null;
+  last_status_code: number | null;
+  last_error: string | null;
+  delivered_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface ClaimedNotificationDeliveryRow {
+  id: string;
+  workspace_id: string;
+  endpoint_id: string;
+  url: string;
+  event_type: NotificationEventType;
+  event_key: string;
+  payload_json: Record<string, unknown>;
+  attempt_count: number;
+  max_attempts: number;
+}
+
+function safeNoteLength(value: unknown): number {
+  const number = typeof value === "number" ? value : Number(value ?? 0);
+  return Number.isFinite(number) && number >= 0 ? Math.min(2_000, Math.floor(number)) : 0;
+}
+
+function notificationAttemptLimit(value: unknown, fallback = 5): number {
+  const number = typeof value === "number" ? value : Number(value ?? fallback);
+  if (!Number.isInteger(number) || number < 1 || number > 20) {
+    throw new DomainError(
+      "NOTIFICATION_DELIVERY_CONFIG_INVALID",
+      "Notification delivery attempts must be an integer from 1 to 20.",
+    );
+  }
+  return number;
 }
 
 interface JobRow {
@@ -469,6 +564,59 @@ function mapGuardrailReview(row: GuardrailReviewRow): GuardrailReviewRecord {
   });
 }
 
+function mapGuardrailReviewHistory(row: GuardrailReviewHistoryRow): GuardrailReviewHistoryRecord {
+  return {
+    id: Number(row.id),
+    snapshotId: row.snapshot_id,
+    findingId: row.finding_id,
+    subjectKey: row.subject_key,
+    action: guardrailReviewHistoryActionSchema.parse(row.action),
+    fromStatus: guardrailReviewStatusSchema.parse(row.from_status),
+    toStatus: guardrailReviewStatusSchema.parse(row.to_status),
+    fromNoteLength: safeNoteLength(row.from_note_length),
+    toNoteLength: safeNoteLength(row.to_note_length),
+    noteChanged: Boolean(row.note_changed),
+    actorKind: row.actor_kind,
+    actorLogin: row.actor_login,
+    createdAt: iso(row.created_at),
+  };
+}
+
+function mapNotificationEndpoint(row: NotificationEndpointRow): NotificationEndpointRecord {
+  return notificationEndpointSchema.parse({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    name: row.name,
+    url: row.url,
+    eventTypes: notificationEventTypeSchema.array().parse(row.event_types),
+    enabled: row.enabled,
+    createdBy: row.created_by,
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+    lastDeliveryAt: nullableIso(row.last_delivery_at),
+    lastDeliveryStatus: row.last_delivery_status,
+  });
+}
+
+function mapNotificationDelivery(row: NotificationDeliveryRow): NotificationDeliveryRecord {
+  return notificationDeliverySchema.parse({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    endpointId: row.endpoint_id,
+    eventType: row.event_type,
+    eventKey: row.event_key,
+    status: notificationDeliveryStatusSchema.parse(row.status),
+    attemptCount: Number(row.attempt_count),
+    maxAttempts: Number(row.max_attempts),
+    nextAttemptAt: nullableIso(row.next_attempt_at),
+    lastStatusCode: row.last_status_code === null ? null : Number(row.last_status_code),
+    lastError: row.last_error,
+    deliveredAt: nullableIso(row.delivered_at),
+    createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
+  });
+}
+
 interface GuardrailExplanationHistoryCursor {
   createdAt: string;
   id: string;
@@ -508,6 +656,67 @@ function decodeGuardrailExplanationCursor(value: string): GuardrailExplanationHi
 }
 
 function encodeGuardrailExplanationCursor(cursor: GuardrailExplanationHistoryCursor): string {
+  return Buffer.from(JSON.stringify({ v: 1, ...cursor }), "utf8").toString("base64url");
+}
+
+interface AuditIdCursor {
+  id: number;
+}
+
+function decodeAuditIdCursor(value: string): AuditIdCursor {
+  if (value.length > 1_000 || !/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw new DomainError("PAGINATION_CURSOR_INVALID", "The pagination cursor is invalid.");
+  }
+  try {
+    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as unknown;
+    if (typeof decoded !== "object" || decoded === null) throw new Error("invalid");
+    const id = (decoded as Record<string, unknown>).id;
+    if (
+      (decoded as Record<string, unknown>).v !== 1 ||
+      typeof id !== "number" ||
+      !Number.isSafeInteger(id) ||
+      id < 1
+    ) {
+      throw new Error("invalid");
+    }
+    return { id };
+  } catch {
+    throw new DomainError("PAGINATION_CURSOR_INVALID", "The pagination cursor is invalid.");
+  }
+}
+
+function encodeAuditIdCursor(cursor: AuditIdCursor): string {
+  return Buffer.from(JSON.stringify({ v: 1, ...cursor }), "utf8").toString("base64url");
+}
+
+interface NotificationDeliveryCursor {
+  createdAt: string;
+  id: string;
+}
+
+function decodeNotificationDeliveryCursor(value: string): NotificationDeliveryCursor {
+  if (value.length > 1_000 || !/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw new DomainError("PAGINATION_CURSOR_INVALID", "The pagination cursor is invalid.");
+  }
+  try {
+    const decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as unknown;
+    if (typeof decoded !== "object" || decoded === null) throw new Error("invalid");
+    const cursor = decoded as Record<string, unknown>;
+    if (
+      cursor.v !== 1 ||
+      typeof cursor.createdAt !== "string" ||
+      !Number.isFinite(Date.parse(cursor.createdAt)) ||
+      !idSchema.safeParse(cursor.id).success
+    ) {
+      throw new Error("invalid");
+    }
+    return { createdAt: new Date(cursor.createdAt).toISOString(), id: cursor.id as string };
+  } catch {
+    throw new DomainError("PAGINATION_CURSOR_INVALID", "The pagination cursor is invalid.");
+  }
+}
+
+function encodeNotificationDeliveryCursor(cursor: NotificationDeliveryCursor): string {
   return Buffer.from(JSON.stringify({ v: 1, ...cursor }), "utf8").toString("base64url");
 }
 
@@ -1880,8 +2089,13 @@ export class RepoVistaStore {
           "The requested snapshot does not exist in this Workspace.",
         );
       }
-      const previous = await client.query<{ status: string; note_length: number }>(
-        "SELECT status, length(note) AS note_length FROM guardrail_reviews " +
+      const previous = await client.query<{
+        status: string;
+        note: string;
+        note_length: number;
+        subject_key: string;
+      }>(
+        "SELECT status, note, length(note) AS note_length, subject_key FROM guardrail_reviews " +
           "WHERE workspace_id = $1 AND snapshot_id = $2 AND finding_id = $3 FOR UPDATE",
         [input.workspaceId, input.snapshotId, input.findingId],
       );
@@ -1930,7 +2144,11 @@ export class RepoVistaStore {
           "The Guardrail review was not readable after saving.",
         );
       }
-      await this.appendAuditEvent(client, {
+      const fromStatus = previous.rows[0]?.status ?? "unreviewed";
+      const fromNoteLength = Number(previous.rows[0]?.note_length ?? 0);
+      const toNoteLength = Array.from(note).length;
+      const noteChanged = previous.rows[0] ? previous.rows[0].note !== note : toNoteLength > 0;
+      const auditId = await this.appendAuditEvent(client, {
         workspaceId: input.workspaceId,
         actorUserId: input.reviewedBy,
         actorKind: input.actorKind,
@@ -1940,11 +2158,28 @@ export class RepoVistaStore {
         metadata: {
           snapshotId: input.snapshotId,
           subjectKey: input.subjectKey,
-          fromStatus: previous.rows[0]?.status ?? "unreviewed",
+          fromStatus,
           toStatus: status,
-          previousNoteLength: Number(previous.rows[0]?.note_length ?? 0),
-          noteLength: Array.from(note).length,
+          previousNoteLength: fromNoteLength,
+          noteLength: toNoteLength,
+          noteChanged,
         },
+      });
+      await this.enqueueReviewNotification(client, {
+        auditId,
+        workspaceId: input.workspaceId,
+        snapshotId: input.snapshotId,
+        findingId: input.findingId,
+        subjectKey: input.subjectKey,
+        eventType: "guardrail_review.updated",
+        fromStatus,
+        toStatus: status,
+        fromNoteLength,
+        toNoteLength,
+        noteChanged,
+        actorKind: input.actorKind,
+        actorUserId: input.reviewedBy,
+        maxAttempts: input.notificationMaxAttempts,
       });
       return mapGuardrailReview(review);
     });
@@ -1963,14 +2198,19 @@ export class RepoVistaStore {
           "The requested snapshot does not exist in this Workspace.",
         );
       }
-      const deleted = await client.query<{ status: string; note_length: number }>(
+      const deleted = await client.query<{
+        status: string;
+        note: string;
+        note_length: number;
+        subject_key: string;
+      }>(
         "DELETE FROM guardrail_reviews WHERE workspace_id = $1 AND snapshot_id = $2 " +
-          "AND finding_id = $3 RETURNING status, length(note) AS note_length",
+          "AND finding_id = $3 RETURNING status, note, subject_key, length(note) AS note_length",
         [input.workspaceId, input.snapshotId, input.findingId],
       );
       const previous = deleted.rows[0];
       if (!previous) return false;
-      await this.appendAuditEvent(client, {
+      const auditId = await this.appendAuditEvent(client, {
         workspaceId: input.workspaceId,
         actorUserId: input.actorUserId,
         actorKind: input.actorKind,
@@ -1979,12 +2219,500 @@ export class RepoVistaStore {
         resourceId: input.findingId,
         metadata: {
           snapshotId: input.snapshotId,
+          subjectKey: previous.subject_key,
           fromStatus: previous.status,
           toStatus: "unreviewed",
           previousNoteLength: Number(previous.note_length ?? 0),
+          noteLength: 0,
+          noteChanged: Boolean(previous.note),
         },
       });
+      await this.enqueueReviewNotification(client, {
+        auditId,
+        workspaceId: input.workspaceId,
+        snapshotId: input.snapshotId,
+        findingId: input.findingId,
+        subjectKey: previous.subject_key,
+        eventType: "guardrail_review.cleared",
+        fromStatus: previous.status,
+        toStatus: "unreviewed",
+        fromNoteLength: Number(previous.note_length ?? 0),
+        toNoteLength: 0,
+        noteChanged: Boolean(previous.note),
+        actorKind: input.actorKind,
+        actorUserId: input.actorUserId,
+        maxAttempts: input.notificationMaxAttempts,
+      });
       return true;
+    });
+  }
+
+  private async enqueueReviewNotification(
+    client: DatabaseClient,
+    input: {
+      auditId: number;
+      workspaceId: string;
+      snapshotId: string;
+      findingId: string;
+      subjectKey: string;
+      eventType: NotificationEventType;
+      fromStatus: string;
+      toStatus: string;
+      fromNoteLength: number;
+      toNoteLength: number;
+      noteChanged: boolean;
+      actorKind: Principal["kind"];
+      actorUserId: string | null;
+      maxAttempts?: number;
+    },
+  ): Promise<void> {
+    const endpoints = await client.query<{
+      id: string;
+      event_types: unknown;
+    }>(
+      "SELECT id, event_types FROM workspace_notification_endpoints " +
+        "WHERE workspace_id = $1 AND enabled = true AND event_types @> $2::jsonb",
+      [input.workspaceId, JSON.stringify([input.eventType])],
+    );
+    if (endpoints.rows.length === 0) return;
+    const payload = {
+      schemaVersion: "repovista.notification.v1",
+      eventId: String(input.auditId),
+      eventType: input.eventType,
+      workspaceId: input.workspaceId,
+      snapshotId: input.snapshotId,
+      findingId: input.findingId,
+      subjectKey: input.subjectKey,
+      transition: {
+        fromStatus: input.fromStatus,
+        toStatus: input.toStatus,
+        fromNoteLength: safeNoteLength(input.fromNoteLength),
+        toNoteLength: safeNoteLength(input.toNoteLength),
+        noteChanged: input.noteChanged,
+      },
+      actor: { kind: input.actorKind, userId: input.actorUserId },
+    } satisfies Record<string, unknown>;
+    for (const endpoint of endpoints.rows) {
+      await client.query(
+        "INSERT INTO notification_deliveries " +
+          "(id, workspace_id, endpoint_id, event_type, event_key, payload_json, max_attempts) " +
+          "VALUES ($1, $2, $3, $4, $5, $6::jsonb, COALESCE($7, 5)) ON CONFLICT (endpoint_id, event_key) DO NOTHING",
+        [
+          createId(),
+          input.workspaceId,
+          endpoint.id,
+          input.eventType,
+          String(input.auditId),
+          JSON.stringify(payload),
+          input.maxAttempts === undefined ? null : notificationAttemptLimit(input.maxAttempts),
+        ],
+      );
+    }
+  }
+
+  async listGuardrailReviewHistory(
+    workspaceId: string,
+    snapshotId: string,
+    options: ListGuardrailReviewHistoryOptions,
+  ): Promise<GuardrailReviewHistoryPage> {
+    const limit = Math.min(50, Math.max(1, Math.floor(options.limit)));
+    const cursor = options.cursor ? decodeAuditIdCursor(options.cursor) : null;
+    const values: unknown[] = [workspaceId, snapshotId];
+    const predicates = [
+      "audit.workspace_id = $1",
+      "audit.action IN ('guardrail_review.upsert', 'guardrail_review.clear')",
+      "audit.resource_type = 'guardrail_review'",
+      "audit.metadata_json->>'snapshotId' = $2",
+      "audit.metadata_json->>'subjectKey' ~ '^sha256:[a-f0-9]{64}$'",
+    ];
+    if (options.findingId) {
+      values.push(options.findingId);
+      predicates.push(`audit.resource_id = $${values.length}`);
+    }
+    if (options.subjectKey) {
+      if (!/^sha256:[a-f0-9]{64}$/.test(options.subjectKey)) {
+        throw new DomainError(
+          "PAGINATION_CURSOR_INVALID",
+          "The Guardrail review subject key is invalid.",
+        );
+      }
+      values.push(options.subjectKey);
+      predicates.push(`audit.metadata_json->>'subjectKey' = $${values.length}`);
+    }
+    if (options.status) {
+      values.push(options.status);
+      predicates.push(`audit.metadata_json->>'toStatus' = $${values.length}`);
+    }
+    if (cursor) {
+      values.push(cursor.id);
+      predicates.push(`audit.id < $${values.length}`);
+    }
+    values.push(limit + 1);
+    const result = await this.pool.query<GuardrailReviewHistoryRow>(
+      "SELECT audit.id, audit.metadata_json->>'snapshotId' AS snapshot_id, audit.resource_id AS finding_id, " +
+        "audit.metadata_json->>'subjectKey' AS subject_key, audit.action, " +
+        "CASE WHEN audit.metadata_json->>'fromStatus' IN " +
+        "('unreviewed', 'acknowledged', 'accepted_risk', 'false_positive') " +
+        "THEN audit.metadata_json->>'fromStatus' ELSE 'unreviewed' END AS from_status, " +
+        "CASE WHEN audit.metadata_json->>'toStatus' IN " +
+        "('unreviewed', 'acknowledged', 'accepted_risk', 'false_positive') " +
+        "THEN audit.metadata_json->>'toStatus' ELSE 'unreviewed' END AS to_status, " +
+        "CASE WHEN audit.metadata_json->>'previousNoteLength' ~ '^[0-9]{1,4}$' " +
+        "THEN (audit.metadata_json->>'previousNoteLength')::integer ELSE 0 END AS from_note_length, " +
+        "CASE WHEN audit.metadata_json->>'noteLength' ~ '^[0-9]{1,4}$' " +
+        "THEN (audit.metadata_json->>'noteLength')::integer ELSE 0 END AS to_note_length, " +
+        "CASE WHEN lower(audit.metadata_json->>'noteChanged') IN ('true', 'false') " +
+        "THEN (audit.metadata_json->>'noteChanged')::boolean ELSE false END AS note_changed, " +
+        "audit.actor_kind, identity.login::text AS actor_login, audit.created_at " +
+        "FROM audit_events audit " +
+        "LEFT JOIN LATERAL (SELECT identity.login::text AS login FROM user_identities identity " +
+        "WHERE identity.user_id = audit.actor_user_id AND identity.provider = 'github' " +
+        "ORDER BY identity.updated_at DESC, identity.id DESC LIMIT 1) identity ON true " +
+        `WHERE ${predicates.join(" AND ")} ORDER BY audit.id DESC LIMIT $${values.length}`,
+      values,
+    );
+    const rows = result.rows.slice(0, limit);
+    return {
+      entries: rows.map(mapGuardrailReviewHistory),
+      nextCursor:
+        result.rows.length > limit && rows.at(-1)
+          ? encodeAuditIdCursor({ id: Number(rows.at(-1)?.id) })
+          : null,
+    };
+  }
+
+  async listNotificationEndpoints(workspaceId: string): Promise<NotificationEndpointRecord[]> {
+    const result = await this.pool.query<NotificationEndpointRow>(
+      "SELECT e.id, e.workspace_id, e.name, e.url, e.event_types, e.enabled, e.created_by, " +
+        "e.created_at, e.updated_at, latest.created_at AS last_delivery_at, latest.status AS last_delivery_status " +
+        "FROM workspace_notification_endpoints e " +
+        "LEFT JOIN LATERAL (SELECT d.created_at, d.status FROM notification_deliveries d " +
+        "WHERE d.endpoint_id = e.id ORDER BY d.created_at DESC, d.id DESC LIMIT 1) latest ON true " +
+        "WHERE e.workspace_id = $1 ORDER BY e.updated_at DESC, e.id DESC",
+      [workspaceId],
+    );
+    return result.rows.map(mapNotificationEndpoint);
+  }
+
+  async getNotificationEndpoint(
+    workspaceId: string,
+    endpointId: string,
+  ): Promise<NotificationEndpointRecord | null> {
+    const result = await this.pool.query<NotificationEndpointRow>(
+      "SELECT e.id, e.workspace_id, e.name, e.url, e.event_types, e.enabled, e.created_by, " +
+        "e.created_at, e.updated_at, latest.created_at AS last_delivery_at, latest.status AS last_delivery_status " +
+        "FROM workspace_notification_endpoints e " +
+        "LEFT JOIN LATERAL (SELECT d.created_at, d.status FROM notification_deliveries d " +
+        "WHERE d.endpoint_id = e.id ORDER BY d.created_at DESC, d.id DESC LIMIT 1) latest ON true " +
+        "WHERE e.workspace_id = $1 AND e.id = $2",
+      [workspaceId, endpointId],
+    );
+    return result.rows[0] ? mapNotificationEndpoint(result.rows[0]) : null;
+  }
+
+  async createNotificationEndpoint(
+    input: CreateNotificationEndpointInput,
+  ): Promise<NotificationEndpointRecord> {
+    const endpointId = createId();
+    const eventTypes = notificationEventTypesSchema.parse(input.eventTypes);
+    const result = await withTransaction(this.pool, async (client) => {
+      const inserted = await client.query<NotificationEndpointRow>(
+        "INSERT INTO workspace_notification_endpoints " +
+          "(id, workspace_id, name, url, event_types, enabled, created_by) " +
+          "VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7) " +
+          "RETURNING id, workspace_id, name, url, event_types, enabled, created_by, created_at, updated_at, " +
+          "NULL::timestamptz AS last_delivery_at, NULL::text AS last_delivery_status",
+        [
+          endpointId,
+          input.workspaceId,
+          input.name.trim(),
+          input.url,
+          JSON.stringify(eventTypes),
+          input.enabled,
+          input.createdBy,
+        ],
+      );
+      const row = inserted.rows[0];
+      if (!row)
+        throw new DomainError(
+          "NOTIFICATION_ENDPOINT_CREATE_FAILED",
+          "The notification endpoint was not created.",
+        );
+      await this.appendAuditEvent(client, {
+        workspaceId: input.workspaceId,
+        actorUserId: input.createdBy,
+        actorKind: input.actorKind,
+        action: "notification_endpoint.create",
+        resourceType: "notification_endpoint",
+        resourceId: endpointId,
+        metadata: { eventTypes, enabled: input.enabled },
+      });
+      return mapNotificationEndpoint(row);
+    });
+    return result;
+  }
+
+  async updateNotificationEndpoint(
+    input: UpdateNotificationEndpointInput,
+  ): Promise<NotificationEndpointRecord> {
+    const eventTypes = input.eventTypes
+      ? notificationEventTypesSchema.parse(input.eventTypes)
+      : null;
+    return withTransaction(this.pool, async (client) => {
+      const updated = await client.query<NotificationEndpointRow>(
+        "UPDATE workspace_notification_endpoints SET name = COALESCE($3, name), url = COALESCE($4, url), " +
+          "event_types = COALESCE($5::jsonb, event_types), enabled = COALESCE($6, enabled), updated_at = now() " +
+          "WHERE workspace_id = $1 AND id = $2 " +
+          "RETURNING id, workspace_id, name, url, event_types, enabled, created_by, created_at, updated_at, " +
+          "(SELECT max(d.created_at) FROM notification_deliveries d WHERE d.endpoint_id = id) AS last_delivery_at, " +
+          "(SELECT d.status FROM notification_deliveries d WHERE d.endpoint_id = id ORDER BY d.created_at DESC, d.id DESC LIMIT 1) AS last_delivery_status",
+        [
+          input.workspaceId,
+          input.endpointId,
+          input.name?.trim() ?? null,
+          input.url ?? null,
+          eventTypes ? JSON.stringify(eventTypes) : null,
+          input.enabled ?? null,
+        ],
+      );
+      const row = updated.rows[0];
+      if (!row)
+        throw new DomainError(
+          "NOTIFICATION_ENDPOINT_NOT_FOUND",
+          "The notification endpoint does not exist.",
+        );
+      await this.appendAuditEvent(client, {
+        workspaceId: input.workspaceId,
+        actorUserId: input.actorUserId,
+        actorKind: input.actorKind,
+        action: "notification_endpoint.update",
+        resourceType: "notification_endpoint",
+        resourceId: input.endpointId,
+        metadata: {
+          fields: Object.keys(input).filter(
+            (key) => !["workspaceId", "endpointId", "actorUserId", "actorKind"].includes(key),
+          ),
+        },
+      });
+      return mapNotificationEndpoint(row);
+    });
+  }
+
+  async deleteNotificationEndpoint(
+    workspaceId: string,
+    endpointId: string,
+    actorUserId: string,
+    actorKind: Principal["kind"],
+  ): Promise<void> {
+    await withTransaction(this.pool, async (client) => {
+      const deleted = await client.query<{ id: string }>(
+        "DELETE FROM workspace_notification_endpoints WHERE workspace_id = $1 AND id = $2 RETURNING id",
+        [workspaceId, endpointId],
+      );
+      if (!deleted.rows[0])
+        throw new DomainError(
+          "NOTIFICATION_ENDPOINT_NOT_FOUND",
+          "The notification endpoint does not exist.",
+        );
+      await this.appendAuditEvent(client, {
+        workspaceId,
+        actorUserId,
+        actorKind,
+        action: "notification_endpoint.delete",
+        resourceType: "notification_endpoint",
+        resourceId: endpointId,
+      });
+    });
+  }
+
+  async listNotificationDeliveries(
+    workspaceId: string,
+    options: ListNotificationDeliveriesOptions,
+  ): Promise<NotificationDeliveryPage> {
+    const limit = Math.min(50, Math.max(1, Math.floor(options.limit)));
+    const cursor = options.cursor ? decodeNotificationDeliveryCursor(options.cursor) : null;
+    const values: unknown[] = [workspaceId];
+    const predicates = ["d.workspace_id = $1"];
+    if (options.endpointId) {
+      values.push(options.endpointId);
+      predicates.push(`d.endpoint_id = $${values.length}`);
+    }
+    if (options.status) {
+      values.push(options.status);
+      predicates.push(`d.status = $${values.length}`);
+    }
+    if (cursor) {
+      values.push(cursor.createdAt, cursor.id);
+      predicates.push(`(d.created_at, d.id) < ($${values.length - 1}, $${values.length})`);
+    }
+    values.push(limit + 1);
+    const result = await this.pool.query<NotificationDeliveryRow>(
+      "SELECT d.id, d.workspace_id, d.endpoint_id, d.event_type, d.event_key, d.payload_json, d.status, " +
+        "d.attempt_count, d.max_attempts, d.next_attempt_at, d.last_status_code, d.last_error, d.delivered_at, " +
+        "d.created_at, d.updated_at FROM notification_deliveries d " +
+        `WHERE ${predicates.join(" AND ")} ORDER BY d.created_at DESC, d.id DESC LIMIT $${values.length}`,
+      values,
+    );
+    const rows = result.rows.slice(0, limit);
+    return {
+      deliveries: rows.map(mapNotificationDelivery),
+      nextCursor:
+        result.rows.length > limit && rows.at(-1)
+          ? encodeNotificationDeliveryCursor({
+              createdAt: iso(rows.at(-1)?.created_at as Date | string),
+              id: rows.at(-1)?.id as string,
+            })
+          : null,
+    };
+  }
+
+  async queueNotificationTest(
+    input: QueueNotificationTestInput,
+  ): Promise<NotificationDeliveryRecord> {
+    return withTransaction(this.pool, async (client) => {
+      const endpoint = await client.query<{ id: string; url: string; enabled: boolean }>(
+        "SELECT id, url, enabled FROM workspace_notification_endpoints WHERE workspace_id = $1 AND id = $2 FOR SHARE",
+        [input.workspaceId, input.endpointId],
+      );
+      if (!endpoint.rows[0])
+        throw new DomainError(
+          "NOTIFICATION_ENDPOINT_NOT_FOUND",
+          "The notification endpoint does not exist.",
+        );
+      const eventKey = `test:${createId()}`;
+      const payload = {
+        schemaVersion: "repovista.notification.v1",
+        eventId: eventKey,
+        eventType: "guardrail_review.updated",
+        test: true,
+        workspaceId: input.workspaceId,
+      };
+      const inserted = await client.query<NotificationDeliveryRow>(
+        "INSERT INTO notification_deliveries (id, workspace_id, endpoint_id, event_type, event_key, payload_json, max_attempts) " +
+          "VALUES ($1, $2, $3, 'guardrail_review.updated', $4, $5::jsonb, $6) RETURNING id, workspace_id, endpoint_id, event_type, event_key, payload_json, status, attempt_count, max_attempts, next_attempt_at, last_status_code, last_error, delivered_at, created_at, updated_at",
+        [
+          createId(),
+          input.workspaceId,
+          input.endpointId,
+          eventKey,
+          JSON.stringify(payload),
+          notificationAttemptLimit(input.maxAttempts),
+        ],
+      );
+      const row = inserted.rows[0];
+      if (!row)
+        throw new DomainError(
+          "NOTIFICATION_DELIVERY_CREATE_FAILED",
+          "The test notification was not queued.",
+        );
+      await this.appendAuditEvent(client, {
+        workspaceId: input.workspaceId,
+        actorUserId: input.actorUserId,
+        actorKind: input.actorKind,
+        action: "notification_delivery.test",
+        resourceType: "notification_endpoint",
+        resourceId: input.endpointId,
+      });
+      return mapNotificationDelivery(row);
+    });
+  }
+
+  async claimNotificationDelivery(
+    workerId: string,
+    leaseSeconds: number,
+  ): Promise<ClaimedNotificationDelivery | null> {
+    return withTransaction(this.pool, async (client) => {
+      const result = await client.query<ClaimedNotificationDeliveryRow>(
+        "WITH candidate AS (SELECT d.id FROM notification_deliveries d " +
+          "JOIN workspace_notification_endpoints e ON e.workspace_id = d.workspace_id AND e.id = d.endpoint_id " +
+          "WHERE e.enabled AND d.attempt_count < d.max_attempts AND ((d.status = 'queued' AND d.next_attempt_at <= now()) OR " +
+          "(d.status = 'running' AND d.lease_expires_at <= now())) " +
+          "ORDER BY d.next_attempt_at, d.created_at, d.id FOR UPDATE OF d SKIP LOCKED LIMIT 1) " +
+          "UPDATE notification_deliveries d SET status = 'running', attempt_count = d.attempt_count + 1, " +
+          "lease_owner = $1, lease_expires_at = now() + ($2::integer * interval '1 second'), updated_at = now() " +
+          "FROM candidate c, workspace_notification_endpoints e " +
+          "WHERE d.id = c.id AND e.workspace_id = d.workspace_id AND e.id = d.endpoint_id " +
+          "RETURNING d.id, d.workspace_id, d.endpoint_id, e.url, d.event_type, d.event_key, " +
+          "d.payload_json, d.attempt_count, d.max_attempts",
+        [workerId, leaseSeconds],
+      );
+      const row = result.rows[0];
+      if (!row) return null;
+      return {
+        id: row.id,
+        workspaceId: row.workspace_id,
+        endpointId: row.endpoint_id,
+        url: row.url,
+        eventType: row.event_type,
+        eventKey: row.event_key,
+        payload: row.payload_json,
+        attemptCount: Number(row.attempt_count),
+        maxAttempts: Number(row.max_attempts),
+      };
+    });
+  }
+
+  async heartbeatNotificationDelivery(
+    id: string,
+    workerId: string,
+    leaseSeconds: number,
+  ): Promise<boolean> {
+    const result = await this.pool.query(
+      "UPDATE notification_deliveries SET lease_expires_at = now() + ($3::integer * interval '1 second'), updated_at = now() " +
+        "WHERE id = $1 AND lease_owner = $2 AND status = 'running'",
+      [id, workerId, leaseSeconds],
+    );
+    return result.rowCount === 1;
+  }
+
+  async completeNotificationDelivery(
+    id: string,
+    workerId: string,
+    statusCode: number,
+  ): Promise<boolean> {
+    const result = await this.pool.query(
+      "UPDATE notification_deliveries SET status = 'succeeded', delivered_at = now(), lease_owner = NULL, " +
+        "lease_expires_at = NULL, last_status_code = $3, last_error = NULL, updated_at = now() " +
+        "WHERE id = $1 AND lease_owner = $2 AND status = 'running'",
+      [id, workerId, statusCode],
+    );
+    return result.rowCount === 1;
+  }
+
+  async failNotificationDelivery(
+    input: import("./types.js").FailNotificationDeliveryInput,
+  ): Promise<NotificationDeliveryStatus> {
+    return withTransaction(this.pool, async (client) => {
+      const current = await client.query<{ attempt_count: number; max_attempts: number }>(
+        "SELECT attempt_count, max_attempts FROM notification_deliveries WHERE id = $1 AND lease_owner = $2 AND status = 'running' FOR UPDATE",
+        [input.id, input.workerId],
+      );
+      const row = current.rows[0];
+      if (!row)
+        throw new DomainError(
+          "NOTIFICATION_DELIVERY_LEASE_LOST",
+          "The notification delivery lease is no longer owned.",
+          { retryable: true },
+        );
+      const retry = input.retryable && Number(row.attempt_count) < Number(row.max_attempts);
+      const status = retry ? "queued" : "failed";
+      const nextAttempt = retry
+        ? new Date(Date.now() + 1_000 * 2 ** Math.min(10, Number(row.attempt_count) - 1))
+        : null;
+      await client.query(
+        "UPDATE notification_deliveries SET status = $3, next_attempt_at = COALESCE($4, next_attempt_at), " +
+          "lease_owner = NULL, lease_expires_at = NULL, last_status_code = $5, last_error = $6, updated_at = now() " +
+          "WHERE id = $1 AND lease_owner = $2",
+        [
+          input.id,
+          input.workerId,
+          status,
+          nextAttempt,
+          input.statusCode,
+          input.error.slice(0, 500),
+        ],
+      );
+      return status;
     });
   }
 
@@ -5983,10 +6711,10 @@ export class RepoVistaStore {
   private async appendAuditEvent(
     client: Pick<DatabaseClient, "query"> | Pick<DatabasePool, "query">,
     input: AuditEventInput,
-  ): Promise<void> {
-    await client.query(
+  ): Promise<number> {
+    const result = await client.query<{ id: string | number }>(
       "INSERT INTO audit_events (workspace_id, actor_user_id, actor_kind, action, resource_type, resource_id, metadata_json) " +
-        "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)",
+        "VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb) RETURNING id",
       [
         input.workspaceId,
         input.actorUserId,
@@ -5997,6 +6725,11 @@ export class RepoVistaStore {
         JSON.stringify(input.metadata ?? {}),
       ],
     );
+    const id = result.rows[0]?.id;
+    if (id === undefined) {
+      throw new DomainError("AUDIT_EVENT_CREATE_FAILED", "The audit event was not recorded.");
+    }
+    return Number(id);
   }
 
   private async appendJobEvent(

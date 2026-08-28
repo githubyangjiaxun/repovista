@@ -74,6 +74,9 @@ const envSchema = z.object({
     .positive()
     .max(10_485_760)
     .default(1_048_576),
+  NOTIFICATION_SIGNING_SECRET: optionalSecret,
+  NOTIFICATION_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(10_000),
+  NOTIFICATION_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
   RUN_MIGRATIONS_ON_START: booleanFromString,
   DEMO_SEED_ENABLED: booleanFromString,
 });

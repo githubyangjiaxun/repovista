@@ -541,6 +541,114 @@ export interface GuardrailExplanationPair {
 
 export type GuardrailReviewRecord = GuardrailReview;
 
+export type GuardrailReviewHistoryRecord =
+  import("@repovista/contracts").GuardrailReviewHistoryEntry;
+
+export interface ListGuardrailReviewHistoryOptions {
+  cursor?: string;
+  findingId?: string;
+  limit: number;
+  subjectKey?: string;
+  status?: GuardrailReviewStatus;
+}
+
+export interface GuardrailReviewHistoryPage {
+  entries: GuardrailReviewHistoryRecord[];
+  nextCursor: string | null;
+}
+
+export interface NotificationEndpointRecord {
+  id: string;
+  workspaceId: string;
+  name: string;
+  url: string;
+  eventTypes: import("@repovista/contracts").NotificationEventType[];
+  enabled: boolean;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastDeliveryAt: string | null;
+  lastDeliveryStatus: import("@repovista/contracts").NotificationDeliveryStatus | null;
+}
+
+export interface CreateNotificationEndpointInput {
+  workspaceId: string;
+  name: string;
+  url: string;
+  eventTypes: import("@repovista/contracts").NotificationEventType[];
+  enabled: boolean;
+  createdBy: string;
+  actorKind: Principal["kind"];
+}
+
+export interface UpdateNotificationEndpointInput {
+  workspaceId: string;
+  endpointId: string;
+  name?: string;
+  url?: string;
+  eventTypes?: import("@repovista/contracts").NotificationEventType[];
+  enabled?: boolean;
+  actorUserId: string;
+  actorKind: Principal["kind"];
+}
+
+export interface NotificationDeliveryRecord {
+  id: string;
+  workspaceId: string;
+  endpointId: string;
+  eventType: import("@repovista/contracts").NotificationEventType;
+  eventKey: string;
+  status: import("@repovista/contracts").NotificationDeliveryStatus;
+  attemptCount: number;
+  maxAttempts: number;
+  nextAttemptAt: string | null;
+  lastStatusCode: number | null;
+  lastError: string | null;
+  deliveredAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ListNotificationDeliveriesOptions {
+  cursor?: string;
+  endpointId?: string;
+  limit: number;
+  status?: import("@repovista/contracts").NotificationDeliveryStatus;
+}
+
+export interface NotificationDeliveryPage {
+  deliveries: NotificationDeliveryRecord[];
+  nextCursor: string | null;
+}
+
+export interface QueueNotificationTestInput {
+  workspaceId: string;
+  endpointId: string;
+  actorUserId: string;
+  actorKind: Principal["kind"];
+  maxAttempts: number;
+}
+
+export interface ClaimedNotificationDelivery {
+  id: string;
+  workspaceId: string;
+  endpointId: string;
+  url: string;
+  eventType: import("@repovista/contracts").NotificationEventType;
+  eventKey: string;
+  payload: Record<string, unknown>;
+  attemptCount: number;
+  maxAttempts: number;
+}
+
+export interface FailNotificationDeliveryInput {
+  id: string;
+  workerId: string;
+  statusCode: number | null;
+  error: string;
+  retryable: boolean;
+}
+
 export interface UpsertGuardrailReviewInput {
   workspaceId: string;
   snapshotId: string;
@@ -550,6 +658,7 @@ export interface UpsertGuardrailReviewInput {
   note: string;
   reviewedBy: string;
   actorKind: Principal["kind"];
+  notificationMaxAttempts?: number;
 }
 
 export interface DeleteGuardrailReviewInput {
@@ -558,6 +667,7 @@ export interface DeleteGuardrailReviewInput {
   findingId: string;
   actorUserId: string;
   actorKind: Principal["kind"];
+  notificationMaxAttempts?: number;
 }
 
 export interface ShareReportRecord {

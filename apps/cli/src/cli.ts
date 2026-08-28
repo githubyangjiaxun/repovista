@@ -6,7 +6,11 @@ import type {
   GuardrailExplanationHistory,
   GuardrailProfile,
   GuardrailReview,
+  GuardrailReviewHistoryPage,
   GuardrailReviewsResponse,
+  NotificationDelivery,
+  NotificationDeliveryPage,
+  NotificationEndpoint,
 } from "@repovista/contracts";
 import {
   createGuardrailProfileRequestSchema,
@@ -60,6 +64,7 @@ const mainHelp = [
   "  search <snapshot-id>    Search fixed snapshot evidence",
   "  embed <snapshot-id>     Build a semantic embedding index",
   "  guardrails <target>      Evaluate reports or manage policy profiles",
+  "  notifications <target>  Manage signed Workspace notification Webhooks",
   "  auth <action>           Login, inspect, or remove local CLI authentication",
   "  workspace <action>      List or select locally authenticated workspaces",
   "  github <action>         List GitHub App installations or repositories",
@@ -129,6 +134,7 @@ const commandHelp: Record<string, string> = {
     "       repovista guardrails reviews list <snapshot-id> [options]",
     "       repovista guardrails reviews set <snapshot-id> <finding-id> <status> [options]",
     "       repovista guardrails reviews clear <snapshot-id> <finding-id> [options]",
+    "       repovista guardrails reviews history <snapshot-id> [options]",
     "       repovista guardrails profiles [--json]",
     "       repovista guardrails profile create <key> --name <name> [options]",
     "       repovista guardrails profile assign <repository-id> <profile-id|default>",
@@ -153,6 +159,15 @@ const commandHelp: Record<string, string> = {
     "  --high-fan-in <n>             High fan-in threshold",
     "",
     "Exit codes: 0 means no error-level findings; 2 means at least one error-level finding.",
+  ].join("\n"),
+  notifications: [
+    "Usage: repovista notifications endpoints <list|create|update|delete|test> ...",
+    "       repovista notifications deliveries list <workspace-id> [options]",
+    "",
+    "Endpoint create options: --name <name> --url <https-url> [--event <event>] [--disabled]",
+    "Endpoint update options: --name <name> --url <https-url> [--event <event>] [--enabled|--disabled]",
+    "Events: guardrail_review.updated, guardrail_review.cleared",
+    "The create command prints the signing secret once; it is never returned again.",
   ].join("\n"),
   doctor: "Usage: repovista doctor [--json]",
   auth: [
@@ -589,6 +604,58 @@ function formatGuardrailReviews(result: GuardrailReviewsResponse): string {
   return lines.join("\n");
 }
 
+function formatGuardrailReviewHistory(history: GuardrailReviewHistoryPage): string {
+  const lines = [
+    "Guardrail review history",
+    "Notes are represented only by their length; note text is not retained in this timeline.",
+  ];
+  if (history.entries.length === 0) {
+    lines.push("", "No review history entries.");
+  } else {
+    for (const entry of history.entries) {
+      lines.push(
+        "",
+        `${entry.createdAt} · ${entry.findingId}`,
+        `  ${entry.fromStatus} → ${entry.toStatus} · note ${entry.fromNoteLength} → ${entry.toNoteLength}${entry.noteChanged ? " (changed)" : ""}`,
+        `  Actor: ${entry.actorLogin ? `@${entry.actorLogin}` : entry.actorKind}`,
+        `  Event: ${entry.action} · audit ${entry.id}`,
+      );
+    }
+  }
+  lines.push("", `Next cursor: ${history.nextCursor ?? "none"}`);
+  return lines.join("\n");
+}
+
+function formatNotificationEndpoint(endpoint: NotificationEndpoint): string {
+  return [
+    `${endpoint.enabled ? "enabled " : "disabled"}  ${endpoint.name}`,
+    `  ID: ${endpoint.id}`,
+    `  URL: ${endpoint.url}`,
+    `  Events: ${endpoint.eventTypes.join(", ")}`,
+    `  Last delivery: ${endpoint.lastDeliveryStatus ?? "none"}${endpoint.lastDeliveryAt ? ` (${endpoint.lastDeliveryAt})` : ""}`,
+  ].join("\n");
+}
+
+function formatNotificationDelivery(delivery: NotificationDelivery): string {
+  return [
+    `${delivery.status}  ${delivery.eventType}`,
+    `  ID: ${delivery.id}`,
+    `  Endpoint: ${delivery.endpointId}`,
+    `  Attempts: ${delivery.attemptCount}/${delivery.maxAttempts}`,
+    `  HTTP: ${delivery.lastStatusCode ?? "—"}`,
+    `  Next attempt: ${delivery.nextAttemptAt ?? "—"}`,
+    ...(delivery.lastError ? [`  Error: ${delivery.lastError}`] : []),
+  ].join("\n");
+}
+
+function formatNotificationDeliveries(page: NotificationDeliveryPage): string {
+  const lines = ["Notification deliveries"];
+  if (page.deliveries.length === 0) lines.push("", "No notification deliveries.");
+  else lines.push("", page.deliveries.map(formatNotificationDelivery).join("\n\n"));
+  lines.push("", `Next cursor: ${page.nextCursor ?? "none"}`);
+  return lines.join("\n");
+}
+
 function formatGuardrailExplanationComparison(comparison: GuardrailExplanationComparison): string {
   const lines = [
     `Verified explanation comparison: ${comparison.changed ? "changed" : "same"}`,
@@ -712,6 +779,30 @@ function positiveInteger(value: string | undefined, label: string, maximum?: num
     );
   }
   return parsed;
+}
+
+const NOTIFICATION_EVENTS = ["guardrail_review.updated", "guardrail_review.cleared"] as const;
+
+function notificationEventOptions(
+  options: ParsedOptions["options"],
+): (typeof NOTIFICATION_EVENTS)[number][] | undefined {
+  const raw = options.event;
+  if (raw === undefined) return undefined;
+  const values = Array.isArray(raw) ? raw : typeof raw === "string" ? [raw] : [];
+  if (values.length < 1 || values.length > 2) {
+    throw new UsageError("Use one or two --event values.");
+  }
+  const events = values.map((value) => {
+    if (!(NOTIFICATION_EVENTS as readonly string[]).includes(value)) {
+      throw new UsageError(
+        `Unknown notification event: ${value}. Use guardrail_review.updated or guardrail_review.cleared.`,
+      );
+    }
+    return value as (typeof NOTIFICATION_EVENTS)[number];
+  });
+  if (new Set(events).size !== events.length)
+    throw new UsageError("Each --event may appear only once.");
+  return events;
 }
 
 function profileThreshold(
@@ -847,8 +938,19 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
         model: "string",
         note: "string",
         provider: "string",
+        status: "string",
         sarif: "string",
         json_export: "string",
+        finding_id: "string",
+      },
+      notifications: {
+        name: "string",
+        url: "string",
+        event: "repeat",
+        enabled: "boolean",
+        disabled: "boolean",
+        endpoint_id: "string",
+        status: "string",
       },
       doctor: {},
       auth: {},
@@ -1223,6 +1325,36 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
           else output.stdout(formatGuardrailReviews(result));
           return 0;
         }
+        if (action === "history") {
+          if (parsed.positionals.length !== 3) {
+            throw new UsageError("guardrails reviews history requires exactly a snapshot ID.");
+          }
+          const snapshotId = requireId(parsed.positionals[2], "Snapshot ID");
+          const findingId = optionalString(parsed.options.finding_id);
+          if (findingId && findingId.length > 300) {
+            throw new UsageError("--finding-id must be at most 300 characters.");
+          }
+          const status = optionalString(parsed.options.status);
+          if (
+            status &&
+            !["unreviewed", "acknowledged", "accepted_risk", "false_positive"].includes(status)
+          ) {
+            throw new UsageError(
+              "--status must be unreviewed, acknowledged, accepted_risk, or false_positive.",
+            );
+          }
+          const history = await client.listGuardrailReviewHistory(snapshotId, {
+            ...(findingId ? { findingId } : {}),
+            ...(status ? { status: status as GuardrailReview["status"] } : {}),
+            ...(optionalString(parsed.options.cursor)
+              ? { cursor: optionalString(parsed.options.cursor) }
+              : {}),
+            limit: positiveInteger(optionalString(parsed.options.limit) ?? "20", "--limit", 50),
+          });
+          if (json) writeJson(output, history);
+          else output.stdout(formatGuardrailReviewHistory(history));
+          return 0;
+        }
         if (action === "set") {
           if (parsed.positionals.length !== 5) {
             throw new UsageError(
@@ -1461,6 +1593,140 @@ export async function runCli(args: string[], dependencies: CliDependencies = {})
       if (json) writeJson(output, report);
       else output.stdout(formatGuardrails(report, sarifPath, jsonExportPath));
       return report.summary.errors > 0 ? 2 : 0;
+    }
+
+    if (command === "notifications") {
+      const target = parsed.positionals[0];
+      if (target === "endpoints") {
+        const action = parsed.positionals[1];
+        if (action === "list") {
+          if (parsed.positionals.length !== 3) {
+            throw new UsageError("notifications endpoints list requires a workspace ID.");
+          }
+          const workspaceId = requireId(parsed.positionals[2], "Workspace ID");
+          const endpoints = await client.listNotificationEndpoints(workspaceId);
+          if (json) writeJson(output, endpoints);
+          else if (endpoints.length === 0) output.stdout("No notification endpoints.");
+          else output.stdout(endpoints.map(formatNotificationEndpoint).join("\n\n"));
+          return 0;
+        }
+        if (action === "create") {
+          if (parsed.positionals.length !== 3) {
+            throw new UsageError("notifications endpoints create requires a workspace ID.");
+          }
+          const workspaceId = requireId(parsed.positionals[2], "Workspace ID");
+          const name = optionalString(parsed.options.name);
+          const url = optionalString(parsed.options.url);
+          if (!name || !url) {
+            throw new UsageError("Endpoint create requires --name and --url.");
+          }
+          if (parsed.options.enabled === true && parsed.options.disabled === true) {
+            throw new UsageError("Use either --enabled or --disabled, not both.");
+          }
+          const eventTypes = notificationEventOptions(parsed.options);
+          const created = await client.createNotificationEndpoint(workspaceId, {
+            name,
+            url,
+            ...(eventTypes ? { eventTypes } : {}),
+            ...(parsed.options.disabled === true ? { enabled: false } : {}),
+          });
+          if (json) writeJson(output, created);
+          else {
+            output.stdout(formatNotificationEndpoint(created.endpoint));
+            output.stdout("");
+            output.stdout("Signing secret (displayed once; save it securely):");
+            output.stdout(created.signingSecret);
+          }
+          return 0;
+        }
+        if (action === "update") {
+          if (parsed.positionals.length !== 4) {
+            throw new UsageError(
+              "notifications endpoints update requires workspace and endpoint IDs.",
+            );
+          }
+          const workspaceId = requireId(parsed.positionals[2], "Workspace ID");
+          const endpointId = requireId(parsed.positionals[3], "Endpoint ID");
+          const eventTypes = notificationEventOptions(parsed.options);
+          if (parsed.options.enabled === true && parsed.options.disabled === true) {
+            throw new UsageError("Use either --enabled or --disabled, not both.");
+          }
+          const input = {
+            ...(optionalString(parsed.options.name)
+              ? { name: optionalString(parsed.options.name) }
+              : {}),
+            ...(optionalString(parsed.options.url)
+              ? { url: optionalString(parsed.options.url) }
+              : {}),
+            ...(eventTypes ? { eventTypes } : {}),
+            ...(parsed.options.enabled === true ? { enabled: true } : {}),
+            ...(parsed.options.disabled === true ? { enabled: false } : {}),
+          };
+          if (Object.keys(input).length === 0) {
+            throw new UsageError("Endpoint update requires at least one field to change.");
+          }
+          const endpoint = await client.updateNotificationEndpoint(workspaceId, endpointId, input);
+          if (json) writeJson(output, endpoint);
+          else output.stdout(formatNotificationEndpoint(endpoint));
+          return 0;
+        }
+        if (action === "delete") {
+          if (parsed.positionals.length !== 4) {
+            throw new UsageError(
+              "notifications endpoints delete requires workspace and endpoint IDs.",
+            );
+          }
+          const workspaceId = requireId(parsed.positionals[2], "Workspace ID");
+          const endpointId = requireId(parsed.positionals[3], "Endpoint ID");
+          await client.deleteNotificationEndpoint(workspaceId, endpointId);
+          if (json) writeJson(output, { deleted: true, endpointId });
+          else output.stdout(`Notification endpoint ${endpointId} deleted.`);
+          return 0;
+        }
+        if (action === "test") {
+          if (parsed.positionals.length !== 4) {
+            throw new UsageError(
+              "notifications endpoints test requires workspace and endpoint IDs.",
+            );
+          }
+          const workspaceId = requireId(parsed.positionals[2], "Workspace ID");
+          const endpointId = requireId(parsed.positionals[3], "Endpoint ID");
+          const delivery = await client.testNotificationEndpoint(workspaceId, endpointId);
+          if (json) writeJson(output, delivery);
+          else {
+            output.stdout("Test notification queued.");
+            output.stdout(formatNotificationDelivery(delivery));
+          }
+          return 0;
+        }
+        throw new UsageError(
+          "notifications endpoints requires list, create, update, delete, or test.",
+        );
+      }
+      if (target === "deliveries" && parsed.positionals[1] === "list") {
+        if (parsed.positionals.length !== 3) {
+          throw new UsageError("notifications deliveries list requires a workspace ID.");
+        }
+        const workspaceId = requireId(parsed.positionals[2], "Workspace ID");
+        const status = optionalString(parsed.options.status);
+        if (status && !["queued", "running", "succeeded", "failed"].includes(status)) {
+          throw new UsageError("--status must be queued, running, succeeded, or failed.");
+        }
+        const endpointId = optionalString(parsed.options.endpoint_id);
+        if (endpointId) requireId(endpointId, "Endpoint ID");
+        const page = await client.listNotificationDeliveries(workspaceId, {
+          ...(endpointId ? { endpointId } : {}),
+          ...(status ? { status: status as NotificationDelivery["status"] } : {}),
+          ...(optionalString(parsed.options.cursor)
+            ? { cursor: optionalString(parsed.options.cursor) }
+            : {}),
+          limit: positiveInteger(optionalString(parsed.options.limit) ?? "20", "--limit", 50),
+        });
+        if (json) writeJson(output, page);
+        else output.stdout(formatNotificationDeliveries(page));
+        return 0;
+      }
+      throw new UsageError("notifications requires endpoints or deliveries list.");
     }
 
     if (command === "status") {

@@ -1,6 +1,6 @@
 # API 接口契约
 
-状态：v1.0 已实现并验收（2026-08-25）
+状态：v1.3 已实现；机器契约与路由校验通过（2026-08-28）
 Base path：`/v1`
 机器事实来源：`openapi/openapi.json`
 
@@ -94,11 +94,11 @@ Access Check；无权资源使用稳定 404，不把 ID 是否存在
 | POST | `/v1/share-reports` | 创建 Architecture Story v2 |
 | GET | `/v1/share-reports/{slug}` | 读取 v1 Tour 或 v2 Story |
 
-基础路由共 49 个 Operation；当前完整契约共 65 个 Operation。
+基础路由共 49 个 Operation；当前完整契约共 72 个 Operation。
 
 v0.6 增加两个 Snapshot 派生读接口；v0.7 增加一个基线比较接口；v0.8 增加五个策略 Profile
-接口；v0.9 增加两个解释接口；v1.0 增加历史和解释比较接口；v1.2 增加 Review/JSON 导出接口，
-共 65 个 Operation：
+接口；v0.9 增加两个解释接口；v1.0 增加历史和解释比较接口；v1.2 增加 Review/JSON 导出接口；
+v1.3 增加 Review 历史和通知 Endpoint/Delivery 接口，共 72 个 Operation：
 
 | Method | Path | 用途 |
 |---|---|---|
@@ -108,6 +108,7 @@ v0.6 增加两个 Snapshot 派生读接口；v0.7 增加一个基线比较接口
 | GET | `/v1/snapshots/{snapshotId}/guardrails/reviews` | 列出当前 Snapshot 每个 Finding 的 Review 状态 |
 | PUT | `/v1/snapshots/{snapshotId}/guardrails/reviews/{findingId}` | 设置或清除一个 Finding 的 Review 状态和备注 |
 | DELETE | `/v1/snapshots/{snapshotId}/guardrails/reviews/{findingId}` | 幂等清除 Review，恢复 `unreviewed` |
+| GET | `/v1/snapshots/{snapshotId}/guardrails/reviews/history` | 按 Snapshot/Finding/status 游标分页读取脱敏 Review 状态历史 |
 | GET | `/v1/snapshots/{snapshotId}/guardrails/compare?baseSnapshotId=...` | 比较同一 Repository 的两个 Ready Snapshot，返回 Finding 状态和回归摘要 |
 
 v0.8 策略 Profile 路由：
@@ -166,6 +167,28 @@ Workspace/Repository、缺失记录和不同 `subjectKey` 使用稳定 Not Found
 v1.2 Review 接口只接受服务端当前 Report 中存在的 Finding。Review metadata 与确定性分析分离，
 不会改变 Finding、`pass/warn/fail`、SARIF `level` 或 CLI CI 退出码；匿名用户只能读取公开 Snapshot，
 Bundled Demo 禁止写入。备注限制为 2,000 个 Unicode 字符，写入追加脱敏审计事件。
+
+v1.3 Review 历史只投影 append-only `audit_events`，返回状态、备注长度、是否变化和操作者摘要，
+不返回备注正文。查询要求已认证 Workspace 成员，服务端从当前 Ready Report 重算 Finding `subjectKey`
+并交叉过滤历史，私有响应使用 `private, no-store`。
+
+### v1.3 Signed Notification 路由
+
+| Method | Path | 用途 |
+|---|---|---|
+| GET | `/v1/workspaces/{workspaceId}/notification-endpoints` | 列出当前 Workspace 的 Endpoint 元数据和最近投递状态 |
+| POST | `/v1/workspaces/{workspaceId}/notification-endpoints` | Owner 创建 Endpoint；响应只返回一次派生 `signingSecret` |
+| PATCH | `/v1/workspaces/{workspaceId}/notification-endpoints/{endpointId}` | Owner 修改名称、URL、事件订阅或启用状态 |
+| DELETE | `/v1/workspaces/{workspaceId}/notification-endpoints/{endpointId}` | Owner 删除 Endpoint，并级联未完成投递 |
+| POST | `/v1/workspaces/{workspaceId}/notification-endpoints/{endpointId}/test` | Editor/Owner 排队不含敏感内容的测试事件 |
+| GET | `/v1/workspaces/{workspaceId}/notification-deliveries` | 成员按 Endpoint/status 游标分页读取投递状态 |
+
+可订阅事件为 `guardrail_review.updated` 和 `guardrail_review.cleared`。API 只写数据库 outbox，不同步
+访问外部 URL。Worker 领取带租约的投递，使用 `X-RepoVista-Timestamp` 与
+`X-RepoVista-Signature: sha256=...` HMAC 头，拒绝重定向并执行 HTTPS（生产）、DNS/IP SSRF 检查和硬超时。
+网络错误、408/425/429/5xx 按有限指数退避；其他 4xx 不重试。Payload 只含事件身份、状态/备注长度变化和
+操作者摘要，不含备注正文、源码、模型输出或凭据。Endpoint 管理的 Session mutation 需要 Origin + CSRF；
+所有 Workspace 路径都拒绝跨租户访问。
 
 ## 3. 创建分析
 

@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  createNotificationEndpointResponseSchema,
+  guardrailReviewHistoryPageSchema,
   guardrailReviewSchema,
   guardrailReviewsResponseSchema,
+  notificationDeliveryPageSchema,
+  notificationEndpointSchema,
   updateGuardrailReviewRequestSchema,
 } from "./index.js";
 
@@ -46,5 +50,62 @@ describe("Guardrail review contracts", () => {
     expect(() =>
       updateGuardrailReviewRequestSchema.parse({ status: "acknowledged", note: `${accepted}🙂` }),
     ).toThrow(/2,000 Unicode characters/);
+  });
+
+  it("validates review history without accepting note bodies", () => {
+    const entry = {
+      id: 42,
+      snapshotId,
+      findingId: "large_file:abcd",
+      subjectKey,
+      action: "guardrail_review.upsert" as const,
+      fromStatus: "unreviewed" as const,
+      toStatus: "accepted_risk" as const,
+      fromNoteLength: 0,
+      toNoteLength: 12,
+      noteChanged: true,
+      actorKind: "session" as const,
+      actorLogin: "reviewer",
+      createdAt: "2026-08-28T00:00:00.000Z",
+    };
+    expect(guardrailReviewHistoryPageSchema.parse({ entries: [entry], nextCursor: null })).toEqual({
+      entries: [entry],
+      nextCursor: null,
+    });
+    expect(() =>
+      guardrailReviewHistoryPageSchema.parse({ entries: [{ ...entry, note: "secret" }] }),
+    ).toThrow();
+  });
+
+  it("validates notification endpoint, one-time secret response, and delivery page", () => {
+    const endpoint = notificationEndpointSchema.parse({
+      id: "01900000-0000-7000-8000-000000000003",
+      workspaceId: "01900000-0000-7000-8000-000000000004",
+      name: "Team relay",
+      url: "https://hooks.example.com/repovista",
+      eventTypes: ["guardrail_review.updated"],
+      enabled: true,
+      createdBy: userId,
+      createdAt: "2026-08-28T00:00:00.000Z",
+      updatedAt: "2026-08-28T00:00:00.000Z",
+      lastDeliveryAt: null,
+      lastDeliveryStatus: null,
+    });
+    expect(
+      createNotificationEndpointResponseSchema.parse({
+        endpoint,
+        signingSecret: `rvwh_${"a".repeat(43)}`,
+      }).endpoint.id,
+    ).toBe(endpoint.id);
+    expect(() => notificationEndpointSchema.parse({ ...endpoint, eventTypes: [] })).toThrow();
+    expect(() =>
+      notificationEndpointSchema.parse({
+        ...endpoint,
+        eventTypes: ["guardrail_review.updated", "guardrail_review.updated"],
+      }),
+    ).toThrow(/unique/);
+    expect(
+      notificationDeliveryPageSchema.parse({ deliveries: [], nextCursor: null }).deliveries,
+    ).toEqual([]);
   });
 });

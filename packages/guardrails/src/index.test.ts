@@ -241,7 +241,7 @@ describe("architecture guardrails", () => {
       reviewedAt: "2026-08-25T00:00:00.000Z",
       updatedAt: "2026-08-25T00:00:00.000Z",
     };
-    const sarif = buildSarifReport(report, "1.2.0", [review]);
+    const sarif = buildSarifReport(report, "1.3.0", [review]);
     const result = sarif.runs[0]?.results as Array<Record<string, unknown>>;
     expect(result[0]?.level).toBe("warning");
     expect((result[0]?.properties as Record<string, unknown>)?.reviewStatus).toBe("accepted_risk");
@@ -275,7 +275,7 @@ describe("architecture guardrails", () => {
     };
     const json = buildGuardrailJsonExport(report, [foreign]);
     expect(json.reviews).toEqual([]);
-    const sarif = buildSarifReport(report, "1.2.0", [foreign]);
+    const sarif = buildSarifReport(report, "1.3.0", [foreign]);
     const result = sarif.runs[0]?.results as Array<Record<string, unknown>>;
     expect((result[0]?.properties as Record<string, unknown>)?.reviewStatus).toBe("unreviewed");
     expect((sarif.runs[0]?.properties as Record<string, unknown>)?.reviewCount).toBe(0);

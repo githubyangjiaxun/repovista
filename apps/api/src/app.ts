@@ -143,11 +143,16 @@ export function buildApp(dependencies: AppDependencies = {}): {
                         ? 409
                         : error.code === "GUARDRAIL_REVIEW_UNAVAILABLE"
                           ? 503
-                          : error.code === "AI_CONFIG_INVALID"
+                          : error.code === "NOTIFICATION_CONFIG_INVALID" ||
+                              error.code === "NOTIFICATION_DELIVERY_UNAVAILABLE" ||
+                              error.code === "NOTIFICATION_HOST_UNAVAILABLE" ||
+                              error.code === "GUARDRAIL_REVIEW_HISTORY_UNAVAILABLE"
                             ? 503
-                            : error.code === "GITHUB_API_FAILED" || error.code.startsWith("AI_")
-                              ? 502
-                              : 400;
+                            : error.code === "AI_CONFIG_INVALID"
+                              ? 503
+                              : error.code === "GITHUB_API_FAILED" || error.code.startsWith("AI_")
+                                ? 502
+                                : 400;
       reply.status(status).send({
         error: {
           code: error.code,

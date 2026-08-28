@@ -6,10 +6,12 @@ import {
   authSessionSchema,
   type CreateEmbeddingIndexResponse,
   type CreateGuardrailExplanationResponse,
+  type CreateNotificationEndpointResponse,
   type CreateRepositoryRequest,
   type CreateRepositoryResponse,
   createEmbeddingIndexResponseSchema,
   createGuardrailExplanationResponseSchema,
+  createNotificationEndpointResponseSchema,
   createRepositoryResponseSchema,
   type GitHubInstallation,
   type GitHubInstallationRepositoryPage,
@@ -19,6 +21,7 @@ import {
   type GuardrailProfile,
   type GuardrailReport,
   type GuardrailReview,
+  type GuardrailReviewHistoryPage,
   type GuardrailReviewsResponse,
   githubInstallationRepositoryPageSchema,
   githubInstallationSchema,
@@ -27,9 +30,17 @@ import {
   guardrailExplanationHistorySchema,
   guardrailProfileSchema,
   guardrailReportSchema,
+  guardrailReviewHistoryPageSchema,
   guardrailReviewsResponseSchema,
   type Job,
   jobSchema,
+  type NotificationDeliveryPage,
+  type NotificationDeliveryStatus,
+  type NotificationEndpoint,
+  type NotificationEventType,
+  notificationDeliveryPageSchema,
+  notificationDeliverySchema,
+  notificationEndpointSchema,
   type RepositorySummary,
   repositorySummarySchema,
   type SearchResult,
@@ -360,6 +371,106 @@ export class RepoVistaClient {
     );
   }
 
+  listGuardrailReviewHistory(
+    snapshotId: string,
+    options: {
+      findingId?: string;
+      status?: GuardrailReview["status"];
+      cursor?: string;
+      limit?: number;
+    } = {},
+  ): Promise<GuardrailReviewHistoryPage> {
+    const query = new URLSearchParams();
+    if (options.findingId) query.set("findingId", options.findingId);
+    if (options.status) query.set("status", options.status);
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return this.requestEnvelope(
+      `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/reviews/history${suffix}`,
+      {},
+      (value) => guardrailReviewHistoryPageSchema.parse(value),
+    );
+  }
+
+  listNotificationEndpoints(workspaceId: string): Promise<NotificationEndpoint[]> {
+    return this.requestEnvelope(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/notification-endpoints`,
+      {},
+      (value) => notificationEndpointSchema.array().parse(value),
+    );
+  }
+
+  createNotificationEndpoint(
+    workspaceId: string,
+    input: {
+      name: string;
+      url: string;
+      eventTypes?: NotificationEventType[];
+      enabled?: boolean;
+    },
+  ): Promise<CreateNotificationEndpointResponse> {
+    return this.requestEnvelope(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/notification-endpoints`,
+      { method: "POST", body: JSON.stringify(input) },
+      (value) => createNotificationEndpointResponseSchema.parse(value),
+    );
+  }
+
+  updateNotificationEndpoint(
+    workspaceId: string,
+    endpointId: string,
+    input: {
+      name?: string;
+      url?: string;
+      eventTypes?: NotificationEventType[];
+      enabled?: boolean;
+    },
+  ): Promise<NotificationEndpoint> {
+    return this.requestEnvelope(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/notification-endpoints/${encodeURIComponent(endpointId)}`,
+      { method: "PATCH", body: JSON.stringify(input) },
+      (value) => notificationEndpointSchema.parse(value),
+    );
+  }
+
+  deleteNotificationEndpoint(workspaceId: string, endpointId: string): Promise<void> {
+    return this.requestNoContent(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/notification-endpoints/${encodeURIComponent(endpointId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  testNotificationEndpoint(workspaceId: string, endpointId: string) {
+    return this.requestEnvelope(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/notification-endpoints/${encodeURIComponent(endpointId)}/test`,
+      { method: "POST", body: JSON.stringify({}) },
+      (value) => notificationDeliverySchema.parse(value),
+    );
+  }
+
+  listNotificationDeliveries(
+    workspaceId: string,
+    options: {
+      endpointId?: string;
+      status?: NotificationDeliveryStatus;
+      cursor?: string;
+      limit?: number;
+    } = {},
+  ): Promise<NotificationDeliveryPage> {
+    const query = new URLSearchParams();
+    if (options.endpointId) query.set("endpointId", options.endpointId);
+    if (options.status) query.set("status", options.status);
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    return this.requestEnvelope(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/notification-deliveries${suffix}`,
+      {},
+      (value) => notificationDeliveryPageSchema.parse(value),
+    );
+  }
+
   updateGuardrailReview(
     snapshotId: string,
     findingId: string,
@@ -524,7 +635,15 @@ export class RepoVistaClient {
     }
   }
 
-  private async requestPayload(pathname: string, init: RequestInit = {}): Promise<unknown> {
+  private async requestNoContent(pathname: string, init: RequestInit = {}): Promise<void> {
+    await this.requestPayload(pathname, init, true);
+  }
+
+  private async requestPayload(
+    pathname: string,
+    init: RequestInit = {},
+    allowNoContent = false,
+  ): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
     const headers = new Headers(init.headers);
@@ -556,6 +675,7 @@ export class RepoVistaClient {
       clearTimeout(timeout);
     }
 
+    if (response.status === 204 && allowNoContent) return undefined;
     const payload = (await response.json().catch(() => null)) as unknown;
     if (!response.ok) {
       const failure = isApiFailure(payload) ? payload.error : undefined;

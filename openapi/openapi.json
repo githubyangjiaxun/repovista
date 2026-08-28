@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RepoVista API",
-    "version": "1.2.0",
+    "version": "1.3.0",
     "description": "Evidence-first repository indexing with private GitHub App access, Workspace authorization, immutable Guardrail policy profiles, deterministic Architecture Guardrails and SARIF, Workspace-scoped human review metadata, separate deterministic JSON exports, verified explanation history and structural comparison, auditable sessions, API tokens, versioned semantic indexes, transparent hybrid retrieval, architecture stories, pull-request impact analysis, fixed Commit evidence, signed GitHub updates, exports, and grounded answers."
   },
   "servers": [
@@ -1387,6 +1387,64 @@
         }
       }
     },
+    "/v1/snapshots/{snapshotId}/guardrails/reviews/history": {
+      "parameters": [{ "$ref": "#/components/parameters/SnapshotId" }],
+      "get": {
+        "operationId": "listGuardrailReviewHistory",
+        "summary": "List append-only human review transitions for a snapshot",
+        "tags": ["Snapshots", "Guardrails"],
+        "security": [{ "CookieSession": [] }, { "BearerToken": [] }],
+        "parameters": [
+          {
+            "name": "findingId",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 300 }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": { "$ref": "#/components/schemas/GuardrailReviewStatus" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,1000}$" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Review transition page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/GuardrailReviewHistoryPage" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
     "/v1/snapshots/{snapshotId}/guardrails/reviews/{findingId}": {
       "parameters": [
         { "$ref": "#/components/parameters/SnapshotId" },
@@ -2654,6 +2712,225 @@
         }
       }
     },
+    "/v1/workspaces/{workspaceId}/notification-endpoints": {
+      "parameters": [{ "$ref": "#/components/parameters/WorkspaceId" }],
+      "get": {
+        "operationId": "listNotificationEndpoints",
+        "summary": "List signed notification endpoints in a workspace",
+        "tags": ["Workspaces"],
+        "security": [{ "CookieSession": [] }, { "BearerToken": [] }],
+        "responses": {
+          "200": {
+            "description": "Notification endpoint metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": {
+                          "type": "array",
+                          "items": { "$ref": "#/components/schemas/NotificationEndpoint" }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "post": {
+        "operationId": "createNotificationEndpoint",
+        "summary": "Create a signed notification endpoint",
+        "tags": ["Workspaces"],
+        "security": [{ "CookieSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateNotificationEndpointRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Endpoint created; signing secret is returned once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/CreateNotificationEndpointResponse"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/v1/workspaces/{workspaceId}/notification-endpoints/{endpointId}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/WorkspaceId" },
+        { "$ref": "#/components/parameters/NotificationEndpointId" }
+      ],
+      "patch": {
+        "operationId": "updateNotificationEndpoint",
+        "summary": "Update a signed notification endpoint",
+        "tags": ["Workspaces"],
+        "security": [{ "CookieSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfHeader" }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/UpdateNotificationEndpointRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Endpoint updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/NotificationEndpoint" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteNotificationEndpoint",
+        "summary": "Delete a signed notification endpoint",
+        "tags": ["Workspaces"],
+        "security": [{ "CookieSession": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfHeader" }],
+        "responses": {
+          "204": { "description": "Endpoint deleted" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/workspaces/{workspaceId}/notification-endpoints/{endpointId}/test": {
+      "parameters": [
+        { "$ref": "#/components/parameters/WorkspaceId" },
+        { "$ref": "#/components/parameters/NotificationEndpointId" }
+      ],
+      "post": {
+        "operationId": "testNotificationEndpoint",
+        "summary": "Queue a non-sensitive test notification",
+        "tags": ["Workspaces"],
+        "security": [{ "CookieSession": [] }, { "BearerToken": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/CsrfHeader" }],
+        "responses": {
+          "202": {
+            "description": "Test delivery queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/NotificationDelivery" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" }
+        }
+      }
+    },
+    "/v1/workspaces/{workspaceId}/notification-deliveries": {
+      "parameters": [{ "$ref": "#/components/parameters/WorkspaceId" }],
+      "get": {
+        "operationId": "listNotificationDeliveries",
+        "summary": "List notification delivery attempts",
+        "tags": ["Workspaces"],
+        "security": [{ "CookieSession": [] }, { "BearerToken": [] }],
+        "parameters": [
+          {
+            "name": "endpointId",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/Uuid" }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": { "$ref": "#/components/schemas/NotificationDeliveryStatus" }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,1000}$" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 50, "default": 20 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Delivery history page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/SuccessEnvelope" },
+                    {
+                      "properties": {
+                        "data": { "$ref": "#/components/schemas/NotificationDeliveryPage" }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
     "/v1/auth/session/workspace": {
       "put": {
         "operationId": "switchWorkspace",
@@ -3156,6 +3433,14 @@
       },
       "WorkspaceId": {
         "name": "workspaceId",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "$ref": "#/components/schemas/Uuid"
+        }
+      },
+      "NotificationEndpointId": {
+        "name": "endpointId",
         "in": "path",
         "required": true,
         "schema": {
@@ -4434,6 +4719,56 @@
             "type": "array",
             "items": { "$ref": "#/components/schemas/GuardrailReview" }
           }
+        }
+      },
+      "GuardrailReviewHistoryEntry": {
+        "type": "object",
+        "required": [
+          "id",
+          "snapshotId",
+          "findingId",
+          "subjectKey",
+          "action",
+          "fromStatus",
+          "toStatus",
+          "fromNoteLength",
+          "toNoteLength",
+          "noteChanged",
+          "actorKind",
+          "actorLogin",
+          "createdAt"
+        ],
+        "properties": {
+          "id": { "type": "integer", "minimum": 1 },
+          "snapshotId": { "$ref": "#/components/schemas/Uuid" },
+          "findingId": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "subjectKey": { "$ref": "#/components/schemas/GuardrailExplanationSubjectKey" },
+          "action": {
+            "type": "string",
+            "enum": ["guardrail_review.upsert", "guardrail_review.clear"]
+          },
+          "fromStatus": { "$ref": "#/components/schemas/GuardrailReviewStatus" },
+          "toStatus": { "$ref": "#/components/schemas/GuardrailReviewStatus" },
+          "fromNoteLength": { "type": "integer", "minimum": 0, "maximum": 2000 },
+          "toNoteLength": { "type": "integer", "minimum": 0, "maximum": 2000 },
+          "noteChanged": { "type": "boolean" },
+          "actorKind": {
+            "type": "string",
+            "enum": ["anonymous", "session", "token", "github", "system"]
+          },
+          "actorLogin": { "type": ["string", "null"] },
+          "createdAt": { "$ref": "#/components/schemas/DateTime" }
+        }
+      },
+      "GuardrailReviewHistoryPage": {
+        "type": "object",
+        "required": ["entries", "nextCursor"],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/GuardrailReviewHistoryEntry" }
+          },
+          "nextCursor": { "type": ["string", "null"] }
         }
       },
       "UpdateGuardrailReviewRequest": {
@@ -5811,6 +6146,147 @@
           "createdAt": {
             "$ref": "#/components/schemas/DateTime"
           }
+        }
+      },
+      "NotificationEventType": {
+        "type": "string",
+        "enum": ["guardrail_review.updated", "guardrail_review.cleared"]
+      },
+      "NotificationDeliveryStatus": {
+        "type": "string",
+        "enum": ["queued", "running", "succeeded", "failed"]
+      },
+      "NotificationEndpoint": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspaceId",
+          "name",
+          "url",
+          "eventTypes",
+          "enabled",
+          "createdBy",
+          "createdAt",
+          "updatedAt",
+          "lastDeliveryAt",
+          "lastDeliveryStatus"
+        ],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "workspaceId": { "$ref": "#/components/schemas/Uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "url": { "type": "string", "format": "uri", "maxLength": 2048 },
+          "eventTypes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 2,
+            "uniqueItems": true,
+            "items": { "$ref": "#/components/schemas/NotificationEventType" }
+          },
+          "enabled": { "type": "boolean" },
+          "createdBy": { "oneOf": [{ "$ref": "#/components/schemas/Uuid" }, { "type": "null" }] },
+          "createdAt": { "$ref": "#/components/schemas/DateTime" },
+          "updatedAt": { "$ref": "#/components/schemas/DateTime" },
+          "lastDeliveryAt": {
+            "oneOf": [{ "$ref": "#/components/schemas/DateTime" }, { "type": "null" }]
+          },
+          "lastDeliveryStatus": {
+            "oneOf": [
+              { "$ref": "#/components/schemas/NotificationDeliveryStatus" },
+              { "type": "null" }
+            ]
+          }
+        }
+      },
+      "CreateNotificationEndpointRequest": {
+        "type": "object",
+        "required": ["name", "url"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "url": { "type": "string", "format": "uri", "maxLength": 2048 },
+          "eventTypes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 2,
+            "uniqueItems": true,
+            "items": { "$ref": "#/components/schemas/NotificationEventType" }
+          },
+          "enabled": { "type": "boolean", "default": true }
+        }
+      },
+      "UpdateNotificationEndpointRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "url": { "type": "string", "format": "uri", "maxLength": 2048 },
+          "eventTypes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 2,
+            "uniqueItems": true,
+            "items": { "$ref": "#/components/schemas/NotificationEventType" }
+          },
+          "enabled": { "type": "boolean" }
+        }
+      },
+      "CreateNotificationEndpointResponse": {
+        "type": "object",
+        "required": ["endpoint", "signingSecret"],
+        "properties": {
+          "endpoint": { "$ref": "#/components/schemas/NotificationEndpoint" },
+          "signingSecret": { "type": "string", "pattern": "^rvwh_[A-Za-z0-9_-]{40,100}$" }
+        }
+      },
+      "NotificationDelivery": {
+        "type": "object",
+        "required": [
+          "id",
+          "workspaceId",
+          "endpointId",
+          "eventType",
+          "eventKey",
+          "status",
+          "attemptCount",
+          "maxAttempts",
+          "nextAttemptAt",
+          "lastStatusCode",
+          "lastError",
+          "deliveredAt",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "workspaceId": { "$ref": "#/components/schemas/Uuid" },
+          "endpointId": { "$ref": "#/components/schemas/Uuid" },
+          "eventType": { "$ref": "#/components/schemas/NotificationEventType" },
+          "eventKey": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "status": { "$ref": "#/components/schemas/NotificationDeliveryStatus" },
+          "attemptCount": { "type": "integer", "minimum": 0, "maximum": 20 },
+          "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 20 },
+          "nextAttemptAt": {
+            "oneOf": [{ "$ref": "#/components/schemas/DateTime" }, { "type": "null" }]
+          },
+          "lastStatusCode": { "type": ["integer", "null"], "minimum": 100, "maximum": 599 },
+          "lastError": { "type": ["string", "null"], "maxLength": 500 },
+          "deliveredAt": {
+            "oneOf": [{ "$ref": "#/components/schemas/DateTime" }, { "type": "null" }]
+          },
+          "createdAt": { "$ref": "#/components/schemas/DateTime" },
+          "updatedAt": { "$ref": "#/components/schemas/DateTime" }
+        }
+      },
+      "NotificationDeliveryPage": {
+        "type": "object",
+        "required": ["deliveries", "nextCursor"],
+        "properties": {
+          "deliveries": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/NotificationDelivery" }
+          },
+          "nextCursor": { "type": ["string", "null"] }
         }
       },
       "AuthUser": {

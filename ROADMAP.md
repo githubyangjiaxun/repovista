@@ -84,9 +84,19 @@
 - [Done](./docs/releases/v1.2-开发计划.md) Web and CLI review workflows, migration `0009`, tests, and
   release evidence.
 
+## v1.3 — Review Timeline and Signed Notifications（implemented 2026-08-28）
+
+- [Done](./docs/releases/v1.3-开发计划.md) Append-only, cursor-paginated Review history projected from
+  audit events with Workspace/Finding subject isolation.
+- [Done](./docs/releases/v1.3-开发计划.md) Signed Workspace Webhook endpoints, one-time secret display,
+  event subscriptions, test delivery, and delivery history.
+- [Done](./docs/releases/v1.3-开发计划.md) Durable outbox with per-endpoint idempotency, leases, bounded
+  exponential retry, DNS/IP SSRF checks, timeout, redirect rejection, API/CLI/Web/OpenAPI, migration `0010`,
+  tests, and release evidence.
+
 ## Next candidates
 
-- Review history timeline and optional team notification integrations, keeping deterministic analysis
-  and human metadata separate.
+- Batch review actions and provider-specific notification adapters, keeping deterministic analysis,
+  human metadata, and external delivery separate.
 
 Roadmap ordering may change based on measured usage and contributor feedback.

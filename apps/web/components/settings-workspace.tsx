@@ -5,6 +5,8 @@ import type {
   AuditEvent,
   CreateApiTokenResponse,
   GitHubInstallation,
+  NotificationDelivery,
+  NotificationEndpoint,
   WorkspaceMember,
 } from "@repovista/contracts";
 import {
@@ -16,23 +18,44 @@ import {
   KeyRound,
   LoaderCircle,
   Plus,
+  Send,
   ShieldCheck,
   Trash2,
   Users,
+  Webhook,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { useAuth } from "@/components/auth-provider";
-import { apiErrorMessage, apiFetch, apiOrigin } from "@/lib/api";
+import {
+  apiErrorMessage,
+  apiFetch,
+  apiOrigin,
+  createNotificationEndpoint,
+  deleteNotificationEndpoint,
+  listNotificationDeliveries,
+  listNotificationEndpoints,
+  testNotificationEndpoint,
+  updateNotificationEndpoint,
+} from "@/lib/api";
 
 type SettingsData = {
   members: WorkspaceMember[];
   installations: GitHubInstallation[];
   tokens: ApiTokenMetadata[];
   audit: AuditEvent[];
+  notificationEndpoints: NotificationEndpoint[];
+  notificationDeliveries: NotificationDelivery[];
 };
 
-const emptyData: SettingsData = { members: [], installations: [], tokens: [], audit: [] };
+const emptyData: SettingsData = {
+  members: [],
+  installations: [],
+  tokens: [],
+  audit: [],
+  notificationEndpoints: [],
+  notificationDeliveries: [],
+};
 
 export function SettingsWorkspace() {
   const router = useRouter();
@@ -46,8 +69,19 @@ export function SettingsWorkspace() {
   const [memberRole, setMemberRole] = useState<"owner" | "editor" | "viewer">("viewer");
   const [tokenName, setTokenName] = useState("");
   const [rawToken, setRawToken] = useState<string | null>(null);
+  const [notificationName, setNotificationName] = useState("");
+  const [notificationUrl, setNotificationUrl] = useState("");
+  const [notificationUpdated, setNotificationUpdated] = useState(true);
+  const [notificationCleared, setNotificationCleared] = useState(true);
+  const [notificationSecret, setNotificationSecret] = useState<string | null>(null);
+  const [editingEndpointId, setEditingEndpointId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState("");
+  const [editingUrl, setEditingUrl] = useState("");
+  const [editingUpdated, setEditingUpdated] = useState(true);
+  const [editingCleared, setEditingCleared] = useState(true);
   const workspace = session?.workspace ?? null;
   const owner = workspace?.role === "owner";
+  const canTestNotifications = workspace?.role !== "viewer";
 
   const load = useCallback(async () => {
     if (!session?.authenticated || !workspace) {
@@ -58,19 +92,31 @@ export function SettingsWorkspace() {
     setLoading(true);
     setError(null);
     try {
-      const [members, installations, tokens, audit] = await Promise.all([
-        apiFetch<WorkspaceMember[]>(`/v1/workspaces/${workspace.id}/members`, {
-          cache: "no-store",
-        }),
-        apiFetch<GitHubInstallation[]>("/v1/integrations/github/installations", {
-          cache: "no-store",
-        }),
-        owner
-          ? apiFetch<ApiTokenMetadata[]>("/v1/auth/tokens", { cache: "no-store" })
-          : Promise.resolve([]),
-        apiFetch<AuditEvent[]>("/v1/audit-events?limit=50", { cache: "no-store" }),
-      ]);
-      setData({ members, installations, tokens, audit });
+      const [members, installations, tokens, audit, notificationEndpoints, notificationDeliveries] =
+        await Promise.all([
+          apiFetch<WorkspaceMember[]>(`/v1/workspaces/${workspace.id}/members`, {
+            cache: "no-store",
+          }),
+          apiFetch<GitHubInstallation[]>("/v1/integrations/github/installations", {
+            cache: "no-store",
+          }),
+          owner
+            ? apiFetch<ApiTokenMetadata[]>("/v1/auth/tokens", { cache: "no-store" })
+            : Promise.resolve([]),
+          apiFetch<AuditEvent[]>("/v1/audit-events?limit=50", { cache: "no-store" }),
+          listNotificationEndpoints(workspace.id).catch(() => []),
+          listNotificationDeliveries(workspace.id, { limit: 50 })
+            .then((page) => page.deliveries)
+            .catch(() => []),
+        ]);
+      setData({
+        members,
+        installations,
+        tokens,
+        audit,
+        notificationEndpoints,
+        notificationDeliveries,
+      });
     } catch (cause) {
       setError(apiErrorMessage(cause, "Unable to load workspace settings."));
     } finally {
@@ -177,6 +223,79 @@ export function SettingsWorkspace() {
   async function revokeToken(tokenId: string) {
     await run(`token-${tokenId}`, async () => {
       await apiFetch(`/v1/auth/tokens/${tokenId}`, { method: "DELETE" });
+    });
+  }
+
+  async function createNotification(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!workspace || !notificationName.trim() || !notificationUrl.trim()) return;
+    const eventTypes = [
+      ...(notificationUpdated ? (["guardrail_review.updated"] as const) : []),
+      ...(notificationCleared ? (["guardrail_review.cleared"] as const) : []),
+    ];
+    if (eventTypes.length === 0) {
+      setError("Select at least one notification event.");
+      return;
+    }
+    await run("notification-create", async () => {
+      const created = await createNotificationEndpoint(workspace.id, {
+        name: notificationName.trim(),
+        url: notificationUrl.trim(),
+        eventTypes,
+      });
+      setNotificationSecret(created.signingSecret);
+      setNotificationName("");
+      setNotificationUrl("");
+    });
+  }
+
+  function beginEdit(endpoint: NotificationEndpoint): void {
+    setEditingEndpointId(endpoint.id);
+    setEditingName(endpoint.name);
+    setEditingUrl(endpoint.url);
+    setEditingUpdated(endpoint.eventTypes.includes("guardrail_review.updated"));
+    setEditingCleared(endpoint.eventTypes.includes("guardrail_review.cleared"));
+  }
+
+  async function saveNotificationEdit(event: FormEvent<HTMLFormElement>, endpointId: string) {
+    event.preventDefault();
+    if (!workspace || !editingName.trim() || !editingUrl.trim()) return;
+    const eventTypes = [
+      ...(editingUpdated ? (["guardrail_review.updated"] as const) : []),
+      ...(editingCleared ? (["guardrail_review.cleared"] as const) : []),
+    ];
+    if (eventTypes.length === 0) {
+      setError("Select at least one notification event.");
+      return;
+    }
+    await run(`notification-edit-${endpointId}`, async () => {
+      await updateNotificationEndpoint(workspace.id, endpointId, {
+        name: editingName.trim(),
+        url: editingUrl.trim(),
+        eventTypes,
+      });
+      setEditingEndpointId(null);
+    });
+  }
+
+  async function toggleNotification(endpoint: NotificationEndpoint) {
+    if (!workspace) return;
+    await run(`notification-toggle-${endpoint.id}`, async () => {
+      await updateNotificationEndpoint(workspace.id, endpoint.id, { enabled: !endpoint.enabled });
+    });
+  }
+
+  async function removeNotification(endpointId: string) {
+    if (!workspace) return;
+    await run(`notification-delete-${endpointId}`, async () => {
+      await deleteNotificationEndpoint(workspace.id, endpointId);
+    });
+  }
+
+  async function sendNotificationTest(endpointId: string) {
+    if (!workspace) return;
+    await run(`notification-test-${endpointId}`, async () => {
+      await testNotificationEndpoint(workspace.id, endpointId);
     });
   }
 
@@ -441,6 +560,211 @@ export function SettingsWorkspace() {
             </div>
           ))}
         </div>
+      </section>
+
+      <section className="settings-card settings-card-wide" aria-label="Notification endpoints">
+        <div className="settings-card-heading">
+          <Webhook size={20} />
+          <div>
+            <h2>Signed notification Webhooks</h2>
+            <p>
+              Review changes are delivered asynchronously. Payloads never include review note text,
+              source code, model output, or credentials.
+            </p>
+          </div>
+        </div>
+        {owner ? (
+          <form
+            className="notification-endpoint-form"
+            onSubmit={(event) => void createNotification(event)}
+          >
+            <input
+              aria-label="Notification endpoint name"
+              onChange={(event) => setNotificationName(event.target.value)}
+              placeholder="Team review relay"
+              required
+              value={notificationName}
+            />
+            <input
+              aria-label="Notification endpoint URL"
+              onChange={(event) => setNotificationUrl(event.target.value)}
+              placeholder="https://hooks.example.test/repovista"
+              required
+              type="url"
+              value={notificationUrl}
+            />
+            <label>
+              <input
+                checked={notificationUpdated}
+                onChange={(event) => setNotificationUpdated(event.target.checked)}
+                type="checkbox"
+              />
+              Review updated
+            </label>
+            <label>
+              <input
+                checked={notificationCleared}
+                onChange={(event) => setNotificationCleared(event.target.checked)}
+                type="checkbox"
+              />
+              Review cleared
+            </label>
+            <button
+              className="secondary-button"
+              disabled={busy === "notification-create"}
+              type="submit"
+            >
+              <Plus size={16} /> Add endpoint
+            </button>
+          </form>
+        ) : null}
+        {notificationSecret ? (
+          <output className="raw-token-panel notification-secret-panel">
+            <span>
+              <Check size={16} /> Save this signing secret now; it is shown only once.
+            </span>
+            <code>{notificationSecret}</code>
+            <button
+              className="secondary-button"
+              onClick={() => void navigator.clipboard.writeText(notificationSecret)}
+              type="button"
+            >
+              <Copy size={15} /> Copy secret
+            </button>
+            <button
+              className="icon-button"
+              onClick={() => setNotificationSecret(null)}
+              type="button"
+            >
+              Dismiss
+            </button>
+          </output>
+        ) : null}
+        <div className="settings-list notification-endpoint-list">
+          {data.notificationEndpoints.length === 0 ? (
+            <p className="settings-empty">No notification endpoints configured.</p>
+          ) : (
+            data.notificationEndpoints.map((endpoint) => (
+              <div className="notification-endpoint-row" key={endpoint.id}>
+                {editingEndpointId === endpoint.id ? (
+                  <form onSubmit={(event) => void saveNotificationEdit(event, endpoint.id)}>
+                    <input
+                      aria-label={`Edit name for ${endpoint.name}`}
+                      onChange={(event) => setEditingName(event.target.value)}
+                      required
+                      value={editingName}
+                    />
+                    <input
+                      aria-label={`Edit URL for ${endpoint.name}`}
+                      onChange={(event) => setEditingUrl(event.target.value)}
+                      required
+                      type="url"
+                      value={editingUrl}
+                    />
+                    <label>
+                      <input
+                        checked={editingUpdated}
+                        onChange={(event) => setEditingUpdated(event.target.checked)}
+                        type="checkbox"
+                      />
+                      Updated
+                    </label>
+                    <label>
+                      <input
+                        checked={editingCleared}
+                        onChange={(event) => setEditingCleared(event.target.checked)}
+                        type="checkbox"
+                      />
+                      Cleared
+                    </label>
+                    <button className="secondary-button" type="submit">
+                      <Check size={14} /> Save
+                    </button>
+                    <button
+                      className="icon-button"
+                      onClick={() => setEditingEndpointId(null)}
+                      type="button"
+                    >
+                      Cancel
+                    </button>
+                  </form>
+                ) : (
+                  <>
+                    <div>
+                      <strong>{endpoint.name}</strong>
+                      <small>{endpoint.url}</small>
+                      <small>{endpoint.eventTypes.join(", ")}</small>
+                    </div>
+                    <span className="settings-badge">
+                      {endpoint.enabled ? "enabled" : "disabled"}
+                    </span>
+                    <span className="settings-badge">
+                      {endpoint.lastDeliveryStatus ?? "no deliveries"}
+                    </span>
+                    {owner ? (
+                      <>
+                        <button
+                          className="icon-button"
+                          disabled={busy === `notification-toggle-${endpoint.id}`}
+                          onClick={() => void toggleNotification(endpoint)}
+                          type="button"
+                        >
+                          {endpoint.enabled ? "Disable" : "Enable"}
+                        </button>
+                        <button
+                          className="icon-button"
+                          onClick={() => beginEdit(endpoint)}
+                          type="button"
+                        >
+                          Edit
+                        </button>
+                        <button
+                          aria-label={`Delete ${endpoint.name}`}
+                          className="icon-button danger-text"
+                          disabled={busy === `notification-delete-${endpoint.id}`}
+                          onClick={() => void removeNotification(endpoint.id)}
+                          type="button"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </>
+                    ) : null}
+                    {canTestNotifications ? (
+                      <button
+                        className="icon-button"
+                        disabled={busy === `notification-test-${endpoint.id}`}
+                        onClick={() => void sendNotificationTest(endpoint.id)}
+                        type="button"
+                      >
+                        <Send size={14} /> Test
+                      </button>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+        {data.notificationDeliveries.length > 0 ? (
+          <div className="notification-delivery-list">
+            <h3>Recent deliveries</h3>
+            {data.notificationDeliveries.slice(0, 20).map((delivery) => (
+              <div className="audit-row" key={delivery.id}>
+                <span className="audit-dot" />
+                <span>
+                  <strong>{delivery.eventType}</strong>
+                  <small>
+                    {delivery.status} · {delivery.attemptCount}/{delivery.maxAttempts} attempts ·
+                    HTTP {delivery.lastStatusCode ?? "—"}
+                  </small>
+                </span>
+                <time dateTime={delivery.updatedAt}>
+                  {new Date(delivery.updatedAt).toLocaleString()}
+                </time>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       <section className="settings-card settings-card-wide">

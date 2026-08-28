@@ -17,6 +17,7 @@ import {
   createRepositoryRequestSchema,
   createShareRequestSchema,
   graphLevelSchema,
+  guardrailReviewHistoryQuerySchema,
   idSchema,
   isBundledDemoRepository,
   PARSER_VERSION,
@@ -73,6 +74,7 @@ const guardrailExplanationHistoryQuerySchema = z
     limit: z.coerce.number().int().min(1).max(50).default(20),
   })
   .strict();
+const guardrailReviewHistoryParamsSchema = z.object({ snapshotId: idSchema });
 const guardrailExplanationCompareQuerySchema = z
   .object({
     baseExplanationId: idSchema,
@@ -1404,6 +1406,56 @@ export function registerRoutes(
       .send(response(request, reviews));
   });
 
+  app.get("/v1/snapshots/:snapshotId/guardrails/reviews/history", async (request, reply) => {
+    const { snapshotId } = parseInput(guardrailReviewHistoryParamsSchema, request.params);
+    const auth = await resolveRequestAuth(request, store);
+    const principal = auth.principal;
+    if (principal.kind === "anonymous" || !principal.userId) {
+      throw new DomainError(
+        "AUTH_REQUIRED",
+        "Authentication is required to view Guardrail review history.",
+      );
+    }
+    const query = parseInput(guardrailReviewHistoryQuerySchema, request.query);
+    const access = await requireSnapshotAccess(request, store, snapshotId);
+    if (access.workspaceId !== principal.workspaceId) {
+      throw new DomainError(
+        "WORKSPACE_FORBIDDEN",
+        "Review history can only be viewed in the owning Workspace.",
+      );
+    }
+    const report = await loadGuardrailReport(store, snapshotId);
+    const expectedSubjects = new Map(
+      report.findings.map((finding) => [finding.id, guardrailFindingSubjectKey(finding)]),
+    );
+    if (query.findingId && !expectedSubjects.has(query.findingId)) {
+      throw new DomainError(
+        "GUARDRAIL_FINDING_NOT_FOUND",
+        "The requested Finding does not belong to this Snapshot.",
+      );
+    }
+    if (typeof store.listGuardrailReviewHistory !== "function") {
+      throw new DomainError(
+        "GUARDRAIL_REVIEW_HISTORY_UNAVAILABLE",
+        "Guardrail review history is unavailable on this server.",
+        { retryable: true },
+      );
+    }
+    const history = await store.listGuardrailReviewHistory(principal.workspaceId, snapshotId, {
+      limit: query.limit,
+      ...(query.cursor ? { cursor: query.cursor } : {}),
+      ...(query.findingId ? { findingId: query.findingId } : {}),
+      ...(query.findingId ? { subjectKey: expectedSubjects.get(query.findingId) as string } : {}),
+      ...(query.status ? { status: query.status } : {}),
+    });
+    const entries = history.entries.filter(
+      (entry) => expectedSubjects.get(entry.findingId) === entry.subjectKey,
+    );
+    return reply
+      .header("Cache-Control", "private, no-store")
+      .send(response(request, { entries, nextCursor: history.nextCursor }));
+  });
+
   app.put("/v1/snapshots/:snapshotId/guardrails/reviews/:findingId", async (request, reply) => {
     const { snapshotId, findingId } = parseInput(guardrailReviewParamsSchema, request.params);
     const body = parseInput(updateGuardrailReviewRequestSchema, request.body);
@@ -1436,6 +1488,7 @@ export function registerRoutes(
         findingId,
         actorUserId: principal.userId,
         actorKind: principal.kind,
+        notificationMaxAttempts: config.NOTIFICATION_MAX_ATTEMPTS,
       });
       review = {
         findingId,
@@ -1463,6 +1516,7 @@ export function registerRoutes(
         note: body.note,
         reviewedBy: principal.userId,
         actorKind: principal.kind,
+        notificationMaxAttempts: config.NOTIFICATION_MAX_ATTEMPTS,
       });
     }
     return reply
@@ -1503,6 +1557,7 @@ export function registerRoutes(
       findingId,
       actorUserId: principal.userId,
       actorKind: principal.kind,
+      notificationMaxAttempts: config.NOTIFICATION_MAX_ATTEMPTS,
     });
     return reply
       .header(
@@ -1698,7 +1753,7 @@ export function registerRoutes(
     const access = await requireSnapshotAccess(request, store, snapshotId);
     const report = await loadGuardrailReport(store, snapshotId);
     const reviewData = await loadGuardrailReviews(store, snapshotId, access.workspaceId, report);
-    const body = JSON.stringify(buildSarifReport(report, "1.2.0", reviewData.reviews), null, 2);
+    const body = JSON.stringify(buildSarifReport(report, "1.3.0", reviewData.reviews), null, 2);
     const etag = `"sha256-${createHash("sha256").update(body).digest("base64url")}"`;
     return reply
       .header(

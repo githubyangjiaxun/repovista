@@ -15,7 +15,7 @@ code or live credentials unless the owner explicitly provides a secure transfer 
 
 Include the affected version or commit, reproduction steps, impact, and any suggested mitigation.
 
-## Current security boundary (v1.2)
+## Current security boundary (v1.3)
 
 RepoVista keeps an anonymous public demo and also supports authenticated team Workspaces. Private
 repositories are available only through a connected GitHub App installation and an authenticated
@@ -43,6 +43,15 @@ Demo is read-only. The server recomputes the current Finding and subject key; cl
 severity, thresholds, metrics, or provenance. Review notes are bounded plain text, are not sent to AI
 providers, and are not copied into append-only audit metadata. SARIF/JSON exports label deterministic
 analysis separately from review metadata; reviews never alter CI status or exit codes.
+
+Review history is an append-only projection containing only status transitions, bounded note lengths,
+and actor summaries. Notification Webhooks are Workspace-scoped and signed with an endpoint-derived HMAC
+secret. Secrets are shown once, never stored in PostgreSQL, and are not written to URLs, logs, audit
+metadata, or payload bodies. Outbound delivery is asynchronous and bounded by an idempotent outbox,
+lease ownership, retry limits, request timeouts, `redirect: error`, and DNS/IP checks that reject loopback,
+private, link-local, and cloud-metadata addresses. Payloads omit review note text, source code, model
+prompts/answers, and credentials. Operators must still provide egress filtering and network isolation;
+DNS checks alone do not replace a hardened production network.
 
 Imported repositories are hostile input. The implementation must not:
 

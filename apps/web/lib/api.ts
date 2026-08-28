@@ -12,8 +12,13 @@ import type {
   GuardrailExplanationSummary,
   GuardrailReport,
   GuardrailReview,
+  GuardrailReviewHistoryPage,
   GuardrailReviewsResponse,
   Job,
+  NotificationDelivery,
+  NotificationDeliveryPage,
+  NotificationEndpoint,
+  NotificationEventType,
   PullRequestAnalysis,
   PullRequestFileChange,
   PullRequestImpact,
@@ -316,6 +321,13 @@ export type {
   GuardrailReview,
   GuardrailReviewsResponse,
 };
+export type {
+  GuardrailReviewHistoryPage,
+  NotificationDelivery,
+  NotificationDeliveryPage,
+  NotificationEndpoint,
+  NotificationEventType,
+};
 
 export interface GuardrailExplanationResult {
   explanation: GuardrailExplanation;
@@ -325,6 +337,113 @@ export interface GuardrailExplanationResult {
 export type { CreateEmbeddingIndexResponse, RetrievalStatus, SearchResult };
 export type { GuardrailReport };
 export type { GuardrailComparison };
+
+export interface CreateNotificationEndpointResult {
+  endpoint: NotificationEndpoint;
+  signingSecret: string;
+}
+
+export async function listGuardrailReviewHistory(
+  snapshotId: string,
+  options: {
+    findingId?: string;
+    status?: GuardrailReview["status"];
+    cursor?: string;
+    limit?: number;
+  } = {},
+): Promise<GuardrailReviewHistoryPage> {
+  const query = new URLSearchParams();
+  if (options.findingId) query.set("findingId", options.findingId);
+  if (options.status) query.set("status", options.status);
+  if (options.cursor) query.set("cursor", options.cursor);
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return apiFetch<GuardrailReviewHistoryPage>(
+    `/v1/snapshots/${encodeURIComponent(snapshotId)}/guardrails/reviews/history${suffix}`,
+    { cache: "no-store" },
+  );
+}
+
+export async function listNotificationEndpoints(
+  workspaceId: string,
+): Promise<NotificationEndpoint[]> {
+  return apiFetch<NotificationEndpoint[]>(
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/notification-endpoints`,
+    { cache: "no-store" },
+  );
+}
+
+export async function createNotificationEndpoint(
+  workspaceId: string,
+  input: {
+    name: string;
+    url: string;
+    eventTypes?: NotificationEventType[];
+    enabled?: boolean;
+  },
+): Promise<CreateNotificationEndpointResult> {
+  return apiFetch<CreateNotificationEndpointResult>(
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/notification-endpoints`,
+    { method: "POST", body: JSON.stringify(input) },
+  );
+}
+
+export async function updateNotificationEndpoint(
+  workspaceId: string,
+  endpointId: string,
+  input: {
+    name?: string;
+    url?: string;
+    eventTypes?: NotificationEventType[];
+    enabled?: boolean;
+  },
+): Promise<NotificationEndpoint> {
+  return apiFetch<NotificationEndpoint>(
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/notification-endpoints/${encodeURIComponent(endpointId)}`,
+    { method: "PATCH", body: JSON.stringify(input) },
+  );
+}
+
+export async function deleteNotificationEndpoint(
+  workspaceId: string,
+  endpointId: string,
+): Promise<void> {
+  await apiFetch<void>(
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/notification-endpoints/${encodeURIComponent(endpointId)}`,
+    { method: "DELETE" },
+  );
+}
+
+export async function testNotificationEndpoint(
+  workspaceId: string,
+  endpointId: string,
+): Promise<NotificationDelivery> {
+  return apiFetch<NotificationDelivery>(
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/notification-endpoints/${encodeURIComponent(endpointId)}/test`,
+    { method: "POST", body: JSON.stringify({}) },
+  );
+}
+
+export async function listNotificationDeliveries(
+  workspaceId: string,
+  options: {
+    endpointId?: string;
+    status?: NotificationDelivery["status"];
+    cursor?: string;
+    limit?: number;
+  } = {},
+): Promise<NotificationDeliveryPage> {
+  const query = new URLSearchParams();
+  if (options.endpointId) query.set("endpointId", options.endpointId);
+  if (options.status) query.set("status", options.status);
+  if (options.cursor) query.set("cursor", options.cursor);
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  return apiFetch<NotificationDeliveryPage>(
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/notification-deliveries${suffix}`,
+    { cache: "no-store" },
+  );
+}
 
 export interface ShareReport {
   id: string;

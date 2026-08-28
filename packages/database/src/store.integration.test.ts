@@ -17,6 +17,7 @@ integration("RepoVistaStore with PostgreSQL", () => {
   let store: RepoVistaStore;
   const repositoryIds = new Set<string>();
   const guardrailProfileIds = new Set<string>();
+  const notificationEndpointIds = new Set<string>();
 
   beforeAll(async () => {
     if (!databaseUrl) throw new Error("DATABASE_TEST_URL is required.");
@@ -37,6 +38,11 @@ integration("RepoVistaStore with PostgreSQL", () => {
     if (guardrailProfileIds.size > 0) {
       await pool.query("DELETE FROM guardrail_profiles WHERE id = ANY($1::uuid[])", [
         [...guardrailProfileIds],
+      ]);
+    }
+    if (notificationEndpointIds.size > 0) {
+      await pool.query("DELETE FROM workspace_notification_endpoints WHERE id = ANY($1::uuid[])", [
+        [...notificationEndpointIds],
       ]);
     }
     await pool?.end();
@@ -367,6 +373,21 @@ integration("RepoVistaStore with PostgreSQL", () => {
         },
       ],
     };
+    const notificationEndpoint = await store.createNotificationEndpoint({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      name: `Integration relay ${suffix}`,
+      url: "https://hooks.example.com/repovista-integration",
+      eventTypes: ["guardrail_review.updated", "guardrail_review.cleared"],
+      enabled: true,
+      createdBy: PUBLIC_USER_ID,
+      actorKind: "system",
+    });
+    notificationEndpointIds.add(notificationEndpoint.id);
+    expect(notificationEndpoint).toMatchObject({
+      workspaceId: PUBLIC_WORKSPACE_ID,
+      eventTypes: ["guardrail_review.updated", "guardrail_review.cleared"],
+    });
+    expect(notificationEndpoint).not.toHaveProperty("signingSecret");
     const createdExplanation = await store.createGuardrailExplanation({
       workspaceId: PUBLIC_WORKSPACE_ID,
       snapshotId: job.snapshotId,
@@ -435,6 +456,7 @@ integration("RepoVistaStore with PostgreSQL", () => {
       note: "  Keep the boundary until the next refactor.  ",
       reviewedBy: PUBLIC_USER_ID,
       actorKind: "system" as const,
+      notificationMaxAttempts: 3,
     };
     const savedReview = await store.upsertGuardrailReview(reviewInput);
     expect(savedReview).toMatchObject({
@@ -452,6 +474,48 @@ integration("RepoVistaStore with PostgreSQL", () => {
     expect(new Set(concurrentReviews.map((item) => item.status))).toEqual(
       new Set(["acknowledged"]),
     );
+    const queuedDeliveries = await store.listNotificationDeliveries(PUBLIC_WORKSPACE_ID, {
+      endpointId: notificationEndpoint.id,
+      limit: 50,
+    });
+    expect(queuedDeliveries.deliveries.length).toBe(3);
+    expect(queuedDeliveries.deliveries.every((item) => item.status === "queued")).toBe(true);
+    expect(queuedDeliveries.deliveries.every((item) => item.maxAttempts === 3)).toBe(true);
+    const rawNotificationPayloads = await pool.query<{ payload_json: Record<string, unknown> }>(
+      "SELECT payload_json FROM notification_deliveries WHERE endpoint_id = $1",
+      [notificationEndpoint.id],
+    );
+    expect(JSON.stringify(rawNotificationPayloads.rows)).not.toContain("Keep the boundary");
+    expect(rawNotificationPayloads.rows[0]?.payload_json).toMatchObject({
+      schemaVersion: "repovista.notification.v1",
+      transition: { toStatus: expect.any(String) },
+    });
+    const claimedNotification = await store.claimNotificationDelivery(
+      `integration-notification-${suffix}`,
+      30,
+    );
+    expect(claimedNotification).toMatchObject({ endpointId: notificationEndpoint.id });
+    if (!claimedNotification) throw new Error("Expected a claimed notification delivery.");
+    expect(
+      await store.heartbeatNotificationDelivery(
+        claimedNotification.id,
+        `integration-notification-${suffix}`,
+        30,
+      ),
+    ).toBe(true);
+    expect(
+      await store.completeNotificationDelivery(
+        claimedNotification.id,
+        `integration-notification-${suffix}`,
+        204,
+      ),
+    ).toBe(true);
+    const completedDeliveries = await store.listNotificationDeliveries(PUBLIC_WORKSPACE_ID, {
+      endpointId: notificationEndpoint.id,
+      status: "succeeded",
+      limit: 50,
+    });
+    expect(completedDeliveries.deliveries).toHaveLength(1);
     const listedReviews = await store.listGuardrailReviews(PUBLIC_WORKSPACE_ID, job.snapshotId);
     expect(listedReviews).toHaveLength(1);
     expect(listedReviews[0]).toMatchObject({ status: "acknowledged" });
@@ -485,6 +549,34 @@ integration("RepoVistaStore with PostgreSQL", () => {
     await expect(store.listGuardrailReviews(PUBLIC_WORKSPACE_ID, job.snapshotId)).resolves.toEqual(
       [],
     );
+    const reviewHistory = await store.listGuardrailReviewHistory(
+      PUBLIC_WORKSPACE_ID,
+      job.snapshotId,
+      { findingId: finding.id, subjectKey: expectedSubjectKey, limit: 2 },
+    );
+    expect(reviewHistory.entries).toHaveLength(2);
+    expect(reviewHistory.nextCursor).not.toBeNull();
+    const reviewHistoryRest = await store.listGuardrailReviewHistory(
+      PUBLIC_WORKSPACE_ID,
+      job.snapshotId,
+      {
+        findingId: finding.id,
+        subjectKey: expectedSubjectKey,
+        limit: 10,
+        cursor: reviewHistory.nextCursor ?? undefined,
+      },
+    );
+    const allReviewHistory = [...reviewHistory.entries, ...reviewHistoryRest.entries];
+    expect(allReviewHistory.length).toBe(4);
+    expect(allReviewHistory.some((entry) => entry.action === "guardrail_review.clear")).toBe(true);
+    expect(allReviewHistory.every((entry) => entry.subjectKey === expectedSubjectKey)).toBe(true);
+    expect(JSON.stringify(allReviewHistory)).not.toContain("Keep the boundary");
+    await expect(
+      store.listGuardrailReviewHistory(PUBLIC_WORKSPACE_ID, job.snapshotId, {
+        limit: 2,
+        cursor: "not-a-valid-cursor",
+      }),
+    ).rejects.toMatchObject({ code: "PAGINATION_CURSOR_INVALID" });
 
     const alternateExplanation = await store.createGuardrailExplanation({
       workspaceId: PUBLIC_WORKSPACE_ID,
@@ -729,6 +821,16 @@ integration("RepoVistaStore with PostgreSQL", () => {
     expect(incrementalGraph?.files).toHaveLength(1);
     expect(incrementalGraph?.symbols).toHaveLength(2);
     expect(updatedRepository?.latestSnapshotId).toBe(incrementalJob.snapshotId);
+    await store.deleteNotificationEndpoint(
+      PUBLIC_WORKSPACE_ID,
+      notificationEndpoint.id,
+      PUBLIC_USER_ID,
+      "system",
+    );
+    notificationEndpointIds.delete(notificationEndpoint.id);
+    await expect(
+      store.getNotificationEndpoint(PUBLIC_WORKSPACE_ID, notificationEndpoint.id),
+    ).resolves.toBeNull();
   });
 
   it("claims an explicitly selected index job without consuming an earlier queued job", async () => {

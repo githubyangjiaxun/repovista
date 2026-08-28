@@ -27,6 +27,23 @@ The map, source browser, search, reading path, and share reports remain useful w
 key. The default `fake` provider is a transparent deterministic evidence summarizer, so the full
 workflow can be evaluated locally before connecting Ollama or an OpenAI-compatible endpoint.
 
+## What v1.3 adds
+
+- An append-only Review timeline with cursor pagination, Snapshot/Finding isolation, and status/note-length
+  transitions that never expose the original note body.
+- Workspace-signed Webhook endpoints for `guardrail_review.updated` and `guardrail_review.cleared`, with
+  one-time secret display, outbox idempotency, leases, bounded retries, delivery history, and test events.
+- Worker-side HTTPS/SSRF protections, DNS resolution checks, redirect rejection, request timeouts, and
+  HMAC headers (`X-RepoVista-Timestamp` and `X-RepoVista-Signature`).
+- CLI and Settings workflows for review history, endpoint administration, delivery inspection, and Viewer-safe
+  read access. Forward migration `0010_notifications.sql` keeps notification payloads free of notes, source,
+  model output, and credentials.
+
+The notification layer transports collaboration events; it is not an AI or CI quality signal. See the
+[v1.3 plan](docs/releases/v1.3-开发计划.md), [backend contract](docs/backend/v1.3后端开发文档.md),
+[database design](docs/database/v1.3数据库设计.md), [frontend document](docs/frontend/v1.3前端开发文档.md),
+[AI trust boundary](docs/ai/v1.3人审与AI可信边界.md), and [acceptance record](docs/releases/v1.3-验收记录.md).
+
 ## What v1.2 adds
 
 - Reviewable Guardrails metadata with `acknowledged`, `accepted_risk`, and `false_positive` states,
@@ -340,9 +357,12 @@ flowchart LR
     API --> Embed[Ollama / OpenAI-compatible embeddings]
     API --> Export[Deterministic Markdown / SVG]
     API --> Story[Deterministic Architecture Story]
+    API --> Outbox[Signed notification outbox]
     Worker[Index Worker] --> PG
     Worker --> Embed
     Worker --> Git[Safe shallow Git clone]
+    Worker --> Notify[Validated Webhook endpoints]
+    Notify --> External[Team systems / CI]
     Git --> Plan[Content-hash incremental plan]
     Plan --> Parser[Tree-sitter TS / JS / Python / Go]
     Parser --> Graph[Complete package / file / symbol graph]
@@ -358,7 +378,7 @@ apps/web       Next.js repository explorer and Evidence Retrieval Lab
 apps/api       Fastify HTTP API, retrieval, story, and grounded-answer orchestration
 apps/worker    leased source-index and resumable embedding-index worker
 apps/cli       command-line client
-packages/*     contracts, database, Git, parser, graph, embeddings, retrieval, story, AI, exporter, UI
+packages/*     contracts, database, Git, parser, graph, embeddings, retrieval, story, AI, exporter, notifications, UI
 openapi/       checked API contract
 benchmarks/    parser baseline and deterministic retrieval-quality harness
 ```
@@ -395,7 +415,7 @@ docker compose config --quiet
 DATABASE_TEST_URL=postgresql://repovista:repovista@localhost:5432/repovista pnpm test
 ```
 
-`pnpm check` validates the 61-operation OpenAPI contract, formatting/lint rules, TypeScript,
+`pnpm check` validates the 72-operation OpenAPI contract, formatting/lint rules, TypeScript,
 unit/integration tests that have their required environment, and production builds. Playwright
 covers import, incremental progress, Python source navigation, map/source exploration, grounded
 answers, sharing, repository listing, deterministic Markdown/SVG downloads, pull-request impact
@@ -418,6 +438,10 @@ Imported repositories are hostile input. RepoVista:
 - enforces file count, total byte, individual file, and job-time limits;
 - treats repository text as data, not model instructions;
 - validates every model evidence ID against retrieved source before returning citations.
+- validates notification URLs and resolved DNS addresses, rejects loopback/private/link-local/metadata targets,
+  does not follow redirects, and keeps Webhook secrets out of PostgreSQL and logs;
+- keeps notification payloads to bounded event metadata and status transitions; Review note text is never sent
+  to a model or external Webhook.
 
 Installation tokens and API token/session raw values are never persisted. Read [SECURITY.md](./SECURITY.md)
 for the threat model and deployment requirements.
@@ -447,6 +471,12 @@ Read [SECURITY.md](./SECURITY.md) before reporting a vulnerability.
 - [v0.7 test and release plan](./docs/operations/v0.7测试与发布计划.md)
 - [v0.7 acceptance record](./docs/releases/v0.7-验收记录.md)
 - [Roadmap](./ROADMAP.md)
+- [v1.3 development plan](./docs/releases/v1.3-开发计划.md)
+- [v1.3 backend document](./docs/backend/v1.3后端开发文档.md)
+- [v1.3 database design](./docs/database/v1.3数据库设计.md)
+- [v1.3 frontend document](./docs/frontend/v1.3前端开发文档.md)
+- [v1.3 test and release plan](./docs/operations/v1.3测试与发布计划.md)
+- [v1.3 acceptance record](./docs/releases/v1.3-验收记录.md)
 
 The machine-readable API source of truth is [openapi/openapi.json](./openapi/openapi.json).
 
