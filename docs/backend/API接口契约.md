@@ -46,8 +46,9 @@ Cookie 与 Bearer 同时出现时统一返回 `AUTH_AMBIGUOUS`。完整机器契
 
 ### v0.5 Auth/Workspace 路由
 
-认证、Workspace、成员、Token、Audit 和 GitHub Installation 路由均已纳入 OpenAPI，共 49 个
-Operation。所有 UUID 资源查询先做 Workspace Access Check；无权资源使用稳定 404，不把 ID 是否存在
+认证、Workspace、成员、Token、Audit 和 GitHub Installation 路由在基础版本共 49 个 Operation，
+后续版本在此基础上增加 Guardrails、解释历史、Review 和导出路由。所有 UUID 资源查询先做 Workspace
+Access Check；无权资源使用稳定 404，不把 ID 是否存在
 泄露给其他 Workspace。私有 Share 只能由所属 Workspace 成员读取。
 
 ## 2. Operation 列表
@@ -93,15 +94,20 @@ Operation。所有 UUID 资源查询先做 Workspace Access Check；无权资源
 | POST | `/v1/share-reports` | 创建 Architecture Story v2 |
 | GET | `/v1/share-reports/{slug}` | 读取 v1 Tour 或 v2 Story |
 
-共 49 个 Operation。
+基础路由共 49 个 Operation；当前完整契约共 65 个 Operation。
 
 v0.6 增加两个 Snapshot 派生读接口；v0.7 增加一个基线比较接口；v0.8 增加五个策略 Profile
-接口；v0.9 增加两个解释接口；v1.0 增加历史和解释比较接口，共 61 个 Operation：
+接口；v0.9 增加两个解释接口；v1.0 增加历史和解释比较接口；v1.2 增加 Review/JSON 导出接口，
+共 65 个 Operation：
 
 | Method | Path | 用途 |
 |---|---|---|
 | GET | `/v1/snapshots/{snapshotId}/guardrails` | 计算并返回固定阈值的 Architecture Guardrails JSON 报告 |
 | GET | `/v1/snapshots/{snapshotId}/guardrails/sarif` | 下载同一报告的 SARIF 2.1.0 表示 |
+| GET | `/v1/snapshots/{snapshotId}/guardrails/json` | 下载确定性报告与独立 Review 元数据的 JSON 表示 |
+| GET | `/v1/snapshots/{snapshotId}/guardrails/reviews` | 列出当前 Snapshot 每个 Finding 的 Review 状态 |
+| PUT | `/v1/snapshots/{snapshotId}/guardrails/reviews/{findingId}` | 设置或清除一个 Finding 的 Review 状态和备注 |
+| DELETE | `/v1/snapshots/{snapshotId}/guardrails/reviews/{findingId}` | 幂等清除 Review，恢复 `unreviewed` |
 | GET | `/v1/snapshots/{snapshotId}/guardrails/compare?baseSnapshotId=...` | 比较同一 Repository 的两个 Ready Snapshot，返回 Finding 状态和回归摘要 |
 
 v0.8 策略 Profile 路由：
@@ -156,6 +162,10 @@ Repository、Rule 或 Finding JSON。历史按 `createdAt DESC, id DESC` 使用 
 写入新解释或审计创建事件，也不输出“改进、退步、胜者”。两个 GET 均允许 Viewer 读取；跨
 Workspace/Repository、缺失记录和不同 `subjectKey` 使用稳定 Not Found/Conflict 边界。私有响应为
 `private, no-store`，公开 Demo 为 `public, max-age=0, must-revalidate`。
+
+v1.2 Review 接口只接受服务端当前 Report 中存在的 Finding。Review metadata 与确定性分析分离，
+不会改变 Finding、`pass/warn/fail`、SARIF `level` 或 CLI CI 退出码；匿名用户只能读取公开 Snapshot，
+Bundled Demo 禁止写入。备注限制为 2,000 个 Unicode 字符，写入追加脱敏审计事件。
 
 ## 3. 创建分析
 

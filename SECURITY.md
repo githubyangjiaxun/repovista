@@ -15,7 +15,7 @@ code or live credentials unless the owner explicitly provides a secure transfer 
 
 Include the affected version or commit, reproduction steps, impact, and any suggested mitigation.
 
-## Current security boundary (v1.1)
+## Current security boundary (v1.2)
 
 RepoVista keeps an anonymous public demo and also supports authenticated team Workspaces. Private
 repositories are available only through a connected GitHub App installation and an authenticated
@@ -36,6 +36,13 @@ Every repository-derived resource (Snapshot, Job, PR Analysis, Source, Export, A
 checked against the Principal's Workspace before the business query. Cross-Workspace IDs return a
 stable Not Found response. Private Share reports require Workspace membership and are marked
 `noindex`/`noarchive` by the Web app.
+
+Guardrail human reviews are separate Workspace metadata. Only authenticated Editor/Owner principals
+or scoped write Tokens can set/clear them, browser Sessions require CSRF verification, and the bundled
+Demo is read-only. The server recomputes the current Finding and subject key; clients cannot submit
+severity, thresholds, metrics, or provenance. Review notes are bounded plain text, are not sent to AI
+providers, and are not copied into append-only audit metadata. SARIF/JSON exports label deterministic
+analysis separately from review metadata; reviews never alter CI status or exit codes.
 
 Imported repositories are hostile input. The implementation must not:
 

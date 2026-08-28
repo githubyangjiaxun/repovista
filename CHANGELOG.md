@@ -7,6 +7,25 @@ Keep a Changelog structure.
 
 No unreleased changes.
 
+## [1.2.0] - 2026-08-28
+
+### Added
+
+- Workspace-scoped human Guardrail reviews with bounded notes, role/CSRF protection, Demo read-only
+  behavior, and audit events.
+- SARIF review properties and a separate deterministic/review JSON export.
+- Web controls and CLI `guardrails reviews list/set/clear` commands.
+- Forward migration `0009_guardrail_reviews.sql` and complete contract/API/OpenAPI documentation.
+
+### Security and trust boundary
+
+- Review metadata never changes deterministic Finding severity, report status, CI exit codes, or model
+  verification. Notes are plain text, are not sent to providers, and are omitted from audit bodies.
+- Private review responses use `no-store`; cross-Workspace and foreign Finding access is denied.
+
+See the [v1.2 acceptance record](docs/releases/v1.2-验收记录.md) for reproducible quality gates,
+isolated PostgreSQL evidence, export invariants, and the explicit external-integration boundary.
+
 ## [1.1.0] - 2026-08-27
 
 ### Added

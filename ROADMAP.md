@@ -75,8 +75,18 @@
 - [Done](./docs/releases/v1.1-开发计划.md) One-command Compose demo, homepage entry, and API smoke verification.
 - [Done](./docs/releases/v1.1-开发计划.md) Contributor workflow and documented hardened deployment overlay.
 
+## v1.2 — Reviewable Guardrails（implemented 2026-08-28）
+
+- [Done](./docs/releases/v1.2-开发计划.md) Workspace-scoped human review labels, bounded notes, and
+  append-only audit events with Viewer/Editor/Owner and CSRF boundaries.
+- [Done](./docs/releases/v1.2-开发计划.md) Deterministic SARIF/JSON exports carrying review metadata
+  without changing Finding severity, report status, or CI decisions.
+- [Done](./docs/releases/v1.2-开发计划.md) Web and CLI review workflows, migration `0009`, tests, and
+  release evidence.
+
 ## Next candidates
 
-- Optional human review labels and export formats that remain separate from deterministic CI decisions.
+- Review history timeline and optional team notification integrations, keeping deterministic analysis
+  and human metadata separate.
 
 Roadmap ordering may change based on measured usage and contributor feedback.

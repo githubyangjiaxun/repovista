@@ -27,6 +27,20 @@ The map, source browser, search, reading path, and share reports remain useful w
 key. The default `fake` provider is a transparent deterministic evidence summarizer, so the full
 workflow can be evaluated locally before connecting Ollama or an OpenAI-compatible endpoint.
 
+## What v1.2 adds
+
+- Reviewable Guardrails metadata with `acknowledged`, `accepted_risk`, and `false_positive` states,
+  Workspace isolation, CSRF/role checks, and append-only audit events.
+- Deterministic SARIF and JSON exports that keep human review metadata separate from the
+  `pass`/`warn`/`fail` analysis and CI decision.
+- Web review controls and CLI `guardrails reviews list/set/clear` workflows. Review notes are bounded
+  plain text and never sent to a model or used to alter findings.
+- Forward migration `0009_guardrail_reviews.sql`; the bundled Demo remains read-only for reviews.
+
+The review layer is collaboration metadata, not an AI quality score. See the [v1.2 plan](docs/releases/v1.2-开发计划.md),
+[backend contract](docs/backend/v1.2后端开发文档.md), [AI trust boundary](docs/ai/v1.2人审与AI可信边界.md),
+and [acceptance record](docs/releases/v1.2-验收记录.md).
+
 ## What v1.1 adds
 
 - A bundled, reviewable two-revision TypeScript/Python/Go fixture that is indexed through the same
