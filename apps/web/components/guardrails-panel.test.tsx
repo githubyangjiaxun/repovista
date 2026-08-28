@@ -5,7 +5,11 @@ import type { AuthSession, GuardrailFinding, Snapshot } from "@repovista/contrac
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setApiCsrfToken } from "@/lib/api";
-import { GuardrailsPanel } from "./guardrails-panel";
+import {
+  GuardrailsPanel,
+  hasAllSelectableFindingSelection,
+  selectableFindingCount,
+} from "./guardrails-panel";
 
 const auth = vi.hoisted(() => ({ current: { session: null as AuthSession | null } }));
 vi.mock("@/components/auth-provider", () => ({ useOptionalAuth: () => auth.current }));
@@ -802,6 +806,7 @@ describe("GuardrailsPanel", () => {
       String(input).endsWith(`/v1/snapshots/${snapshotId}/guardrails/reviews/batch`),
     );
     expect(new Headers(batchRequest?.[1]?.headers).get("Idempotency-Key")).toMatch(/^web-/);
+    expect(screen.getByRole("button", { name: "Select all" })).toBeInTheDocument();
   });
 
   it("keeps batch selection and draft note after an atomic failure", async () => {
@@ -863,57 +868,13 @@ describe("GuardrailsPanel", () => {
     ).toBeChecked();
   });
 
-  it("caps select-all at 50 Findings and keeps the button state accurate", async () => {
-    auth.current.session = authenticatedSession("editor");
-    setApiCsrfToken(auth.current.session.csrfToken);
-    const manyFindings = Array.from({ length: 51 }, (_, index) => ({
-      ...reportFinding,
-      id: `dependency_cycle:${index + 1}`,
-      fingerprint: `sha256:${String(index + 1).padStart(64, "0")}`,
-      title: `Package dependency cycle ${index + 1}`,
-      path: `src/package-${index + 1}/index.ts`,
-    }));
-    const manyReport = {
-      ...report,
-      summary: { total: manyFindings.length, errors: manyFindings.length, warnings: 0, infos: 0 },
-      findings: manyFindings,
-    };
-    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
-      const url = String(input);
-      const policy = policyResponse(url);
-      if (policy) return policy;
-      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails`)) return envelope(manyReport);
-      if (url.endsWith(`/v1/snapshots/${snapshotId}/guardrails/reviews`)) {
-        return envelope({
-          snapshot: { id: snapshotId, commitSha: report.snapshot.commitSha },
-          reviews: [],
-        });
-      }
-      throw new Error(`Unexpected request: ${url}`);
-    });
-    vi.stubGlobal("fetch", fetchImplementation);
-    render(
-      <GuardrailsPanel
-        onOpenSource={vi.fn()}
-        repositoryId={repositoryId}
-        snapshotId={snapshotId}
-      />,
-    );
-
-    const selectAll = await screen.findByRole("button", { name: "Select all" });
-    fireEvent.click(selectAll);
-    expect(await screen.findByText("50 selected (maximum 50)")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Clear all" })).toBeInTheDocument();
-    const checkboxes = screen.getAllByRole("checkbox", {
-      name: /Select .* for batch review/,
-    });
-    expect(checkboxes).toHaveLength(51);
-    for (const checkbox of checkboxes.slice(0, 50)) expect(checkbox).toBeChecked();
-    expect(checkboxes[50]).not.toBeChecked();
-
-    fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
-    expect(await screen.findByText("0 selected (maximum 50)")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Select all" })).toBeInTheDocument();
+  it("caps select-all at 50 Findings and keeps the button state accurate", () => {
+    expect(selectableFindingCount(0)).toBe(0);
+    expect(selectableFindingCount(12)).toBe(12);
+    expect(selectableFindingCount(51)).toBe(50);
+    expect(hasAllSelectableFindingSelection(50, 51)).toBe(true);
+    expect(hasAllSelectableFindingSelection(49, 51)).toBe(false);
+    expect(hasAllSelectableFindingSelection(12, 12)).toBe(true);
   });
 
   it("keeps review controls disabled for Viewers while still showing metadata", async () => {

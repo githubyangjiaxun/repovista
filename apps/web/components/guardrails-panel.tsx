@@ -44,6 +44,18 @@ function metricText(metric: Record<string, string | number>): string {
 }
 
 const EXPLANATION_HISTORY_PAGE_SIZE = 10;
+export const MAX_BATCH_REVIEW_FINDINGS = 50;
+
+export function selectableFindingCount(findingCount: number): number {
+  return Math.min(Math.max(findingCount, 0), MAX_BATCH_REVIEW_FINDINGS);
+}
+
+export function hasAllSelectableFindingSelection(
+  selectedCount: number,
+  findingCount: number,
+): boolean {
+  return selectedCount === selectableFindingCount(findingCount);
+}
 
 interface ExplanationSelection {
   baseId: string;
@@ -633,18 +645,18 @@ export function GuardrailsPanel({
     setSelectedFindingIds((current) => {
       const next = new Set(current);
       if (next.has(findingId)) next.delete(findingId);
-      else if (next.size < 50) next.add(findingId);
+      else if (next.size < MAX_BATCH_REVIEW_FINDINGS) next.add(findingId);
       return next;
     });
   }
 
   function toggleAllFindingSelection(): void {
     if (!report) return;
-    const selectableCount = Math.min(report.findings.length, 50);
+    const selectableCount = selectableFindingCount(report.findings.length);
     setSelectedFindingIds((current) =>
       current.size === selectableCount
         ? new Set()
-        : new Set(report.findings.slice(0, 50).map((finding) => finding.id)),
+        : new Set(report.findings.slice(0, MAX_BATCH_REVIEW_FINDINGS).map((finding) => finding.id)),
     );
   }
 
@@ -1265,9 +1277,11 @@ export function GuardrailsPanel({
             <section className="guardrail-review-batch" aria-label="Batch review actions">
               <div className="guardrail-review-batch-heading">
                 <strong>Batch review</strong>
-                <span>{selectedFindingIds.size} selected (maximum 50)</span>
+                <span>
+                  {selectedFindingIds.size} selected (maximum {MAX_BATCH_REVIEW_FINDINGS})
+                </span>
                 <button onClick={toggleAllFindingSelection} type="button">
-                  {selectedFindingIds.size === Math.min(report.findings.length, 50)
+                  {hasAllSelectableFindingSelection(selectedFindingIds.size, report.findings.length)
                     ? "Clear all"
                     : "Select all"}
                 </button>
